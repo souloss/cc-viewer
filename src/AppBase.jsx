@@ -10,7 +10,7 @@ import { formatTokenCount, filterRelevantRequests, isRelevantRequest, appendCach
 import { isMainAgent, isPostClearCheckpoint } from './utils/contentFilter';
 import { apiUrl } from './utils/apiUrl';
 import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries, saveSessionIndex } from './utils/entryCache';
-import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps } from './utils/sessionManager';
+import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace } from './utils/sessionManager';
 import { mergeMainAgentSessions as _mergeMainAgentSessions } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../lib/delta-reconstructor.js';
 import { createEntrySlimmer, createIncrementalSlimmer, restoreSlimmedEntry, internEntryBigFields } from './utils/entry-slim.js';
@@ -1231,9 +1231,18 @@ class AppBase extends React.Component {
 
           // 赋 _timestamp 和 _generatedTs（assistant 角色新增 msg 拿 prevMainAgentTs 反映生成时 ts）
           assignMessageTimestamps(messages, prevMessages, isNewSession, prevCount, timestamp, this._prevMainAgentTs);
-          // SSE 实时追加：每条 entry 都已是完整 request+response，不存在中间态，
-          // 跳过 transient 过滤以避免误伤真实的 /clear → 短消息对话。
-          mainAgentSessions = this.mergeMainAgentSessions(mainAgentSessions, entry, { skipTransientFilter: true });
+          // 信号驱动短路：服务端已检测到末位替换（_inPlaceReplaceDetected:true）→ 直接 in-place
+          // 替换 lastSession.messages 末位，避开 sessionMerge prefix-overlap 算法在
+          // newLen===currentLen+末位fp异 场景必然 overlap=0 → push 整段 → 翻倍的陷阱。
+          // helper 协议详见 src/utils/sessionManager.js applyInPlaceLastMsgReplace JSDoc。
+          const inPlaceResult = applyInPlaceLastMsgReplace(mainAgentSessions, entry, timestamp, isNewSession);
+          if (inPlaceResult.applied) {
+            mainAgentSessions = inPlaceResult.sessions;
+          } else {
+            // SSE 实时追加：每条 entry 都已是完整 request+response，不存在中间态，
+            // 跳过 transient 过滤以避免误伤真实的 /clear → 短消息对话。
+            mainAgentSessions = this.mergeMainAgentSessions(mainAgentSessions, entry, { skipTransientFilter: true });
+          }
 
           // 记录本次 mainAgent entry 的 timestamp，给下一次 entry 处理时
           // 当作 _generatedTs 赋给新增 assistant msg（反映"生成时刻"）。

@@ -643,7 +643,11 @@ export function setupInterceptor() {
         requestEntry._isCheckpoint = true;
         if (_sameLenInPlaceReplace) {
           // 诊断字段：标记此 checkpoint 是被 in-place replace 检测触发的（频率约 1-2%，
-          // 用于在生产 jsonl 里事后核对触发率，不影响重建逻辑）
+          // 用于在生产 jsonl 里事后核对触发率，不影响重建逻辑）。
+          // 双方协议（KEEP IN SYNC: src/utils/sessionManager.js applyInPlaceLastMsgReplace）：
+          // 客户端 helper 看到此字段=true（与 _isCheckpoint:true 同时存在）时直接 in-place 替换
+          // lastSession.messages 末位，跳过 sessionMerge prefix-overlap 算法（避开 doubled-history）。
+          // 字段重命名 / 删除前需同步两端 + 重跑双向回归测试。
           requestEntry._inPlaceReplaceDetected = true;
         }
       } else {

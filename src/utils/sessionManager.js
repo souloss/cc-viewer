@@ -260,3 +260,76 @@ export function mergeSessionIndices(oldIndex, newIndex) {
 
   return merged;
 }
+
+/**
+ * 信号驱动的 in-place last-msg replace 短路。
+ *
+ * ─── 双方协议（KEEP IN SYNC: interceptor.js:644 / lib/interceptor-core.js:fingerprintMsg） ───
+ * 服务端 interceptor Plan C 在 wire 上检测到 mainAgent messages.length 不变但末位 fp 变化
+ * （典型：CLI idle 注入 SUGGESTION MODE 末位 → 用户敲入真实输入替换）时，强制写
+ * `_isCheckpoint: true` + `_inPlaceReplaceDetected: true` 完整 entry。
+ * 本 helper 是该信号在客户端的唯一消费方。如果 interceptor 端字段重命名 / 删除 / 语义改变，
+ * 必须同步本 helper（搜 `_inPlaceReplaceDetected` 跨两端）+ 更新本注释 + 跑
+ * test/interceptor-delta-tail-fp.test.js + test/session-manager.test.js 双端回归。
+ * ──────────────────────────────────────────────────────────────────────────────
+ *
+ * 客户端 sessionMerge 的 prefix-overlap 算法（src/utils/sessionMerge.js:113）在该场景下必然误判：
+ * newLen===currentLen + 末位 fp 异 → maxOv = newLen - 1 永远找不到 K=newLen 的全等匹配 →
+ * overlap=0 → push 整段 newMessages → lastSession.messages 长度翻倍（doubled-history BUG）。
+ *
+ * 修法：直接消费服务端明确信号，不走 sessionMerge 启发式算法。命中时构造新 lastSession，前
+ * N-1 条 message 元素引用复用（保留 _timestamp / _generatedTs 等所有 metadata），末位用
+ * entry.body.messages[N-1]。返回 `{ applied: true, sessions }` 表示已短路；未命中返回
+ * `{ applied: false }`，调用方走原 mergeMainAgentSessions 路径。
+ *
+ * 防回归（避开 1.6.249 拆 Layer 2 的两个坑）：
+ *   - 不靠客户端 fp 启发式判断（直接看服务端明确信号 _inPlaceReplaceDetected:true）
+ *   - 不覆盖整个 lastSession.messages（只替末位，保留前 N-1 引用）
+ *
+ * 守卫顺序（异常入参逐级 fallback 给 mergeMainAgentSessions 处理）：
+ *   1. 信号未命中（_inPlaceReplaceDetected/_isCheckpoint 非 true）
+ *   2. isNewSession（新 session 起点不应原地替换旧 session 末位）
+ *   3. prevSessions / lastSession.messages 异常
+ *   4. entry.body.messages 缺失
+ *   5. N < 2（只有 1 条消息时 "前 N-1 条" 退化为空，等价完全替换 → 让原路径处理更安全）
+ *   6. messages.length 与 lastSession.messages.length 不等
+ *   7. entry.response 缺失（inProgress 状态不应被信号触发；服务端 Plan C 仅在 completed 写信号，
+ *      此守卫是 belt+suspenders 防协议变化导致丢失 response 字段污染下游 ChatView Last Response）
+ *
+ * @param {Array} prevSessions
+ * @param {object} entry — mainAgent entry，需含 _inPlaceReplaceDetected / _isCheckpoint / body.messages
+ * @param {string} timestamp — entry 的 timestamp（用于赋新末位 message 的 _timestamp）
+ * @param {boolean} isNewSession — 是否新 session 起点（true 时不短路，让原路径处理）
+ * @returns {{ applied: boolean, sessions?: Array }}
+ */
+export function applyInPlaceLastMsgReplace(prevSessions, entry, timestamp, isNewSession) {
+  if (!entry || entry._inPlaceReplaceDetected !== true || entry._isCheckpoint !== true) {
+    return { applied: false };
+  }
+  if (isNewSession) return { applied: false };
+  if (!Array.isArray(prevSessions) || prevSessions.length === 0) return { applied: false };
+  const lastSession = prevSessions[prevSessions.length - 1];
+  if (!lastSession || !Array.isArray(lastSession.messages)) return { applied: false };
+  const messages = entry.body && Array.isArray(entry.body.messages) ? entry.body.messages : null;
+  if (!messages || messages.length < 2) return { applied: false };
+  if (messages.length !== lastSession.messages.length) return { applied: false };
+  // entry.response 缺失（inProgress 等异常）→ fallback，避免 newLastSession.response=undefined
+  // 污染下游 ChatView Last Response 渲染。服务端 Plan C 仅在 completed 写信号，正常情况这条守卫
+  // 不会命中；保留作为协议变更时的防御层。
+  if (!entry.response) return { applied: false };
+
+  const N = messages.length;
+  const stitched = lastSession.messages.slice(0, N - 1);
+  const newLastMsg = messages[N - 1];
+  if (newLastMsg && !newLastMsg._timestamp) newLastMsg._timestamp = timestamp;
+  stitched.push(newLastMsg);
+  const newLastSession = {
+    userId: lastSession.userId,
+    messages: stitched,
+    response: entry.response,
+    entryTimestamp: timestamp,
+  };
+  // 末位替换：返回新 sessions 数组保持原顺序、prev 长度不变。
+  // 下游 ChatView _sessionItemCache[last] 按 index 索引该 session，依赖 index 恒定不能错位。
+  return { applied: true, sessions: [...prevSessions.slice(0, -1), newLastSession] };
+}
