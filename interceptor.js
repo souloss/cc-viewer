@@ -1,5 +1,6 @@
 // LLM Request Interceptor
 // 拦截并记录所有Claude API请求
+// Wire format 协议详见 docs/WIRE_FORMAT.md（mainAgent entry 形态 / 关键字段 / 信号链路）
 
 // 非交互命令（如 claude -v, claude --help）不需要启动 ccv
 const _ccvSkipArgs = ['--version', '-v', '--v', '--help', '-h', 'doctor', 'install', 'update', 'upgrade', 'auth', 'setup-token', 'agents', 'plugin', 'plugins', 'mcp'];

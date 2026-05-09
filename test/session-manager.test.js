@@ -494,4 +494,86 @@ describe('applyInPlaceLastMsgReplace', () => {
     const result = applyInPlaceLastMsgReplace([session], entry, '2026-05-09T11:10:03Z', false);
     assert.equal(result.applied, false, 'N=1 时不应走 in-place 短路（前 N-1 退化为空 = 完全替换，不符合 helper 语义）');
   });
+
+  // 新增（review R3 任务 2 缺口）：_inPlaceReplaceDetected:true 但 _isCheckpoint 缺失/false
+  it('_inPlaceReplaceDetected=true 但 _isCheckpoint 缺失 → applied=false（双信号必须齐发）', () => {
+    const m0 = makeMsg('user', 'hi');
+    const m1 = makeMsg('assistant', 'old');
+    const session = makeSessionLocal([m0, m1]);
+    const m1_new = makeMsg('assistant', 'new');
+    const entry = {
+      _inPlaceReplaceDetected: true,
+      // _isCheckpoint: undefined ← 故意省略，模拟服务端协议变更或漏写
+      timestamp: '2026-05-09T11:10:03Z',
+      response: { status: 200, body: {} },
+      body: { messages: [m0, m1_new] },
+    };
+    const result = applyInPlaceLastMsgReplace([session], entry, '2026-05-09T11:10:03Z', false);
+    assert.equal(result.applied, false, '双信号未齐发不应短路（防服务端协议变更下 in-place 误触发污染下游）');
+  });
+
+  // 新增（D 块）：fallback 计数器机制 — 信号到达但守卫拒绝时计数应增加
+  it('fallback 计数器：信号到达但守卫拒绝时累加分类计数', () => {
+    // 重置计数防本次 case 之前累积干扰
+    applyInPlaceLastMsgReplace.fallbackCount = Object.create(null);
+    applyInPlaceLastMsgReplace.appliedCount = 0;
+
+    const m0 = makeMsg('user', 'hi');
+    const session = makeSessionLocal([m0]);
+
+    // 触发 length-mismatch 路径
+    const entry1 = {
+      _isCheckpoint: true,
+      _inPlaceReplaceDetected: true,
+      timestamp: '2026-05-09T11:10:03Z',
+      response: { status: 200, body: {} },
+      body: { messages: [m0, makeMsg('assistant', 'a'), makeMsg('user', 'b')] },
+    };
+    applyInPlaceLastMsgReplace([session], entry1, '2026-05-09T11:10:03Z', false);
+    assert.equal(applyInPlaceLastMsgReplace.fallbackCount['length-mismatch'], 1, 'length-mismatch 应计数');
+
+    // 触发 response-missing 路径
+    const session2 = makeSessionLocal([m0, makeMsg('assistant', 'a'), makeMsg('user', 'b')]);
+    const entry2 = {
+      _isCheckpoint: true,
+      _inPlaceReplaceDetected: true,
+      timestamp: '2026-05-09T11:10:03Z',
+      // response 缺失
+      body: { messages: [m0, makeMsg('assistant', 'a'), makeMsg('user', 'c')] },
+    };
+    applyInPlaceLastMsgReplace([session2], entry2, '2026-05-09T11:10:03Z', false);
+    assert.equal(applyInPlaceLastMsgReplace.fallbackCount['response-missing'], 1, 'response-missing 应计数');
+
+    // 触发 messages-too-short 路径
+    const entry3 = {
+      _isCheckpoint: true,
+      _inPlaceReplaceDetected: true,
+      timestamp: '2026-05-09T11:10:03Z',
+      response: { status: 200, body: {} },
+      body: { messages: [m0] },
+    };
+    applyInPlaceLastMsgReplace([session], entry3, '2026-05-09T11:10:03Z', false);
+    assert.equal(applyInPlaceLastMsgReplace.fallbackCount['messages-too-short'], 1, 'messages-too-short 应计数');
+
+    // 无信号路径不计数（防 SSE 高频流量淹没）
+    const entry4 = {
+      timestamp: '2026-05-09T11:10:03Z',
+      body: { messages: [m0] },
+    };
+    applyInPlaceLastMsgReplace([session], entry4, '2026-05-09T11:10:03Z', false);
+    assert.equal(applyInPlaceLastMsgReplace.fallbackCount['no-signal'], undefined, '无信号路径不应计入 fallbackCount');
+
+    // applied 路径累加 appliedCount
+    const session3 = makeSessionLocal([m0, makeMsg('assistant', 'old')]);
+    const entry5 = {
+      _isCheckpoint: true,
+      _inPlaceReplaceDetected: true,
+      timestamp: '2026-05-09T11:10:03Z',
+      response: { status: 200, body: {} },
+      body: { messages: [m0, makeMsg('assistant', 'new')] },
+    };
+    const result = applyInPlaceLastMsgReplace([session3], entry5, '2026-05-09T11:10:03Z', false);
+    assert.equal(result.applied, true);
+    assert.equal(applyInPlaceLastMsgReplace.appliedCount, 1, 'applied 路径应累加 appliedCount');
+  });
 });
