@@ -1100,9 +1100,6 @@ class ChatMessage extends React.Component {
                 ) : (
                   <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
                     <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                    {tr.resultText && (
-                      <div className={styles.dangerDeniedDetail}>{tr.resultText}</div>
-                    )}
                   </div>
                 )}
               </React.Fragment>
@@ -1117,9 +1114,6 @@ class ChatMessage extends React.Component {
                 ) : (
                   <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
                     <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                    {tr.resultText && (
-                      <div className={styles.dangerDeniedDetail}>{tr.resultText}</div>
-                    )}
                   </div>
                 )}
               </React.Fragment>

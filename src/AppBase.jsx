@@ -98,7 +98,7 @@ class AppBase extends React.Component {
       logDir: '',
       showFullToolContent: false,
       showThinkingSummaries: false,
-      themeColor: 'dark',
+      themeColor: 'light',
       claudeMissing: false,
       updateModalVisible: false,
       fileLoading: false,
@@ -376,21 +376,22 @@ class AppBase extends React.Component {
           return { approvalPrefs: next };
         });
       }
-      if (data.themeColor) {
-        this.setState({ themeColor: data.themeColor });
-        document.documentElement.setAttribute('data-theme', data.themeColor === 'light' ? 'light' : 'dark');
-      }
+      // hydrate：prefs 没保存过 themeColor 时回退到当前 state（首次安装是 'light'）。
+      // 不写回 prefs（这一路是从 prefs 读出来的），但写 localStorage 让 inline boot script 抢占。
+      const effective = (data.themeColor === 'light' || data.themeColor === 'dark')
+        ? data.themeColor
+        : this.state.themeColor;
+      this._applyTheme(effective);
       // filterIrrelevant 默认 true，showAll = !filterIrrelevant
       const filterIrrelevant = data.filterIrrelevant !== undefined ? !!data.filterIrrelevant : true;
       this.setState({ showAll: !filterIrrelevant });
       if (data.logDir) {
         this.setState({ logDir: data.logDir });
       }
-      // URL 参数覆盖主题（白名单校验防 XSS）
+      // URL 参数覆盖主题（白名单校验防 XSS）。一次性覆盖，不写回 prefs，但同步 localStorage。
       const urlTheme = new URLSearchParams(window.location.search).get('theme');
       if (urlTheme === 'light' || urlTheme === 'dark') {
-        this.setState({ themeColor: urlTheme });
-        document.documentElement.setAttribute('data-theme', urlTheme);
+        this._applyTheme(urlTheme);
       }
     });
 
@@ -1554,11 +1555,27 @@ class AppBase extends React.Component {
     this.context.updatePreferences({ approvalModal: next });
   };
 
+  /**
+   * 主题应用收口：state / <html data-theme> / localStorage 三处镜像同步。
+   * 三个调用方（hydrate / urlTheme / handleThemeColorChange）行为差异收敛到 opts。
+   *
+   * 幂等：setAttribute 只在值变化时调用，避免唤醒 TerminalPanel MutationObserver
+   *       重赋 xterm theme（80×24 cell 重算 1-3ms）。
+   */
+  _applyTheme = (value, opts = {}) => {
+    const theme = value === 'light' ? 'light' : 'dark';
+    const { persistPref = false, remountMermaid = false } = opts;
+    if (this.state.themeColor !== theme) this.setState({ themeColor: theme });
+    if (document.documentElement.getAttribute('data-theme') !== theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+    }
+    try { localStorage.setItem('ccv_themeColor', theme); } catch {}
+    if (remountMermaid) reinitializeMermaid();
+    if (persistPref) this.context.updatePreferences({ themeColor: theme });
+  };
+
   handleThemeColorChange = (value) => {
-    this.setState({ themeColor: value });
-    document.documentElement.setAttribute('data-theme', value === 'light' ? 'light' : 'dark');
-    reinitializeMermaid();
-    this.context.updatePreferences({ themeColor: value });
+    this._applyTheme(value, { persistPref: true, remountMermaid: true });
     // 切换主题后让终端获得焦点，便于用户看到 /theme 切换效果
     window.dispatchEvent(new CustomEvent('ccv-focus-terminal'));
   };

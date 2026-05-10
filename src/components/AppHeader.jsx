@@ -1514,7 +1514,7 @@ class AppHeader extends React.Component {
               <span className={styles.settingsLabel}>{t('ui.themeColor')}</span>
               <Select
                 size="small"
-                value={themeColor || 'dark'}
+                value={themeColor || 'light'}
                 onChange={(value) => onThemeColorChange && onThemeColorChange(value)}
                 options={[
                   { label: t('ui.themeColor.dark'), value: 'dark' },

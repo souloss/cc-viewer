@@ -2907,9 +2907,19 @@ class ChatView extends React.Component {
    * PTY-prompt 自检：用户 ESC dismiss modal 后 PTY buffer 可能已离开 inquirer ask 状态
    * （例如 Claude 已切换到下一行 user input prompt）。此时直接发 chunks 会被当成普通
    * user message → Claude 把 Other 自由文本视为"补充文本"卡死整个流程。
-   * 自检失败时调 _abortAskSubmitWithRollback 回滚乐观状态、唤回 modal 让用户重试。
+   *
+   * 但客户端 React state 的 ptyPrompt 推送是异步的，用户点 Submit 那一刻 state 可能
+   * 滞后于 PTY 实际状态（终端能正确接收，cc-viewer state 还没刷上）。所以分三层：
+   *   ① 第一次同步自检失败 → setTimeout 150ms 重试一次（让在路上的 ptyPrompt 推送追上）
+   *   ② 重试仍失败 → 从 `state.ptyPromptHistory` 找最新 status='active' 的合法 ask prompt 作兜底
+   *      （仅打 console.warn 不弹 modal，state.ptyPrompt 可能短暂为 null 但 history 仍有真值）
+   *   ③ 都找不到 → 硬阻断弹 modal（chunks 构造不出来，必须用户手动重试）
    */
   _submitViaSequentialQueue(answer, opts = {}) {
+    this._submitViaSequentialQueueInternal(answer, opts, 0);
+  }
+
+  _submitViaSequentialQueueInternal(answer, opts, retryCount) {
     const ctx = this.context;
     if (!ctx || !ctx.isOpen || !ctx.isOpen()) {
       this._abortAskSubmitWithRollback('ws-not-open');
@@ -2922,13 +2932,40 @@ class ChatView extends React.Component {
     const isValidAskPrompt = !!(p && Array.isArray(p.options) && p.options.length > 0
       && !isPlanApprovalPrompt(p)
       && !isDangerousOperationPrompt(p));
-    if (!isValidAskPrompt) {
-      this._abortAskSubmitWithRollback('pty-prompt-invalid');
+
+    // 第一次自检失败 → 150ms 后重试一次。异步 ptyPrompt 推送典型延迟 < 100ms，
+    // 给一个略宽裕的窗口让 state 追上 PTY 真实状态。retryCount 是单次单调累加，不会无限循环。
+    if (!isValidAskPrompt && retryCount === 0) {
+      setTimeout(() => this._submitViaSequentialQueueInternal(answer, opts, 1), 150);
       return;
     }
 
+    // 重试仍失败 → 从 history 找最新 active 合法 ask prompt 兜底（state.ptyPrompt 异步滞后但
+    // history 已记录的 active 标记是可信的）。找到则乐观提交，找不到才硬阻断。
+    let effectivePrompt = p;
+    if (!isValidAskPrompt) {
+      const fromHistory = (this.state.ptyPromptHistory || []).slice().reverse()
+        .find(pp => pp && pp.status === 'active'
+          && Array.isArray(pp.options) && pp.options.length > 0
+          && !isPlanApprovalPrompt(pp)
+          && !isDangerousOperationPrompt(pp));
+      if (fromHistory) {
+        effectivePrompt = fromHistory;
+        // 仅 trace 模式打日志，避免普通用户控制台噪声。诊断时
+        // `globalThis.__CCV_PTY_TRACE__ = true` 可看到自检降级路径。
+        if (typeof globalThis !== 'undefined' && globalThis.__CCV_PTY_TRACE__ === true) {
+          // eslint-disable-next-line no-console
+          try { console.warn('[pty.trace] _submitViaSequentialQueue: state.ptyPrompt 自检未命中（null/options 空/被 plan|dangerous 误判），从 ptyPromptHistory 取最新 active ask prompt 兜底乐观提交'); } catch {}
+        }
+      } else {
+        // 真没有合法 prompt（state + history 都无）→ 硬阻断，chunks 构造不出来
+        this._abortAskSubmitWithRollback('pty-prompt-invalid');
+        return;
+      }
+    }
+
     const isMultiQuestion = !!this._isMultiQuestionForm;
-    const chunks = buildChunksForAnswer(answer, this.state.ptyPrompt, isMultiQuestion);
+    const chunks = buildChunksForAnswer(answer, effectivePrompt, isMultiQuestion);
     const settleMs = opts.settleMs || 300;
 
     // 单 ws 合并后 server 的 input-sequential-done 仍是 unicast,但 ws 上有多个发送方
@@ -3461,10 +3498,19 @@ class ChatView extends React.Component {
         )}
         <div className={styles.navDivider} aria-hidden="true" />
         <Popover
-          content={this.props.getTokenStatsContent || null}
+          content={() => (
+            // 上下各留 24px：顶部贴标题栏，底部留出工具栏 / chat input 视觉余量，
+            // 避免窄屏 + 长内容时 popup 紧贴底部 footer 区域
+            <div style={{ maxHeight: 'calc(100vh - 48px)', overflowY: 'auto', overflowX: 'hidden' }}>
+              {this.props.getTokenStatsContent?.()}
+            </div>
+          )}
           trigger="hover"
-          placement="rightTop"
-          overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: '8px 8px', maxHeight: '80vh', overflowY: 'auto' }}
+          placement="right"
+          arrow={{ pointAtCenter: true }}
+          autoAdjustOverflow={false}
+          align={{ overflow: { adjustX: true, shiftY: true } }}
+          overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: '8px 8px' }}
         >
           <button className={styles.navBtn} title={t('ui.tokenStats')}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -3477,8 +3523,12 @@ class ChatView extends React.Component {
         <Popover
           content={this._buildUserPromptNav()}
           trigger="hover"
-          placement="rightTop"
+          placement="right"
+          arrow={{ pointAtCenter: true }}
+          autoAdjustOverflow={false}
+          align={{ overflow: { adjustX: true, shiftY: true } }}
           overlayStyle={{ maxWidth: 400 }}
+          overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-light)', padding: 0 }}
         >
           <button className={styles.navBtn} title={t('ui.userPromptNav')}>
             <img
@@ -3529,13 +3579,16 @@ class ChatView extends React.Component {
     if (prompts.length === 0) { this._navCacheVisible = visible; this._navCacheResult = null; return null; }
 
     const result = (
-      <div className={styles.userPromptNavList}>
-        {prompts.map((p, i) => (
-          <div key={p.visibleIdx} className={styles.userPromptNavItem}
-            onClick={() => this._scrollToUserPrompt(p.visibleIdx, p.timestamp)}>
-            {p.display}
-          </div>
-        ))}
+      <div className={styles.userPromptNavWrap}>
+        <div className={styles.userPromptNavTitle}>{t('ui.userPromptNav')} ({prompts.length})</div>
+        <div className={styles.userPromptNavList}>
+          {prompts.map((p, i) => (
+            <div key={p.visibleIdx} className={styles.userPromptNavItem}
+              onClick={() => this._scrollToUserPrompt(p.visibleIdx, p.timestamp)}>
+              {p.display}
+            </div>
+          ))}
+        </div>
       </div>
     );
     this._navCacheVisible = visible;
