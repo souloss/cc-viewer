@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.264 (2026-05-13)
 
 - feat(voice-pack): Approval Settings 新增「语音包」面板，可为 4 类生命周期事件绑定音频（plan 审批 / askUserQuestion / 60min 超时预警 5min+60s 双段 / Claude turn 结束）
 - feat(voice-pack): 内置「Pixel Buddy 像素小宠物」chiptune 默认包（5 个 8-bit SFX，总 ~100KB）+ 用户上传 mp3/wav/ogg/m4a（≤2MB）；全局开关 + 音量条 + 试听 + 重置；Mobile phone 也能配
