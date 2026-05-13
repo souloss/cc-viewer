@@ -13,6 +13,7 @@ import { getModelInfo, getEffectiveModel, resolveProducerModelInfo } from '../ut
 import { getTeammateAvatar } from '../utils/teammateAvatars';
 import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeammateNames } from '../utils/contentFilter';
 import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../utils/requestType';
+import { playEvent as playVoiceEvent } from '../utils/voicePackPlayer';
 import { buildChunksForAnswer } from '../utils/ptyChunkBuilder';
 import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer } from '../utils/promptClassifier';
 import { isImageFile, isMutatingCommand } from '../utils/commandValidator';
@@ -638,6 +639,15 @@ class ChatView extends React.Component {
           plan: this.state.pendingPlanApproval,
           handlers: { approve: this.handlePlanApprove, reject: this.handlePlanReject },
         });
+        // SDK ExitPlanMode lives in an inline card, not the global ApprovalModal, so
+        // ApprovalModal's sound effect never fires for this path. Hook the voice pack
+        // here directly( — SDK plan was silent before this).
+        try {
+          const vp = this.props.preferences?.approvalModal?.voicePack;
+          if (vp && vp.enabled && vp.events && vp.events.planApproval) {
+            playVoiceEvent('planApproval', vp, { dedupeKey: `planApproval:${this.state.pendingPlanApproval.id}` });
+          }
+        } catch { /* never throw from componentDidUpdate */ }
       } else {
         this.props.onPendingPlanApproval(null);
       }
@@ -2947,6 +2957,9 @@ class ChatView extends React.Component {
     if (!text) return;
     const ws = this._inputWs;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // /clear 自身不解锁血条 lock（lock 是清空确认后由 AppBase.handleClearContextOptimistic 设置）；
+    // 其他正常用户消息（包括 slash 命令）都视为「新请求」并解锁血条。
+    if (!/^\s*\/clear(\s|$)/.test(text)) this.props.onUserMessageSent?.();
     if (this.props.sdkMode) {
       ws.send(JSON.stringify({ type: 'sdk-user-message', text }));
     } else {
