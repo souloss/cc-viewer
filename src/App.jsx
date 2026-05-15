@@ -389,6 +389,7 @@ class App extends AppBase {
               approvalPrefs={this.state.approvalPrefs}
               onApprovalPrefsChange={this.handleApprovalPrefsChange}
               onVoicePackChange={this.handleVoicePackChange}
+              onApprovalSoundToggle={this.handleApprovalSoundToggle}
               approvalGlobal={this.state.approvalGlobal}
               approvalDismissedIds={this.state.approvalDismissedIds}
               approvalOwnPending={this.state.approvalOwnPending}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.268 (2026-05-15)
+
+- feat(approval-sound): 「审批提示音」与「语音包」合并为单一开关，OFF 时音量/事件 binding/上传隐藏，默认开启；旧版若两开关不一致，hydrate 时以「审批提示音」为准强制对齐
+- revert(context-bar): 撤销 1.6.267 的 /clear lock sessionStorage 持久化（保留 load_end 增量解锁兜底），lock 状态回到纯 in-memory，刷新页面即丢失
+
 ## 1.6.267 (2026-05-15)
 
 - feat(log-mgmt): 日志管理工具新增「压缩归档」批操作，单个 .jsonl 压成同名 .jsonl.zip；查看/下载/合并/删除/统计透明支持 .jsonl.zip（首次访问解压到 tmpdir 缓存，sidecar mtime+size 命中跳过解压；UTF-8 GP flag / Zip Slip 防护 / Windows rename 重试 / 启动清理 >7 天未访问缓存；validateZipEntries 上限对齐 400MB 防自家归档读不回；archiveJsonl unlink 失败回滚 zip）

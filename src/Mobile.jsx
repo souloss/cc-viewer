@@ -1149,13 +1149,6 @@ class Mobile extends AppBase {
                         onChange={(checked) => this.handleApprovalPrefsChange({ modalEnabled: checked })}
                       />
                     </div>
-                    <div className={styles.mobileSettingsRow}>
-                      <span className={styles.mobileSettingsLabel}>{t('ui.approval.settings.soundEnabled')}</span>
-                      <Switch
-                        checked={!!this.state.approvalPrefs.soundEnabled}
-                        onChange={(checked) => this.handleApprovalPrefsChange({ soundEnabled: checked })}
-                      />
-                    </div>
                     {/* notifyOnlyWhenHidden 依赖 electron main 进程的 OS Notification + 窗口聚焦判断,
                         纯 web 模式下 main.js 路径不存在,开关无效果 → 仅 electron 启动模式显示。 */}
                     {typeof window !== 'undefined' && window.tabBridge && (
@@ -1169,13 +1162,22 @@ class Mobile extends AppBase {
                     )}
                   </>
                 )}
-                {/* Voice pack — exposed on BOTH iPad and phone (phone has no modal but still
-                    benefits from audio notifications for approvals / turn-end). Sits outside
-                    the isPad gate above. */}
+                {/* 「审批提示音」合并开关 — 暴露给 phone + iPad（phone 也需要 plan/ask/turnEnd 音频提示）。
+                    OFF 时下方 VoicePackSettings 整组隐藏。 */}
                 {this.state.approvalPrefs && (
+                  <div className={styles.mobileSettingsRow}>
+                    <span className={styles.mobileSettingsLabel}>{t('ui.approval.settings.soundEnabled')}</span>
+                    <Switch
+                      checked={!!this.state.approvalPrefs.soundEnabled}
+                      onChange={(checked) => this.handleApprovalSoundToggle(checked)}
+                    />
+                  </div>
+                )}
+                {this.state.approvalPrefs && this.state.approvalPrefs.soundEnabled && (
                   <VoicePackSettings
                     prefs={this.state.approvalPrefs.voicePack}
                     onChange={this.handleVoicePackChange}
+                    embedded
                   />
                 )}
                 <div className={styles.mobileSettingsRow}>
