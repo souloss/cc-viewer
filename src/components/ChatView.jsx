@@ -34,6 +34,7 @@ import { buildLocalUltraplan } from '../utils/ultraplanTemplates';
 import { Virtuoso } from 'react-virtuoso';
 import { StickyBottomController } from '../utils/stickyBottomController';
 import { AskFlowController, ASK_KIND, LEGACY_ASK_PLACEHOLDER_ID } from './chatview/askFlowController';
+import { UltraplanController } from '../utils/ultraplanController';
 import { isMobile, isIOS, isPad } from '../env';
 import { t } from '../i18n';
 import { apiUrl } from '../utils/apiUrl';
@@ -370,6 +371,17 @@ class ChatView extends React.Component {
           try { message.warning(t('ui.askSubmitRetryHint')); } catch {}
         }
       },
+    });
+
+    // UltraPlan 文件 / 自定义专家纯逻辑（与 TerminalPanel 共享，见 ../utils/ultraplanController）。
+    // host 适配器桥接 state / 上传 / 提示 / 偏好 / 关闭编辑器；ChatView 的 6 个方法退化为委托。
+    this._ultraplan = new UltraplanController({
+      getState: () => this.state,
+      setState: (updater) => this.setState(updater),
+      onUpdatePreferences: (p) => this.props.onUpdatePreferences?.(p),
+      uploadFile: (file) => uploadFileAndGetPath(file),
+      messageError: (msg) => message.error(msg),
+      closeEditor: () => this._closeCustomUltraplanEditor(),
     });
   }
 
@@ -2213,53 +2225,12 @@ class ChatView extends React.Component {
     });
   };
 
-  _handleUltraplanUpload = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.onchange = async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const path = await uploadFileAndGetPath(file);
-        this.setState(prev => ({
-          ultraplanFiles: [...prev.ultraplanFiles, { name: file.name, path }],
-        }));
-      } catch (err) {
-        console.error('Ultraplan upload failed:', err);
-        message.error(err?.message || 'Upload failed');
-      }
-    };
-    input.click();
-  };
+  // UltraPlan 文件 / 专家逻辑委托给共享控制器（见 ../utils/ultraplanController）。方法名保持不变，render 零改动。
+  _handleUltraplanUpload = (...a) => this._ultraplan.handleUpload(...a);
 
-  _handleUltraplanPaste = async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (!file) return;
-        try {
-          const path = await uploadFileAndGetPath(file);
-          const name = file.name || `paste-${Date.now()}.png`;
-          this.setState(prev => ({
-            ultraplanFiles: [...prev.ultraplanFiles, { name, path }],
-          }));
-        } catch (err) {
-          console.error('Ultraplan paste upload failed:', err);
-          message.error(err?.message || 'Upload failed');
-        }
-        return;
-      }
-    }
-  };
+  _handleUltraplanPaste = (...a) => this._ultraplan.handlePaste(...a);
 
-  _handleUltraplanRemoveFile = (idx) => {
-    this.setState(prev => ({
-      ultraplanFiles: prev.ultraplanFiles.filter((_, i) => i !== idx),
-    }));
-  };
+  _handleUltraplanRemoveFile = (...a) => this._ultraplan.handleRemoveFile(...a);
 
   // UltraPlanModal pointerup 时回调 —— 一次性 setState + 写双 localStorage key。
   // 拖拽期 UltraPlanModal 已直接改 DOM style,这里只负责落盘 + 下次打开恢复。
@@ -2289,32 +2260,9 @@ class ChatView extends React.Component {
     }));
   };
 
-  _persistCustomUltraplanExperts = (experts) => {
-    this.setState({ customUltraplanExperts: experts });
-    if (this.props.onUpdatePreferences) {
-      this.props.onUpdatePreferences({ customUltraplanExperts: experts });
-    }
-  };
+  _saveCustomUltraplanExpert = (...a) => this._ultraplan.saveExpert(...a);
 
-  _saveCustomUltraplanExpert = (item) => {
-    const existing = this.state.customUltraplanExperts;
-    const idx = existing.findIndex(e => e.id === item.id);
-    const next = idx >= 0
-      ? existing.map(e => (e.id === item.id ? item : e))
-      : [...existing, item];
-    this._persistCustomUltraplanExperts(next);
-    this._closeCustomUltraplanEditor();
-  };
-
-  _deleteCustomUltraplanExpert = (id) => {
-    const next = this.state.customUltraplanExperts.filter(e => e.id !== id);
-    this._persistCustomUltraplanExperts(next);
-    // 如果当前选中的就是被删的，回退到 codeExpert
-    if (this.state.ultraplanVariant === 'custom:' + id) {
-      this.setState({ ultraplanVariant: 'codeExpert' });
-    }
-    this._closeCustomUltraplanEditor();
-  };
+  _deleteCustomUltraplanExpert = (...a) => this._ultraplan.deleteExpert(...a);
 
   // 通过 TerminalWsContext 共享单条 ws,本方法接收消息派发。
   // 注:`data` 分支不能省 — _appendPtyData → _detectPrompt 解析出的 ptyPrompt state 被多处引用

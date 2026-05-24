@@ -19,6 +19,7 @@ import { isMobile, isIOS, isPad } from '../env';
 import styles from './TerminalPanel.module.css';
 import { BUILTIN_PRESETS } from '../utils/builtinPresets.js';
 import { buildLocalUltraplan } from '../utils/ultraplanTemplates';
+import { UltraplanController } from '../utils/ultraplanController';
 import { buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../utils/ptyChunkBuilder';
 import ConceptHelp from './ConceptHelp';
 import CustomUltraplanEditModal from './CustomUltraplanEditModal';
@@ -242,6 +243,16 @@ class TerminalPanel extends React.Component {
     this.fileInputRef = React.createRef();
     this._ultraplanPanelRef = React.createRef();
     this._ultraplanDragRef = null;
+    // UltraPlan 文件 / 自定义专家纯逻辑（与 ChatView 共享，见 ../utils/ultraplanController）。
+    // host 适配器桥接 state / 上传 / 提示 / 偏好 / 关闭编辑器；下方 6 个方法退化为委托。
+    this._ultraplan = new UltraplanController({
+      getState: () => this.state,
+      setState: (updater) => this.setState(updater),
+      onUpdatePreferences: (p) => this.props.onUpdatePreferences?.(p),
+      uploadFile: (file) => uploadFileAndGetPath(file),
+      messageError: (msg) => message.error(msg),
+      closeEditor: () => this.closeCustomUltraplanEditor(),
+    });
     this.terminal = null;
     this.fitAddon = null;
     // ws 现在是 getter(挂在原型),不在 constructor 上设字段,避免覆盖 getter
@@ -1296,79 +1307,16 @@ class TerminalPanel extends React.Component {
     }));
   };
 
-  persistCustomUltraplanExperts = (experts) => {
-    this.setState({ customUltraplanExperts: experts });
-    if (this.props.onUpdatePreferences) {
-      this.props.onUpdatePreferences({ customUltraplanExperts: experts });
-    }
-  };
+  // UltraPlan 文件 / 专家逻辑委托给共享控制器（见 ../utils/ultraplanController）。方法名保持不变，render 零改动。
+  saveCustomUltraplanExpert = (...a) => this._ultraplan.saveExpert(...a);
 
-  saveCustomUltraplanExpert = (item) => {
-    const existing = this.state.customUltraplanExperts;
-    const idx = existing.findIndex(e => e.id === item.id);
-    const next = idx >= 0
-      ? existing.map(e => (e.id === item.id ? item : e))
-      : [...existing, item];
-    this.persistCustomUltraplanExperts(next);
-    this.closeCustomUltraplanEditor();
-  };
+  deleteCustomUltraplanExpert = (...a) => this._ultraplan.deleteExpert(...a);
 
-  deleteCustomUltraplanExpert = (id) => {
-    const next = this.state.customUltraplanExperts.filter(e => e.id !== id);
-    this.persistCustomUltraplanExperts(next);
-    if (this.state.ultraplanVariant === 'custom:' + id) {
-      this.setState({ ultraplanVariant: 'codeExpert' });
-    }
-    this.closeCustomUltraplanEditor();
-  };
+  handleUltraplanUpload = (...a) => this._ultraplan.handleUpload(...a);
 
-  handleUltraplanUpload = async () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.onchange = async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const path = await uploadFileAndGetPath(file);
-        this.setState(prev => ({
-          ultraplanFiles: [...prev.ultraplanFiles, { name: file.name, path }],
-        }));
-      } catch (err) {
-        console.error('Ultraplan upload failed:', err);
-        message.error(err?.message || 'Upload failed');
-      }
-    };
-    input.click();
-  };
+  handleUltraplanPaste = (...a) => this._ultraplan.handlePaste(...a);
 
-  handleUltraplanPaste = async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (!file) return;
-        try {
-          const path = await uploadFileAndGetPath(file);
-          const name = file.name || `paste-${Date.now()}.png`;
-          this.setState(prev => ({
-            ultraplanFiles: [...prev.ultraplanFiles, { name, path }],
-          }));
-        } catch (err) {
-          console.error('Ultraplan paste upload failed:', err);
-          message.error(err?.message || 'Upload failed');
-        }
-        return;
-      }
-    }
-  };
-
-  handleUltraplanRemoveFile = (idx) => {
-    this.setState(prev => ({
-      ultraplanFiles: prev.ultraplanFiles.filter((_, i) => i !== idx),
-    }));
-  };
+  handleUltraplanRemoveFile = (...a) => this._ultraplan.handleRemoveFile(...a);
 
   // UltraPlan popover resize:左上 handle → 拖拽改 popover overlay 的 width/height。
   // 拖拽期直接改 .ant-popover-inner 的 inline style 不走 setState(避免高频 re-render);
