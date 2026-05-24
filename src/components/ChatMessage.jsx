@@ -311,6 +311,31 @@ class ChatMessage extends React.Component {
     });
   }
 
+  // renderToolCall 拆分后各子方法共用的渲染原语（原 renderToolCall 内部闭包提升而来）。
+  _toolBox(tu, label, children) {
+    return (
+      <div key={tu.id} className={styles.toolBox}>
+        <Text strong className={styles.toolLabel}>{label}</Text>
+        {children}
+      </div>
+    );
+  }
+
+  _toolCodePre(text) {
+    return (
+      <pre className={styles.codePre}>{text}</pre>
+    );
+  }
+
+  _toolPathTag(p) {
+    const onOpenFile = this.props.onOpenFile;
+    return (
+      onOpenFile
+        ? <span className={styles.pathTagClickable} onClick={(e) => { e.stopPropagation(); onOpenFile(p); }}>{p}</span>
+        : <span className={styles.pathTag}>{p}</span>
+    );
+  }
+
   renderToolCall(tu) {
     // 如果 input 是字符串（流式组装残留），尝试解析
     if (typeof tu.input === 'string') {
@@ -324,82 +349,90 @@ class ChatMessage extends React.Component {
 
     // Edit → diff 视图
     if (tu.name === 'Edit' && tu.input && tu.input.old_string != null && tu.input.new_string != null) {
-      const editSnapshotMap = this.props.editSnapshotMap || {};
-      const filePath = tu.input.file_path || '';
-      let startLine = 1;
-      const snapshot = editSnapshotMap[tu.id];
-      if (snapshot && tu.input.old_string) {
-        const idx = snapshot.plainText.indexOf(tu.input.old_string);
-        if (idx >= 0) {
-          const before = snapshot.plainText.substring(0, idx);
-          const lineOffset = before.split('\n').length - 1;
-          startLine = snapshot.lineNums[lineOffset] ?? (lineOffset + 1);
-        }
-      }
-      return (
-        <DiffView
-          key={tu.id}
-          file_path={filePath}
-          old_string={tu.input.old_string}
-          new_string={tu.input.new_string}
-          startLine={startLine}
-          onOpenFile={this.props.onOpenFile}
-        />
-      );
+      return this._renderTool_Edit(tu);
     }
 
     const inp = (tu.input && typeof tu.input === 'object') ? tu.input : {};
-    const box = (label, children) => (
-      <div key={tu.id} className={styles.toolBox}>
-        <Text strong className={styles.toolLabel}>{label}</Text>
-        {children}
-      </div>
-    );
 
-    const codePre = (text) => (
-      <pre className={styles.codePre}>{text}</pre>
-    );
+    if (tu.name === 'Bash') return this._renderTool_Bash(tu, inp);
 
-    const onOpenFile = this.props.onOpenFile;
-    const pathTag = (p) => (
-      onOpenFile
-        ? <span className={styles.pathTagClickable} onClick={(e) => { e.stopPropagation(); onOpenFile(p); }}>{p}</span>
-        : <span className={styles.pathTag}>{p}</span>
-    );
-
-    // Bash: show command and description
-    if (tu.name === 'Bash') {
-      const cmd = inp.command || '';
-      const desc = inp.description || '';
-      const lineCount = cmd.split('\n').length;
-
-      // 如果命令超过5行，使用折叠组件
-      if (lineCount > 5) {
-        return (
-          <div key={tu.id} className={styles.toolBox}>
-            <Text strong className={styles.toolLabel}>
-              Bash{desc ? <span className={styles.descSpan}> — {desc}</span> : ''}
-            </Text>
-            <Collapse
-              ghost
-              size="small"
-              items={[{
-                key: '1',
-                label: <Text type="secondary" className={styles.bashCollapseLabel}>{t('ui.bashCommand')} ({lineCount} {t('ui.lines')})</Text>,
-                children: codePre(cmd),
-              }]}
-              className={styles.collapseMargin}
-            />
-          </div>
-        );
-      }
-
-      return box(
-        <>Bash{desc ? <span className={styles.descSpan}> — {desc}</span> : ''}</>,
-        codePre(cmd)
-      );
+    if (tu.name === 'Read' || tu.name === 'Write' || tu.name === 'Glob' || tu.name === 'Grep') {
+      return this._renderTool_SimpleOps(tu, inp);
     }
 
+    if (tu.name === 'Task') return this._renderTool_Task(tu, inp);
+
+    if (tu.name === 'AskUserQuestion') return this._renderTool_AskQuestion(tu, inp);
+
+    if (tu.name === 'EnterPlanMode') return this._renderTool_EnterPlanMode(tu);
+
+    if (tu.name === 'ExitPlanMode') return this._renderTool_ExitPlanMode(tu, inp);
+
+    if (tu.name === 'SendMessage' && inp.message != null) {
+      const node = this._renderTool_SendMessage(tu, inp);
+      if (node) return node;
+    }
+
+    return this._renderTool_Default(tu, inp);
+  }
+
+  _renderTool_Edit(tu) {
+    const editSnapshotMap = this.props.editSnapshotMap || {};
+    const filePath = tu.input.file_path || '';
+    let startLine = 1;
+    const snapshot = editSnapshotMap[tu.id];
+    if (snapshot && tu.input.old_string) {
+      const idx = snapshot.plainText.indexOf(tu.input.old_string);
+      if (idx >= 0) {
+        const before = snapshot.plainText.substring(0, idx);
+        const lineOffset = before.split('\n').length - 1;
+        startLine = snapshot.lineNums[lineOffset] ?? (lineOffset + 1);
+      }
+    }
+    return (
+      <DiffView
+        key={tu.id}
+        file_path={filePath}
+        old_string={tu.input.old_string}
+        new_string={tu.input.new_string}
+        startLine={startLine}
+        onOpenFile={this.props.onOpenFile}
+      />
+    );
+  }
+
+  _renderTool_Bash(tu, inp) {
+    const cmd = inp.command || '';
+    const desc = inp.description || '';
+    const lineCount = cmd.split('\n').length;
+    // 如果命令超过5行，使用折叠组件
+    if (lineCount > 5) {
+      return (
+        <div key={tu.id} className={styles.toolBox}>
+          <Text strong className={styles.toolLabel}>
+            Bash{desc ? <span className={styles.descSpan}> — {desc}</span> : ''}
+          </Text>
+          <Collapse
+            ghost
+            size="small"
+            items={[{
+              key: '1',
+              label: <Text type="secondary" className={styles.bashCollapseLabel}>{t('ui.bashCommand')} ({lineCount} {t('ui.lines')})</Text>,
+              children: this._toolCodePre(cmd),
+            }]}
+            className={styles.collapseMargin}
+          />
+        </div>
+      );
+    }
+    return this._toolBox(
+      tu,
+      <>Bash{desc ? <span className={styles.descSpan}> — {desc}</span> : ''}</>,
+      this._toolCodePre(cmd)
+    );
+  }
+
+  _renderTool_SimpleOps(tu, inp) {
     // Read: show file path + range
     if (tu.name === 'Read') {
       const fp = inp.file_path || '';
@@ -407,60 +440,59 @@ class ChatMessage extends React.Component {
       if (inp.offset) parts.push(`offset: ${inp.offset}`);
       if (inp.limit) parts.push(`limit: ${inp.limit}`);
       const range = parts.length ? ` (${parts.join(', ')})` : '';
-      return box(
-        <>Read: {pathTag(fp)}<span className={styles.secondarySpan}>{range}</span></>,
+      return this._toolBox(
+        tu,
+        <>Read: {this._toolPathTag(fp)}<span className={styles.secondarySpan}>{range}</span></>,
         null
       );
     }
-
     // Write: show file path + content preview
     if (tu.name === 'Write') {
       const fp = inp.file_path || '';
       const content = inp.content || '';
       const lines = content.split('\n');
-      return box(
-        <>Write: {pathTag(fp)} <span className={styles.secondarySpan}>({lines.length} lines)</span></>,
-        codePre(content)
+      return this._toolBox(
+        tu,
+        <>Write: {this._toolPathTag(fp)} <span className={styles.secondarySpan}>({lines.length} lines)</span></>,
+        this._toolCodePre(content)
       );
     }
-
     // Glob: show pattern + path
     if (tu.name === 'Glob') {
       const pattern = inp.pattern || '';
       const path = inp.path || '';
-      return box(
+      return this._toolBox(
+        tu,
         <>Glob: <span className={styles.patternSpan}>{pattern}</span>{path ? <span className={styles.secondarySpan}> in {path}</span> : ''}</>,
         null
       );
     }
-
     // Grep: show pattern + path + options
-    if (tu.name === 'Grep') {
-      const pattern = inp.pattern || '';
-      const path = inp.path || '';
-      const opts = [];
-      if (inp.glob) opts.push(`glob: ${inp.glob}`);
-      if (inp.output_mode) opts.push(`mode: ${inp.output_mode}`);
-      if (inp.head_limit) opts.push(`limit: ${inp.head_limit}`);
-      const optsStr = opts.length ? ` (${opts.join(', ')})` : '';
-      return box(
-        <>Grep: <span className={styles.patternSpan}>/{pattern}/</span>{path ? <span className={styles.secondarySpan}> in {path}</span> : ''}<span className={styles.secondarySpan}>{optsStr}</span></>,
-        null
-      );
-    }
+    const pattern = inp.pattern || '';
+    const path = inp.path || '';
+    const opts = [];
+    if (inp.glob) opts.push(`glob: ${inp.glob}`);
+    if (inp.output_mode) opts.push(`mode: ${inp.output_mode}`);
+    if (inp.head_limit) opts.push(`limit: ${inp.head_limit}`);
+    const optsStr = opts.length ? ` (${opts.join(', ')})` : '';
+    return this._toolBox(
+      tu,
+      <>Grep: <span className={styles.patternSpan}>/{pattern}/</span>{path ? <span className={styles.secondarySpan}> in {path}</span> : ''}<span className={styles.secondarySpan}>{optsStr}</span></>,
+      null
+    );
+  }
 
-    // Task: show subagent type + description
-    if (tu.name === 'Task') {
-      const st = inp.subagent_type || '';
-      const desc = inp.description || '';
-      return box(
-        <>Task({st}{desc ? ': ' + desc : ''})</>,
-        null
-      );
-    }
+  _renderTool_Task(tu, inp) {
+    const st = inp.subagent_type || '';
+    const desc = inp.description || '';
+    return this._toolBox(
+      tu,
+      <>Task({st}{desc ? ': ' + desc : ''})</>,
+      null
+    );
+  }
 
-    // AskUserQuestion: 问卷卡片
-    if (tu.name === 'AskUserQuestion') {
+  _renderTool_AskQuestion(tu, inp) {
       const questions = Array.isArray(inp.questions) ? inp.questions : [];
       const { askAnswerMap, toolResultMap } = this.props;
       const selectedAnswers = askAnswerMap?.[tu.id] || {};
@@ -573,17 +605,15 @@ class ChatMessage extends React.Component {
       );
     }
 
-    // EnterPlanMode: 进入计划模式
-    if (tu.name === 'EnterPlanMode') {
-      return (
-        <div key={tu.id} className={styles.planModeBox}>
-          <span className={styles.planModeLabel}>{t('ui.enterPlanMode')}</span>
-        </div>
-      );
-    }
+  _renderTool_EnterPlanMode(tu) {
+    return (
+      <div key={tu.id} className={styles.planModeBox}>
+        <span className={styles.planModeLabel}>{t('ui.enterPlanMode')}</span>
+      </div>
+    );
+  }
 
-    // ExitPlanMode: 计划就绪
-    if (tu.name === 'ExitPlanMode') {
+  _renderTool_ExitPlanMode(tu, inp) {
       const prompts = inp.allowedPrompts || [];
       const { planApprovalMap } = this.props;
       const approval = (planApprovalMap && planApprovalMap[tu.id]) || { status: 'pending' };
@@ -782,8 +812,9 @@ class ChatMessage extends React.Component {
       );
     }
 
-    // SendMessage → render message content directly (no tool shell)
-    if (tu.name === 'SendMessage' && inp.message != null) {
+  // SendMessage → render message content directly (no tool shell)。
+  // 返回 null = msg 既非 lifecycle 对象也非字符串,由 renderToolCall 落到 Default。
+  _renderTool_SendMessage(tu, inp) {
       const to = inp.to || '';
       const msg = inp.message;
       // JSON lifecycle signal → compact status bubble
@@ -807,13 +838,15 @@ class ChatMessage extends React.Component {
           </div>
         );
       }
-    }
+      return null;
+  }
 
-    // Default: structured key-value display
+  // Default: structured key-value display
+  _renderTool_Default(tu, inp) {
     let toolLabel = tu.name;
     const keys = Object.keys(inp);
     if (keys.length === 0) {
-      return box(toolLabel, null);
+      return this._toolBox(tu, toolLabel, null);
     }
     const items = keys.map(k => {
       const v = inp[k];
@@ -826,7 +859,7 @@ class ChatMessage extends React.Component {
         </div>
       );
     });
-    return box(toolLabel, <div className={styles.kvContainer}>{items}</div>);
+    return this._toolBox(tu, toolLabel, <div className={styles.kvContainer}>{items}</div>);
   }
 
   renderDangerApproval(toolId, dangerPrompt) {
@@ -1074,6 +1107,89 @@ class ChatMessage extends React.Component {
     return this._renderAssistantContentLegacy(content, toolResultMap);
   }
 
+  // legacy 与 in-order 两渲染器共用：thinking 块的 antd Collapse。
+  // 调用方负责算好 tIdx(决定 key)与 isCursorTarget,本方法绝不重算下标——
+  // 保证两渲染器各自 key 与现状逐字一致(zero behavior change)。
+  _renderThinkingEntry(thinkingText, isEmpty, isCursorTarget, tIdx, streamThinkingExpanded) {
+    const showTC = !!this.props.showTrailingCursor;
+    // 流式走 controlled activeKey（稳定 key + 变化 activeKey 触发 antd 高度 transition）。
+    // 非流式走 uncontrolled defaultActiveKey,key 含 e/c 标识让切 expandThinking 时重挂响应新 prop。
+    const collapseProps = showTC
+      ? { key: `think-stream-${tIdx}`, activeKey: streamThinkingExpanded ? ['1'] : [] }
+      : { key: `think-${tIdx}-${this.props.expandThinking ? 'e' : 'c'}`, defaultActiveKey: this.props.expandThinking ? ['1'] : [] };
+    return (
+      <Collapse
+        {...collapseProps}
+        ghost
+        size="small"
+        items={[{
+          key: '1',
+          label: <Text type="secondary" className={styles.thinkingLabel}>{t('ui.thinking')}</Text>,
+          children: isEmpty ? (
+            <div className={styles.thinkingEmptyHint}>
+              <Text type="secondary" className={styles.thinkingEmptyText}>{t('ui.thinkingEmpty')}</Text>
+              {!this.props.showThinkingSummaries && (
+                <Tooltip title={tc('ui.enableThinkingSummariesTip')}>
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    className={styles.enableThinkingBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      this.context.updateClaudeSettings({ showThinkingSummaries: true })
+                        .then(data => {
+                          if (data) message.success(tc('ui.enableThinkingSummariesTip'));
+                          else message.error('Failed to save setting');
+                        });
+                    }}
+                  >
+                    {t('ui.enableThinkingSummaries')}
+                  </Button>
+                </Tooltip>
+              )}
+            </div>
+          ) : (
+            <MarkdownBlock text={thinkingText} trailingCursor={isCursorTarget} />
+          ),
+        }]}
+        className={`${styles.collapseMargin}${showTC ? ' ' + styles.collapseStream : ''}`}
+      />
+    );
+  }
+
+  // legacy 与 in-order 两渲染器共用：tool_use 的尾随 tool_result 块。返回 node 或 null
+  // (null = 该 tr 不渲染:已批准 ExitPlanMode 跳过 / 简化模式非权限拒绝)。所有 key 基于 tu.id。
+  _renderToolResultTrailing(tu, tr) {
+    if (!tr) return null;
+    const simplify = !this.props.showFullToolContent;
+    // 已批准的 ExitPlanMode 计划内容已在 renderToolCall 中渲染，隐藏重复的 tool_result
+    const planApprovalMap = this.props.planApprovalMap || {};
+    const approval = planApprovalMap[tu.id];
+    if (tu.name === 'ExitPlanMode' && approval && approval.status === 'approved' && approval.planContent) {
+      return null;
+    }
+    const deniedNode = (
+      <React.Fragment key={`tr-denied-${tu.id}`}>
+        {tr.isUltraplan ? (
+          <div className={styles.ultraplanBadge}>◇ UltraPlan</div>
+        ) : (
+          <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
+            <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
+          </div>
+        )}
+      </React.Fragment>
+    );
+    if (simplify) {
+      // 简化模式：仅显示权限拒绝，隐藏其他 tool_result
+      return tr.isPermissionDenied ? deniedNode : null;
+    }
+    if (tr.isPermissionDenied) return deniedNode;
+    return (
+      <React.Fragment key={`tr-${tu.id}`}>{this.renderToolResult(tr)}</React.Fragment>
+    );
+  }
+
   _renderAssistantContentLegacy(content, toolResultMap = {}) {
     const thinkingBlocks = content.filter(b => b.type === 'thinking');
     const textBlocks = content.filter(b => b.type === 'text');
@@ -1099,53 +1215,7 @@ class ChatMessage extends React.Component {
       const thinkingText = tb.thinking || '';
       const isEmpty = !thinkingText.trim();
       const isCursorTarget = i === lastThinkingIdxWithContent;
-      // 流式走 controlled activeKey（稳定 key + 变化 activeKey 触发 antd 高度 transition，
-      // 动画在流式内部 text 到达时跑完）。非流式走 uncontrolled defaultActiveKey，且 key 包含
-      // e/c 标识——用户切换 expandThinking 全局偏好时通过 key 变化重挂载让 Collapse 响应新 prop
-      // （defaultActiveKey 本身仅初始生效）。流式→正式 entry 切换期间父 ChatMessage 实例必然
-      // 重挂（不同 key），Collapse 跟随重挂载；高度跳变靠流式结束前已折叠 + 正式默认折叠实现。
-      const collapseProps = showTC
-        ? { key: `think-stream-${i}`, activeKey: streamThinkingExpanded ? ['1'] : [] }
-        : { key: `think-${i}-${this.props.expandThinking ? 'e' : 'c'}`, defaultActiveKey: this.props.expandThinking ? ['1'] : [] };
-      innerContent.push(
-        <Collapse
-          {...collapseProps}
-          ghost
-          size="small"
-          items={[{
-            key: '1',
-            label: <Text type="secondary" className={styles.thinkingLabel}>{t('ui.thinking')}</Text>,
-            children: isEmpty ? (
-              <div className={styles.thinkingEmptyHint}>
-                <Text type="secondary" className={styles.thinkingEmptyText}>{t('ui.thinkingEmpty')}</Text>
-                {!this.props.showThinkingSummaries && (
-                  <Tooltip title={tc('ui.enableThinkingSummariesTip')}>
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      className={styles.enableThinkingBtn}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        this.context.updateClaudeSettings({ showThinkingSummaries: true })
-                          .then(data => {
-                            if (data) message.success(tc('ui.enableThinkingSummariesTip'));
-                            else message.error('Failed to save setting');
-                          });
-                      }}
-                    >
-                      {t('ui.enableThinkingSummaries')}
-                    </Button>
-                  </Tooltip>
-                )}
-              </div>
-            ) : (
-              <MarkdownBlock text={thinkingText} trailingCursor={isCursorTarget} />
-            ),
-          }]}
-          className={`${styles.collapseMargin}${showTC ? ' ' + styles.collapseStream : ''}`}
-        />
-      );
+      innerContent.push(this._renderThinkingEntry(thinkingText, isEmpty, isCursorTarget, i, streamThinkingExpanded));
     });
 
     textBlocks.forEach((tb, i) => {
@@ -1185,48 +1255,9 @@ class ChatMessage extends React.Component {
         innerContent.push(this.renderDangerApproval(tu.id, dp));
       }
 
-      // 权限拒绝的 tool_result 加红色标记
-      if (tr) {
-        // 已批准的 ExitPlanMode 计划内容已在 renderToolCall 中渲染，隐藏重复的 tool_result
-        const planApprovalMap = this.props.planApprovalMap || {};
-        const approval = planApprovalMap[tu.id];
-        if (tu.name === 'ExitPlanMode' && approval && approval.status === 'approved' && approval.planContent) {
-          // skip tool result — plan content already shown
-        } else if (simplify) {
-          // 简化模式：仅显示权限拒绝，隐藏其他 tool_result
-          if (tr.isPermissionDenied) {
-            innerContent.push(
-              <React.Fragment key={`tr-denied-${tu.id}`}>
-                {tr.isUltraplan ? (
-                  <div className={styles.ultraplanBadge}>◇ UltraPlan</div>
-                ) : (
-                  <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
-                    <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                  </div>
-                )}
-              </React.Fragment>
-            );
-          }
-        } else {
-          if (tr.isPermissionDenied) {
-            innerContent.push(
-              <React.Fragment key={`tr-denied-${tu.id}`}>
-                {tr.isUltraplan ? (
-                  <div className={styles.ultraplanBadge}>◇ UltraPlan</div>
-                ) : (
-                  <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
-                    <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                  </div>
-                )}
-              </React.Fragment>
-            );
-          } else {
-            innerContent.push(
-              <React.Fragment key={`tr-${tu.id}`}>{this.renderToolResult(tr)}</React.Fragment>
-            );
-          }
-        }
-      }
+      // 权限拒绝的 tool_result 加红色标记（共享 helper，返回 node|null）
+      const trNode = this._renderToolResultTrailing(tu, tr);
+      if (trNode) innerContent.push(trNode);
     });
 
     return innerContent;
@@ -1266,48 +1297,7 @@ class ChatMessage extends React.Component {
       const isEmpty = !thinkingText.trim();
       const isCursorTarget = i === lastThinkingGlobalIdx;
       const tIdx = thinkingRenderIdx++;
-      const collapseProps = showTC
-        ? { key: `think-stream-${tIdx}`, activeKey: streamThinkingExpanded ? ['1'] : [] }
-        : { key: `think-${tIdx}-${this.props.expandThinking ? 'e' : 'c'}`, defaultActiveKey: this.props.expandThinking ? ['1'] : [] };
-      innerContent.push(
-        <Collapse
-          {...collapseProps}
-          ghost
-          size="small"
-          items={[{
-            key: '1',
-            label: <Text type="secondary" className={styles.thinkingLabel}>{t('ui.thinking')}</Text>,
-            children: isEmpty ? (
-              <div className={styles.thinkingEmptyHint}>
-                <Text type="secondary" className={styles.thinkingEmptyText}>{t('ui.thinkingEmpty')}</Text>
-                {!this.props.showThinkingSummaries && (
-                  <Tooltip title={tc('ui.enableThinkingSummariesTip')}>
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      className={styles.enableThinkingBtn}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        this.context.updateClaudeSettings({ showThinkingSummaries: true })
-                          .then(data => {
-                            if (data) message.success(tc('ui.enableThinkingSummariesTip'));
-                            else message.error('Failed to save setting');
-                          });
-                      }}
-                    >
-                      {t('ui.enableThinkingSummaries')}
-                    </Button>
-                  </Tooltip>
-                )}
-              </div>
-            ) : (
-              <MarkdownBlock text={thinkingText} trailingCursor={isCursorTarget} />
-            ),
-          }]}
-          className={`${styles.collapseMargin}${showTC ? ' ' + styles.collapseStream : ''}`}
-        />
-      );
+      innerContent.push(this._renderThinkingEntry(thinkingText, isEmpty, isCursorTarget, tIdx, streamThinkingExpanded));
     }
 
     // 2. 工具调用辅助：维护非 consumed 的 tool_use 列表，用于 isFirstPendingTool 判断
@@ -1374,45 +1364,8 @@ class ChatMessage extends React.Component {
           innerContent.push(this.renderDangerApproval(tu.id, dp));
         }
 
-        if (tr) {
-          const planApprovalMap = this.props.planApprovalMap || {};
-          const approval = planApprovalMap[tu.id];
-          if (tu.name === 'ExitPlanMode' && approval && approval.status === 'approved' && approval.planContent) {
-            // skip
-          } else if (simplify) {
-            if (tr.isPermissionDenied) {
-              innerContent.push(
-                <React.Fragment key={`tr-denied-${tu.id}`}>
-                  {tr.isUltraplan ? (
-                    <div className={styles.ultraplanBadge}>◇ UltraPlan</div>
-                  ) : (
-                    <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
-                      <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                    </div>
-                  )}
-                </React.Fragment>
-              );
-            }
-          } else {
-            if (tr.isPermissionDenied) {
-              innerContent.push(
-                <React.Fragment key={`tr-denied-${tu.id}`}>
-                  {tr.isUltraplan ? (
-                    <div className={styles.ultraplanBadge}>◇ UltraPlan</div>
-                  ) : (
-                    <div className={`${styles.dangerApprovalBox} ${styles.dangerApprovalBoxDenied}`}>
-                      <span className={styles.dangerDeniedBadge}>✗ {t('ui.dangerDenied')}</span>
-                    </div>
-                  )}
-                </React.Fragment>
-              );
-            } else {
-              innerContent.push(
-                <React.Fragment key={`tr-${tu.id}`}>{this.renderToolResult(tr)}</React.Fragment>
-              );
-            }
-          }
-        }
+        const trNode = this._renderToolResultTrailing(tu, tr);
+        if (trNode) innerContent.push(trNode);
         continue;
       }
 
