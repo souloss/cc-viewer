@@ -19,8 +19,7 @@ import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuff
 import { isImageFile, isMutatingCommand } from '../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../utils/fileExpandedPathsStorage';
 import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, getToolResultCache, setToolResultCache, buildSubAgentResultMap, createEmptyGlobalIndexState, appendToGlobalToolResultIndex } from '../utils/toolResultBuilder';
-import { refreshPlanApprovalOnCachedItems } from '../utils/refreshPlanApprovalCache';
-import { refreshAskAnswerOnCachedItems } from '../utils/refreshAskAnswerCache';
+import { refreshCachedItemProp } from '../utils/refreshCachedItemProp';
 import { resolveBubbleProducerTs } from '../utils/sessionManager';
 import { getSlashCommandLabel } from '../utils/slashCommandLabels';
 import { TeamButton, TeamModal } from './TeamSessionPanel';
@@ -1779,16 +1778,16 @@ class ChatView extends React.Component {
         // 完全命中：session 对象不变且消息数不变 → 直接复用。
         // 但 planApprovalMap / askAnswerMap 引用变化时（ExitPlanMode 审批落盘 / AskUserQuestion 答完），
         // 刷新持有相应 tool_use 的旧 element 的 prop，避免 React 因 element 引用未变跳过 SCU 让卡片永远停在 pending 视图。
-        msgs = refreshPlanApprovalOnCachedItems(sc.items, sc.planApprovalMap, mergedPlanApprovalMap);
-        msgs = refreshAskAnswerOnCachedItems(msgs, sc.askAnswerMap, mergedAskAnswerMap);
+        msgs = refreshCachedItemProp(sc.items, sc.planApprovalMap, mergedPlanApprovalMap, 'ExitPlanMode', 'planApprovalMap');
+        msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
         lastPendingAskId = sc.lastPendingAskId;
         lastPendingPlanId = sc.lastPendingPlanId;
       } else if (sc && sc.session === session && session.messages.length > sc.msgsLen) {
         // 增量：session 对象不变但消息增长 → 只渲染新消息，拼接到缓存
         const result = this.renderSessionMessages(session.messages, `s${si}`, resolveModelInfo, tsToIndex, requestCacheTokenMap, sc.msgsLen);
         // 旧段同样要刷新 planApprovalMap / askAnswerMap prop（同 FULL HIT 理由）
-        msgs = refreshPlanApprovalOnCachedItems(sc.items, sc.planApprovalMap, mergedPlanApprovalMap).slice();
-        msgs = refreshAskAnswerOnCachedItems(msgs, sc.askAnswerMap, mergedAskAnswerMap);
+        msgs = refreshCachedItemProp(sc.items, sc.planApprovalMap, mergedPlanApprovalMap, 'ExitPlanMode', 'planApprovalMap').slice();
+        msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
         lastPendingAskId = result.lastPendingAskId;
         lastPendingPlanId = result.lastPendingPlanId;
         // 增量 result 范围内若无新 pending plan/ask，但 sc 旧值仍未 resolved → 保留 sc 值，

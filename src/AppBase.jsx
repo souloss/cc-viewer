@@ -14,7 +14,7 @@ import { apiUrl } from './utils/apiUrl';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
-import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries, saveSessionIndex } from './utils/entryCache';
+import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries } from './utils/entryCache';
 import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace } from './utils/sessionManager';
 import { mergeMainAgentSessions as _mergeMainAgentSessions } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
@@ -750,7 +750,6 @@ class AppBase extends React.Component {
             for (const [sid, coldEntries] of coldGroups) {
               saveSessionEntries(pn, sid, coldEntries);
             }
-            saveSessionIndex(pn, fullIndex);
             saveEntries(pn, merged);
           }
           this.setState({
@@ -970,7 +969,6 @@ class AppBase extends React.Component {
               for (const [sid, coldEntries] of coldGroups) {
                 saveSessionEntries(pn, sid, coldEntries);
               }
-              saveSessionIndex(pn, fullIndex);
               // 主缓存保存全量 entries（而非 hotEntries），确保下次缓存恢复时有完整数据
               saveEntries(pn, entries);
             }
@@ -1501,7 +1499,6 @@ class AppBase extends React.Component {
           for (const [sid, coldEntries] of coldGroups) {
             saveSessionEntries(pn, sid, coldEntries);
           }
-          saveSessionIndex(pn, fullIndex);
           saveEntries(pn, merged);
         }
 
@@ -1535,7 +1532,6 @@ class AppBase extends React.Component {
       for (const [sid, coldEntries] of coldGroups) {
         saveSessionEntries(projectName, sid, coldEntries);
       }
-      saveSessionIndex(projectName, fullIndex);
       // 不调 saveEntries：state.requests 可能已是 hotEntries，写入会覆盖全量缓存。
       // 冷数据已通过 saveSessionEntries 持久化，全量缓存由 load_end 维护。
     }
