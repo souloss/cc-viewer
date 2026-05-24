@@ -358,14 +358,6 @@ class App extends AppBase {
               isLocalLog={!!this._isLocalLog}
               localLogFile={this._localLogFile}
               projectName={this.state.projectName}
-              collapseToolResults={prefs.collapseToolResults}
-              onCollapseToolResultsChange={this.handleCollapseToolResultsChange}
-              expandThinking={prefs.expandThinking}
-              onExpandThinkingChange={this.handleExpandThinkingChange}
-              showFullToolContent={prefs.showFullToolContent}
-              onShowFullToolContentChange={this.handleShowFullToolContentChange}
-              expandDiff={prefs.expandDiff}
-              onExpandDiffChange={this.handleExpandDiffChange}
               filterIrrelevant={!this.state.showAll}
               onFilterIrrelevantChange={this.handleFilterIrrelevantChange}
               logDir={this.state.logDir}

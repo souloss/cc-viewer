@@ -1651,10 +1651,6 @@ class AppBase extends React.Component {
     this.context.updatePreferences({ expandThinking: checked });
   };
 
-  handleExpandDiffChange = (checked) => {
-    this.context.updatePreferences({ expandDiff: checked });
-  };
-
   handleAutoApproveChange = (seconds) => {
     this.setState({ autoApproveSeconds: seconds });
     this.context.updatePreferences({ autoApproveSeconds: seconds });

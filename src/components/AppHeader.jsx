@@ -228,10 +228,6 @@ class AppHeader extends React.Component {
       nextProps.isLocalLog !== this.props.isLocalLog ||
       nextProps.localLogFile !== this.props.localLogFile ||
       nextProps.projectName !== this.props.projectName ||
-      nextProps.collapseToolResults !== this.props.collapseToolResults ||
-      nextProps.expandThinking !== this.props.expandThinking ||
-      nextProps.showFullToolContent !== this.props.showFullToolContent ||
-      nextProps.expandDiff !== this.props.expandDiff ||
       nextProps.filterIrrelevant !== this.props.filterIrrelevant ||
       nextProps.logDir !== this.props.logDir ||
       nextProps.cliMode !== this.props.cliMode ||
@@ -1094,8 +1090,15 @@ class AppHeader extends React.Component {
   }
 
   render() {
-    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, collapseToolResults, onCollapseToolResultsChange, expandThinking, onExpandThinkingChange, showFullToolContent, onShowFullToolContentChange, expandDiff, onExpandDiffChange, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, resumeAutoChoice, onResumeAutoChoiceToggle, onResumeAutoChoiceChange, themeColor, onThemeColorChange, autoApproveSeconds, onAutoApproveChange } = this.props;
+    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, resumeAutoChoice, onResumeAutoChoiceToggle, onResumeAutoChoiceChange, themeColor, onThemeColorChange, autoApproveSeconds, onAutoApproveChange } = this.props;
     const { countdownText } = this.state;
+    // 这 4 个偏好的唯一真相源是 SettingsContext（P0③）。AppHeader 已绑 SettingsContext，
+    // 直接派生消费 + 调 updatePreferences，不再经 App 的 prop drilling。默认值与 AppBase._prefValues() 一致。
+    const _prefs = (this.context && this.context.preferences) || {};
+    const collapseToolResults = _prefs.collapseToolResults ?? true;
+    const expandThinking = !!_prefs.expandThinking;
+    const expandDiff = !!_prefs.expandDiff;
+    const showFullToolContent = !!_prefs.showFullToolContent;
 
     const menuItems = [
       {
@@ -1443,14 +1446,14 @@ class AppHeader extends React.Component {
               <span className={styles.settingsLabel}>{t('ui.expandThinking')}</span>
               <Switch
                 checked={!!expandThinking}
-                onChange={(checked) => onExpandThinkingChange && onExpandThinkingChange(checked)}
+                onChange={(checked) => this.context.updatePreferences({ expandThinking: checked })}
               />
             </div>
             <div className={styles.settingsItem}>
               <span className={styles.settingsLabel}>{t('ui.showFullToolContent')}</span>
               <Switch
                 checked={!!showFullToolContent}
-                onChange={(checked) => onShowFullToolContentChange && onShowFullToolContentChange(checked)}
+                onChange={(checked) => this.context.updatePreferences({ showFullToolContent: checked })}
               />
             </div>
             {showFullToolContent && (
@@ -1458,7 +1461,7 @@ class AppHeader extends React.Component {
                 <span className={styles.settingsLabel}>{t('ui.collapseToolResults')}</span>
                 <Switch
                   checked={!!collapseToolResults}
-                  onChange={(checked) => onCollapseToolResultsChange && onCollapseToolResultsChange(checked)}
+                  onChange={(checked) => this.context.updatePreferences({ collapseToolResults: checked })}
                 />
               </div>
             )}
@@ -1533,7 +1536,7 @@ class AppHeader extends React.Component {
             <span className={styles.settingsLabel}>{t('ui.expandDiff')}</span>
             <Switch
               checked={!!expandDiff}
-              onChange={(checked) => onExpandDiffChange && onExpandDiffChange(checked)}
+              onChange={(checked) => this.context.updatePreferences({ expandDiff: checked })}
             />
           </div>
           <div className={styles.settingsDivider} />
