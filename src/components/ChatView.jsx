@@ -16,7 +16,7 @@ import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../utils
 import { playEvent as playVoiceEvent } from '../utils/voicePackPlayer';
 import { buildChunksForAnswer, buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../utils/ptyChunkBuilder';
 import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer } from '../utils/promptClassifier';
-import { isImageFile, isMutatingCommand } from '../utils/commandValidator';
+import { isImageFile } from '../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../utils/fileExpandedPathsStorage';
 import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, getToolResultCache, setToolResultCache, buildSubAgentResultMap, createEmptyGlobalIndexState, appendToGlobalToolResultIndex } from '../utils/toolResultBuilder';
 import { refreshCachedItemProp } from '../utils/refreshCachedItemProp';
@@ -35,6 +35,9 @@ import { Virtuoso } from 'react-virtuoso';
 import { StickyBottomController } from '../utils/stickyBottomController';
 import { AskFlowController, ASK_KIND, LEGACY_ASK_PLACEHOLDER_ID } from './chatview/askFlowController';
 import { UltraplanController } from '../utils/ultraplanController';
+import { ScrollHighlightController } from './chatview/scrollHighlightController';
+import { PermissionController } from './chatview/permissionController';
+import { ToolFileChangeController } from './chatview/toolFileChangeController';
 import { isMobile, isIOS, isPad } from '../env';
 import { t } from '../i18n';
 import { apiUrl } from '../utils/apiUrl';
@@ -61,44 +64,6 @@ const useVirtuoso = isMobile && !isIOS && !isPad;
 // 稳定空对象引用，避免每次 render 创建新 {} 导致子组件重渲染
 const EMPTY_OBJ = {};
 const EMPTY_MAP = {};
-
-// 文件修改类工具：触发文件浏览器与 Git 面板刷新
-const FILE_MUTATING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
-
-// _processedToolIds 去重 Set 上限与砍头后的保留量；FIFO LRU 实现
-//
-// 数学依据：
-//   - MAX = 20000：典型用法 ~25 tool_use/h，连续 800h（≈ 数日不间断对话）才触发
-//   - KEEP = 15000：砍头一次移除 5000 条最旧 id，避免逼近上限时频繁小批量砍头抖动
-//   - 内存开销：20000 × ~30 字符 toolu_xxx ≈ 600KB（Set + Queue），可接受
-//
-// 设计意图（vs 旧的暴力 clear）：
-//   清空整个 Set 后，仍残留在 sessions/requests 中的旧 tool_use block 会被重新认作
-//   "新事件"再触发一次刷新（用户感知"忽刷忽不刷"）。FIFO 砍头保证最新的事件 id
-//   仍在 Set 内不被误识，只丢弃确实过老的（用户已不关心的）id。
-const PROCESSED_TOOL_IDS_MAX = 20000;
-const PROCESSED_TOOL_IDS_KEEP = 15000;
-
-// tool_use_id 防御性长度上限；与 server.js:2369 的 ask-bridge 风格一致，
-// 防御异常长 id 占用内存（正常 toolu_xxx 长度 ~30 字符）
-const TOOL_USE_ID_MAX_LEN = 256;
-
-// 收集 tool_use 块到 toolUseMap（id → {name, input}）的纯函数。
-// 提到模块顶层避免 _checkToolFileChanges 每次调用都重建闭包。
-function collectToolUseBlocks(blocks, toolUseMap) {
-  if (!Array.isArray(blocks)) return;
-  for (const block of blocks) {
-    if (block.type === 'tool_use' && block.id && block.name) {
-      let input = block.input;
-      if (typeof input === 'string') {
-        // 流式过程中 input 字段可能是 "[object Object]{...}" 残片：上游 toString 污染
-        // 把已有的 [object Object] 前缀剥掉再 parse；解析失败兜底空对象，不影响 toolName 路径
-        try { input = JSON.parse(input.replace(/^\[object Object\]/, '')); } catch { input = {}; }
-      }
-      toolUseMap.set(block.id, { name: block.name, input });
-    }
-  }
-}
 
 // ASK_KIND / LEGACY_ASK_PLACEHOLDER_ID 现由 ./chatview/askFlowController 定义并 import（见顶部）。
 
@@ -269,21 +234,15 @@ class ChatView extends React.Component {
       // ExitPlanMode V2 input.planFilePath 异步读盘缓存：{ [planFilePath]: content }
       planFileContents: {},
     };
-    this._processedToolIds = new Set();
-    // 与 _processedToolIds 同步的插入顺序队列。
-    // INVARIANT: 每次 add(id) 同时 push(id)，trim 时同步从 Set 删除最早的；两者长度始终相等。
-    this._processedToolIdQueue = [];
-    this._projectDirCache = null; // 缓存项目目录绝对路径
-    this._fileRefreshTimer = null;
-    this._gitRefreshTimer = null;
-    // 关闭期间累积的修改信号；下次面板打开时消费一次（与 setState 一并触发刷新计数 +1）
+    this._projectDirCache = null; // 缓存项目目录绝对路径（toolFileChangeController 经 host 读）
+    // 关闭期间累积的修改信号；下次面板打开时消费一次（与 setState 一并触发刷新计数 +1）。
+    // toolFileChangeController 经 host.setPendingXxxRefresh 写，_setFileExplorerOpen / render Git 开关消费。
     this._pendingFileRefresh = false;
     this._pendingGitRefresh = false;
     this._queueTimer = null;
     this._prevItemsLen = 0;
     this._scrollTargetIdx = null;
     this._scrollTargetRef = React.createRef();
-    this._scrollFadeTimer = null;
     this._resizing = false;
     this._dragTarget = null; // 'terminal' | 'sidebar'
     // _inputWs 现在是 getter(挂在原型),不在 constructor 上设字段,避免覆盖 getter
@@ -383,6 +342,30 @@ class ChatView extends React.Component {
       messageError: (msg) => message.error(msg),
       closeEditor: () => this._closeCustomUltraplanEditor(),
     });
+
+    // 跳转高亮「滚动即褪色」（见 ./chatview/scrollHighlightController）。
+    this._scrollHighlight = new ScrollHighlightController({
+      getScrollContainer: () => this._getScrollContainer(),
+      setState: (updater) => this.setState(updater),
+    });
+
+    // 权限审批队列（见 ./chatview/permissionController）；state 仍留 ChatView.state。
+    this._permission = new PermissionController({
+      getState: () => this.state,
+      setState: (updater) => this.setState(updater),
+      ws: () => this._inputWs,
+      promptOptionClick: (n) => this.handlePromptOptionClick(n),
+    });
+
+    // 工具文件变更监听 + LRU 去重（见 ./chatview/toolFileChangeController）。
+    this._toolFileMonitor = new ToolFileChangeController({
+      getState: () => this.state,
+      setState: (updater) => this.setState(updater),
+      getProps: () => this.props,
+      getProjectDir: () => this._projectDirCache,
+      setPendingFileRefresh: () => { this._pendingFileRefresh = true; },
+      setPendingGitRefresh: () => { this._pendingGitRefresh = true; },
+    });
   }
 
   _setFileExplorerOpen(open) {
@@ -396,153 +379,6 @@ class ChatView extends React.Component {
       }));
     } else {
       this.setState({ fileExplorerOpen: open });
-    }
-  }
-
-  /**
-   * 处理单个 tool_result 块：根据反查到的 tool_use 元信息决定是否刷新各面板。
-   * @param {object} block        tool_result 块
-   * @param {Map} toolUseMap      Pass 1 收集到的 id → {name, input} 索引
-   * @param {{needFileRefresh:boolean, needGitRefresh:boolean, needContentRefresh:boolean}} flags
-   *                              出参：累积刷新意图
-   */
-  _processToolResult(block, toolUseMap, flags) {
-    if (block.type !== 'tool_result' || !block.tool_use_id) return;
-    // 防御性长度上限，防止异常 id 污染内存（正常 toolu_xxx ~30 字符）
-    if (typeof block.tool_use_id !== 'string' || block.tool_use_id.length > TOOL_USE_ID_MAX_LEN) return;
-    if (this._processedToolIds.has(block.tool_use_id)) return;
-    // 即使失败 / 无 meta 也要标记为已处理，避免后续 cdU 重复扫
-    this._processedToolIds.add(block.tool_use_id);
-    this._processedToolIdQueue.push(block.tool_use_id);
-
-    if (block.is_error) return;
-    const meta = toolUseMap.get(block.tool_use_id);
-    if (!meta) return;
-    const { name: toolName, input } = meta;
-
-    if (FILE_MUTATING_TOOLS.has(toolName)) {
-      flags.needFileRefresh = true;
-      flags.needGitRefresh = true;
-    } else if (toolName === 'Bash' && input && input.command && isMutatingCommand(input.command)) {
-      flags.needFileRefresh = true;
-      flags.needGitRefresh = true;
-    }
-
-    // Auto-refresh FileContentView when the currently open file is modified
-    if (FILE_MUTATING_TOOLS.has(toolName) && this.state.currentFile) {
-      const fp = input && input.file_path;
-      // typeof guard：Pass 1 JSON.parse 兜底为 {} 时 fp 为 undefined；流式异常 input
-      // 也可能让 fp 为 number/object，rel.startsWith 会抛 TypeError 中断整个 _processToolResult
-      if (typeof fp === 'string' && fp) {
-        let rel = fp;
-        if (rel.startsWith('/') && this._projectDirCache && rel.startsWith(this._projectDirCache + '/')) {
-          rel = rel.slice(this._projectDirCache.length + 1);
-        }
-        if (rel === this.state.currentFile || (rel.startsWith('/') && rel.endsWith('/' + this.state.currentFile))) {
-          flags.needContentRefresh = true;
-        }
-      }
-    }
-  }
-
-  _checkToolFileChanges() {
-    // 扫描所有数据源（mainAgentSessions + props.requests 中的 subAgent/teammate），
-    // 基于 tool_result 触发刷新（确保工具已执行完且未失败），反查 tool_use 索引拿 toolName/input。
-    //
-    // 为什么改成 tool_result 触发：
-    // - tool_use 写入 jsonl 时工具尚未执行（特别是 Bash 长命令、需 permission 审批的工具）
-    // - tool_result 写入 = 工具已执行完；is_error=true 时跳过避免无谓刷新
-    //
-    // 为什么扫 props.requests：subAgent / teammate（Task 工具调用、Agent Team）
-    // 的修改不会出现在 mainAgentSessions，必须从 requests 直接扫
-
-    // INVARIANT: _processedToolIds 与 _processedToolIdQueue 长度必须始终相等。
-    // 仅 development 校验（vite prod build 会 dead-code-eliminate 整个分支；test 环境也跳过避免噪声）
-    if (process.env.NODE_ENV === 'development' &&
-        this._processedToolIds.size !== this._processedToolIdQueue.length) {
-      console.warn('[ChatView] processed-tool-ids invariant broken',
-                   { setSize: this._processedToolIds.size, queueLen: this._processedToolIdQueue.length });
-    }
-
-    const sessions = this.props.mainAgentSessions || [];
-    const requests = this.props.requests || [];
-    if (sessions.length === 0 && requests.length === 0) return;
-
-    // 用 FIFO 队列做 LRU 砍头：上限 20000（≈ 持续多日对话），砍头一次保留 15000 条；
-    // 普通会话几乎不触发。避免暴力 clear() 导致残留旧 id 被重新认作新事件
-    if (this._processedToolIds.size > PROCESSED_TOOL_IDS_MAX) {
-      const trimCount = this._processedToolIds.size - PROCESSED_TOOL_IDS_KEEP;
-      const toRemove = this._processedToolIdQueue.splice(0, trimCount);
-      for (const id of toRemove) this._processedToolIds.delete(id);
-    }
-
-    // ─── Pass 1: 收集 tool_use 索引（id → {name, input}）─────────────────
-    // 同时扫 mainAgentSessions（含流式 response.body.content）与 requests（subAgent/teammate）
-    const toolUseMap = new Map();
-    for (const session of sessions) {
-      collectToolUseBlocks(session.response?.body?.content, toolUseMap);
-      if (Array.isArray(session.messages)) {
-        for (const msg of session.messages) {
-          if (msg.role === 'assistant') collectToolUseBlocks(msg.content, toolUseMap);
-        }
-      }
-    }
-    for (const req of requests) {
-      collectToolUseBlocks(req.response?.body?.content, toolUseMap);
-      if (Array.isArray(req.body?.messages)) {
-        for (const msg of req.body.messages) {
-          if (msg.role === 'assistant') collectToolUseBlocks(msg.content, toolUseMap);
-        }
-      }
-    }
-
-    // ─── Pass 2: 扫 tool_result 触发刷新 ─────────────────────────────
-    const flags = { needFileRefresh: false, needGitRefresh: false, needContentRefresh: false };
-
-    for (const session of sessions) {
-      if (!Array.isArray(session.messages)) continue;
-      for (const msg of session.messages) {
-        if (msg.role === 'user' && Array.isArray(msg.content)) {
-          for (const block of msg.content) this._processToolResult(block, toolUseMap, flags);
-        }
-      }
-    }
-    for (const req of requests) {
-      if (!Array.isArray(req.body?.messages)) continue;
-      for (const msg of req.body.messages) {
-        if (msg.role === 'user' && Array.isArray(msg.content)) {
-          for (const block of msg.content) this._processToolResult(block, toolUseMap, flags);
-        }
-      }
-    }
-    const { needFileRefresh, needGitRefresh, needContentRefresh } = flags;
-
-    if (needFileRefresh) {
-      if (this.state.fileExplorerOpen) {
-        clearTimeout(this._fileRefreshTimer);
-        this._fileRefreshTimer = setTimeout(() => {
-          this.setState(prev => ({ fileExplorerRefresh: prev.fileExplorerRefresh + 1 }));
-        }, 500);
-      } else {
-        // 面板关闭期间记 pending，由 _setFileExplorerOpen(true) 消费
-        this._pendingFileRefresh = true;
-      }
-    }
-    if (needGitRefresh) {
-      if (this.state.gitChangesOpen) {
-        clearTimeout(this._gitRefreshTimer);
-        this._gitRefreshTimer = setTimeout(() => {
-          this.setState(prev => ({ gitChangesRefresh: prev.gitChangesRefresh + 1 }));
-        }, 500);
-      } else {
-        this._pendingGitRefresh = true;
-      }
-    }
-    if (needContentRefresh) {
-      clearTimeout(this._contentRefreshTimer);
-      this._contentRefreshTimer = setTimeout(() => {
-        this.setState(prev => ({ fileVersion: prev.fileVersion + 1 }));
-      }, 500);
     }
   }
 
@@ -850,7 +686,7 @@ class ChatView extends React.Component {
       }
       this._clearPendingImages();
       this._updateSuggestion();
-      this._checkToolFileChanges();
+      this._toolFileMonitor.check();
     } else if (prevProps.requests !== this.props.requests) {
       // requests（filteredRequests）变化但 mainAgentSessions 未变 → 重建 tsToIndex 避免索引偏移
       this._reqScanCache.tsToIndex = {};
@@ -866,7 +702,7 @@ class ChatView extends React.Component {
       this.startRender();
       // subAgent / teammate 的 tool_result 只走 requests 路径（不进 mainAgentSessions），
       // 必须在这里也调一次刷新检查，否则它们的文件修改完全感知不到
-      this._checkToolFileChanges();
+      this._toolFileMonitor.check();
     } else if (prevProps.collapseToolResults !== this.props.collapseToolResults || prevProps.expandThinking !== this.props.expandThinking) {
       const rawItems = this.buildAllItems();
       const allItems = this._applyMobileSlice(rawItems);
@@ -944,11 +780,8 @@ class ChatView extends React.Component {
       }
     } catch {}
     if (this._queueTimer) clearTimeout(this._queueTimer);
-    if (this._fadeClearTimer) clearTimeout(this._fadeClearTimer);
     if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
-    if (this._fileRefreshTimer) clearTimeout(this._fileRefreshTimer);
-    if (this._gitRefreshTimer) clearTimeout(this._gitRefreshTimer);
-    if (this._contentRefreshTimer) clearTimeout(this._contentRefreshTimer);
+    this._toolFileMonitor.dispose();
     if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
     if (this._planFeedbackTimer) clearTimeout(this._planFeedbackTimer);
     if (this._streamingFadeTimer) clearTimeout(this._streamingFadeTimer);
@@ -960,7 +793,7 @@ class ChatView extends React.Component {
       for (const entry of this._pendingFlushQueue) clearTimeout(entry.tid);
       this._pendingFlushQueue.length = 0;
     }
-    this._unbindScrollFade();
+    this._scrollHighlight.dispose();
     // 流式吸底统一清理：dispose 内会卸 RO + scroll listener + document touch + cancel 全部 rAF
     if (this._stickyController) this._stickyController.dispose();
     if (this._unsubWsHandler) { try { this._unsubWsHandler(); } catch {} this._unsubWsHandler = null; }
@@ -1021,7 +854,7 @@ class ChatView extends React.Component {
         this._scrollTargetRef = React.createRef();
         if (targetTs) {
           this.setState({ highlightTs: targetTs, highlightFading: false });
-          this._bindScrollFade();
+          this._scrollHighlight.bind();
         }
         if (this.props.onScrollTsDone) this.props.onScrollTsDone();
         return;
@@ -1049,7 +882,7 @@ class ChatView extends React.Component {
       this._scrollTargetRef = React.createRef();
       if (targetTs) {
         this.setState({ highlightTs: targetTs, highlightFading: false });
-        this._bindScrollFade();
+        this._scrollHighlight.bind();
       }
       if (this.props.onScrollTsDone) this.props.onScrollTsDone();
       return;
@@ -1136,39 +969,6 @@ class ChatView extends React.Component {
     return useVirtuoso ? this._virtuosoScrollerEl : this.containerRef.current;
   }
 
-  _bindScrollFade() {
-    this._unbindScrollFade();
-    // 延迟绑定：等待 smooth scroll 动画完成后再监听，避免动画帧触发提前 fading
-    this._scrollFadeDelayTimer = setTimeout(() => {
-      const container = this._getScrollContainer();
-      if (!container) return;
-      this._scrollFadeBoundEl = container;
-      this._onScrollFade = () => {
-        this.setState({ highlightFading: true });
-        this._fadeClearTimer = setTimeout(() => {
-          this.setState({ highlightTs: null, highlightFading: false, highlightVisibleIdx: -1 });
-        }, 2000);
-        this._unbindScrollFade();
-      };
-      container.addEventListener('scroll', this._onScrollFade, { passive: true });
-    }, 500);
-  }
-
-  _unbindScrollFade() {
-    if (this._scrollFadeDelayTimer) {
-      clearTimeout(this._scrollFadeDelayTimer);
-      this._scrollFadeDelayTimer = null;
-    }
-    if (this._fadeClearTimer) {
-      clearTimeout(this._fadeClearTimer);
-      this._fadeClearTimer = null;
-    }
-    if (this._onScrollFade && this._scrollFadeBoundEl) {
-      this._scrollFadeBoundEl.removeEventListener('scroll', this._onScrollFade);
-      this._scrollFadeBoundEl = null;
-      this._onScrollFade = null;
-    }
-  }
 
   // 派生 per-keyPrefix 的 _mergedAskAnswerMap：cached.askAnswerMap 是原地 mutate 的，引用永远不变；
   // 用 _askDirty + localAsk 引用 + 上一轮 cache 引用做三信号失效判断。
@@ -2587,72 +2387,10 @@ class ChatView extends React.Component {
   };
 
   // Shift the next queued permission request into active position
-  _shiftPermissionQueue = () => {
-    this.setState(state => {
-      const next = state.permissionQueue[0] || null;
-      return { pendingPermission: next, permissionQueue: state.permissionQueue.slice(1) };
-    });
-  };
-
-  handlePermissionAllow = (id) => {
-    const perm = this.state.pendingPermission;
-    if (perm?.source === 'pty' && perm.ptyPrompt) {
-      const optNum = this._findPtyOptionNumber(perm.ptyPrompt, 'allow');
-      this.handlePromptOptionClick(optNum);
-      this._shiftPermissionQueue();
-      return;
-    }
-    const ws = this._inputWs;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'perm-hook-answer', id, decision: 'allow' }));
-    }
-    this._shiftPermissionQueue();
-  };
-
-  handlePermissionAllowSession = (id) => {
-    const perm = this.state.pendingPermission;
-    if (perm?.source === 'pty' && perm.ptyPrompt) {
-      const optNum = this._findPtyOptionNumber(perm.ptyPrompt, 'allowSession');
-      this.handlePromptOptionClick(optNum);
-      this._shiftPermissionQueue();
-      return;
-    }
-    const ws = this._inputWs;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'perm-hook-answer', id, decision: 'allow', allowSession: true }));
-    }
-    this._shiftPermissionQueue();
-  };
-
-  handlePermissionDeny = (id) => {
-    const perm = this.state.pendingPermission;
-    if (perm?.source === 'pty' && perm.ptyPrompt) {
-      const optNum = this._findPtyOptionNumber(perm.ptyPrompt, 'deny');
-      this.handlePromptOptionClick(optNum);
-      this._shiftPermissionQueue();
-      return;
-    }
-    const ws = this._inputWs;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'perm-hook-answer', id, decision: 'deny' }));
-    }
-    this._shiftPermissionQueue();
-  };
-
-  _findPtyOptionNumber(prompt, decision) {
-    const options = prompt?.options || [];
-    if (decision === 'allow') {
-      const opt = options.find(o => /^yes$/i.test(o.text.trim()))
-        || options.find(o => /^yes/i.test(o.text) && !/allow|session|project/i.test(o.text));
-      return opt?.number || 1;
-    }
-    if (decision === 'allowSession') {
-      const opt = options.find(o => /allow.*(?:project|session|during)/i.test(o.text));
-      return opt?.number || 2;
-    }
-    const opt = options.find(o => /^no$/i.test(o.text.trim()) || /^no[^a-z]/i.test(o.text));
-    return opt?.number || options.length;
-  }
+  // 权限审批委托给 PermissionController（见 ./chatview/permissionController）。方法名不变，render/cDU 引用不动。
+  handlePermissionAllow = (id) => this._permission.allow(id);
+  handlePermissionAllowSession = (id) => this._permission.allowSession(id);
+  handlePermissionDeny = (id) => this._permission.deny(id);
 
   handlePlanApprove = (id) => {
     const ws = this._inputWs;
@@ -3325,7 +3063,7 @@ class ChatView extends React.Component {
     if (timestamp) {
       this.setState({ highlightTs: timestamp, highlightFading: false, highlightVisibleIdx: visibleIdx }, () => {
         this._doScrollToVisibleIdx(visibleIdx);
-        this._bindScrollFade();
+        this._scrollHighlight.bind();
       });
     } else {
       // 无 timestamp 的遗留消息：仅滚动，不触发高亮
