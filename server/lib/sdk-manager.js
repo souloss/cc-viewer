@@ -519,6 +519,53 @@ export function cancelApproval(id, reason) {
 }
 
 /**
+ * Interrupt the current turn (user clicked the Stop button) while KEEPING the
+ * session alive so the next message resumes the same conversation.
+ *
+ * Only closes the active query iterator — `_executeQuery`'s finally block then
+ * runs `_resetStreamingState()`, nulls `_activeQuery`, and emits
+ * `streaming_status{active:false}`; `sendUserMessage`'s finally clears
+ * `_queryBusy`. Crucially we do NOT call `_resetFullState()`, so `_sessionId`
+ * is preserved and the next sendUserMessage resumes via `options.resume`.
+ *
+ * Contrast with `stopSession()` below, which is the hard process-exit cleanup
+ * that also nulls `_sessionId` (loses conversation continuity).
+ *
+ * Also drops any queued-but-not-yet-dispatched messages (`_messageQueue`): a Stop
+ * must halt pending work, otherwise `sendUserMessage`'s drain loop would immediately
+ * run the next queued message right after the interrupt (e.g. a second client queued
+ * a message while turn 1 streamed). Session continuity is unaffected — the queue only
+ * holds not-yet-started turns.
+ *
+ * Returns the list of approvals that were pending at interrupt time
+ * (`[{ id, kind }]`) so the caller (server.js) can broadcast modal-close
+ * messages to every client. Always an array (empty when nothing was pending).
+ */
+export function interruptTurn() {
+  // Drain any in-flight approval BEFORE closing the query: otherwise its canUseTool
+  // promise stays parked and its timeout timer (24h ask / 5min plan-perm) leaks until
+  // expiry, and clients keep a ghost approval modal open. Mirrors _resetFullState's
+  // approval cleanup (resolve(null) → canUseTool denies; harmless since we're closing).
+  const cancelled = Array.from(_pendingApprovals, ([id, pending]) => ({ id, kind: pending.kind || null }));
+  for (const { id } of cancelled) {
+    _pendingApprovals.get(id)?.resolve(null);
+  }
+  _pendingApprovals.clear();
+
+  // Drop queued (not-yet-dispatched) messages so Stop actually halts pending work —
+  // else sendUserMessage's `while (_messageQueue.length)` drain runs the next one.
+  _messageQueue = [];
+
+  if (_activeQuery) {
+    // Best-effort streaming-mode control request (no-op / rejects in single-prompt mode → swallow).
+    try { _activeQuery.interrupt?.().catch(() => {}); } catch {}
+    // Forcefully terminate the underlying CLI subprocess — aborts an in-flight query.
+    try { if (typeof _activeQuery.close === 'function') _activeQuery.close(); } catch {}
+  }
+  return cancelled;
+}
+
+/**
  * Stop the active SDK session.
  */
 export function stopSession() {

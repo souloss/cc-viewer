@@ -19,7 +19,7 @@ const SPEECH_LANG_MAP = {
   tr: 'tr-TR', uk: 'uk-UA',
 };
 
-function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, streamingFading, pendingImages, onRemovePendingImage, setContextBarSlot }) {
+function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, pendingImages, onRemovePendingImage, setContextBarSlot }) {
   const [plusOpen, setPlusOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [interimText, setInterimText] = useState('');
@@ -402,21 +402,6 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
               : (inputSuggestion && inputEmpty ? t('ui.chatInput.hintTab') : t('ui.chatInput.hintEnter'))}
           </div>
           <div className={styles.sendBtnWrap}>
-            {(isStreaming || streamingFading) && (
-              <div className={`${styles.streamingSpinner}${streamingFading ? ` ${styles.streamingSpinnerFading}` : ''}`} aria-hidden="true">
-                <svg className={styles.streamingSvg} viewBox="0 0 32 32">
-                  <circle cx="16" cy="16" r="15" pathLength="100" fill="none" strokeWidth="1.5"
-                    stroke="var(--color-primary-lighter)" strokeOpacity="0.25"
-                    strokeLinecap="round" strokeDasharray="14 86" strokeDashoffset="0" />
-                  <circle cx="16" cy="16" r="15" pathLength="100" fill="none" strokeWidth="1.5"
-                    stroke="var(--color-primary-lighter)" strokeOpacity="0.55"
-                    strokeLinecap="round" strokeDasharray="7 93" strokeDashoffset="-6" />
-                  <circle cx="16" cy="16" r="15" pathLength="100" fill="none" strokeWidth="1.5"
-                    stroke="var(--color-primary-lighter)" strokeOpacity="1"
-                    strokeLinecap="round" strokeDasharray="3 97" strokeDashoffset="-10" />
-                </svg>
-              </div>
-            )}
             {isStreaming && onStop ? (
               <button
                 type="button"
@@ -426,7 +411,7 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
                 aria-label={t('ui.chatInput.stop')}
               >
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-                  <rect x="1" y="1" width="10" height="10" rx="1.5" />
+                  <rect x="1.5" y="1.5" width="9" height="9" rx="1.5" />
                 </svg>
               </button>
             ) : (

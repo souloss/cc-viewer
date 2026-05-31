@@ -557,7 +557,6 @@
 :global(html.pad-mode) .chatInputHint { font-size: 11px; }
 :global(html.pad-mode) .sendBtn { width: 28px; height: 28px; }
 :global(html.pad-mode) .sendBtn svg { width: 16px; height: 16px; }
-:global(html.pad-mode) .streamingSpinner { width: 34px; height: 34px; }
 :global(html.pad-mode) .imagePreviewStrip { gap: 8px; padding: 8px 14px 0; }
 :global(html.pad-mode) .imagePreviewItem { width: 48px; height: 48px; border-radius: 6px; }
 :global(html.pad-mode) .imagePreviewRemove { width: 16px; height: 16px; font-size: 12px; opacity: 0; }
@@ -565,50 +564,8 @@
 :global(html.pad-mode) .filePreviewName { font-size: 12px; }
 :global(html.pad-mode) .filePreviewClose { width: 16px; height: 16px; font-size: 12px; }
 
-/* ─── Streaming comet-tail ring around send button ─── */
-
 .sendBtnWrap {
   position: relative;
   display: flex;
   flex-shrink: 0;
-}
-
-/* 外层 HTML div 固定像素尺寸，compositor 可提升层；SVG 只做装饰绘制 */
-.streamingSpinner {
-  position: absolute;
-  top: -3px;
-  left: -3px;
-  width: 34px;
-  height: 34px;
-  pointer-events: none;
-  opacity: 1;
-  transform-origin: 50% 50%;
-  will-change: transform;
-  animation: ccvSendSpin 1.8s linear infinite;
-  transition: opacity 0.4s ease-out;
-}
-
-.streamingSvg {
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  display: block;
-}
-
-.streamingSpinnerFading {
-  opacity: 0;
-}
-
-@keyframes ccvSendSpin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .streamingSpinner { animation: none; }
-}
-
-/* 移动端：按钮 47×47 → spinner 53×53（放在默认规则之后，源序胜过上面的 media block） */
-@media (max-width: 768px) {
-  .streamingSpinner { width: 53px; height: 53px; }
 }

@@ -11,6 +11,7 @@ import { Worker } from 'node:worker_threads';
 import { isPathContained } from './lib/file-api.js';
 import { setEntry as askStoreSetEntry, deleteEntry as askStoreDeleteEntry, pruneStale as askStorePruneStale, markAnswered as askStoreMarkAnswered, markCancelled as askStoreMarkCancelled } from './lib/ask-store.js';
 import { ASK_TIMEOUT_MS } from './lib/ask-constants.js';
+import { sdkApprovalCloseType } from './lib/sdk-adapter.js';
 import { DIST_DIR, NODE_MODULES } from './_paths.js';
 import { createDispatcher } from './routes/_dispatch.js';
 import { projectMetaRoutes } from './routes/project-meta.js';
@@ -1435,6 +1436,29 @@ async function setupTerminalWebSocket(httpServer) {
                 console.error('[SDK] sendUserMessage error:', err.message);
               });
             }
+          } else if (msg.type === 'sdk-interrupt') {
+            // Stop button in SDK mode — interrupt current turn, keep session alive.
+            // _executeQuery's finally emits streaming_status{active:false} to reconcile UI.
+            if (isSdkMode && _sdkInterruptTurn) {
+              const cancelled = _sdkInterruptTurn() || [];
+              // Close any open approval modal on every client (the canUseTool promise was just
+              // drained server-side; reuse each kind's existing resolve/cancel broadcast type).
+              if (cancelled.length && terminalWss) {
+                for (const { id, kind } of cancelled) {
+                  if (!id) continue;
+                  const type = sdkApprovalCloseType(kind);
+                  const m = JSON.stringify({ type, id, reason: 'Turn interrupted' });
+                  terminalWss.clients.forEach((c) => {
+                    if (c.readyState === 1) { try { c.send(m); } catch {} }
+                  });
+                }
+              }
+            } else {
+              // sdk-interrupt 收到却没生效：客户端按 props.sdkMode 发了中断，但本端不是 SDK 模式或
+              // _sdkInterruptTurn 未由 cli.js 接线（client/server sdkMode 配置漂移）。此时客户端会乐观
+              // 切非运行态并等 4s 兜底才翻回，输出仍在流 —— 打日志让这类错配可观测。
+              console.warn('[SDK] sdk-interrupt ignored: isSdkMode=%s, handler=%s', isSdkMode, !!_sdkInterruptTurn);
+            }
           } else if (msg.type === 'image-remove-notify' || msg.type === 'image-upload-notify') {
             // Security: only allow paths within upload directories, reject traversal
             const p = msg.path;
@@ -1840,6 +1864,10 @@ export function setSdkCancelApproval(fn) { _sdkCancelApproval = fn; }
 /** Reference to sdk-manager's sendUserMessage (set by cli.js after import). */
 let _sdkSendUserMessage = null;
 export function setSdkSendUserMessage(fn) { _sdkSendUserMessage = fn; }
+
+/** Reference to sdk-manager's interruptTurn (set by cli.js after import). */
+let _sdkInterruptTurn = null;
+export function setSdkInterruptTurn(fn) { _sdkInterruptTurn = fn; }
 
 // Auto-start the viewer after log file init completes
 // 工作区模式下由 cli.js 直接 import server.js 触发启动，跳过 _initPromise 自动启动

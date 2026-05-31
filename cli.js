@@ -480,6 +480,7 @@ async function runSdkMode(extraClaudeArgs = [], cwd, noOpen = false) {
   serverMod.setSdkResolveApproval(sdkManager.resolveApproval);
   serverMod.setSdkCancelApproval(sdkManager.cancelApproval);
   serverMod.setSdkSendUserMessage(sdkManager.sendUserMessage);
+  serverMod.setSdkInterruptTurn(sdkManager.interruptTurn);
 
   // 自动打开浏览器
   const protocol = serverMod.getProtocol();

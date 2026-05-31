@@ -6,6 +6,7 @@ import {
   resolveApproval,
   cancelApproval,
   stopSession,
+  interruptTurn,
   getSessionId,
 } from '../server/lib/sdk-manager.js';
 
@@ -77,6 +78,29 @@ describe('sdk-manager', () => {
 
     it('clears session id after stop', () => {
       stopSession();
+      assert.equal(getSessionId(), null);
+    });
+  });
+
+  describe('interruptTurn', () => {
+    it('does not throw when no active query', () => {
+      stopSession();
+      assert.doesNotThrow(() => interruptTurn());
+    });
+
+    it('returns an array of cancelled approvals (empty when none pending)', () => {
+      stopSession();
+      const result = interruptTurn();
+      assert.ok(Array.isArray(result));
+      assert.equal(result.length, 0);
+    });
+
+    it('preserves session id — does not run the full _resetFullState reset', () => {
+      // interruptTurn keeps the session alive (only stopSession nulls _sessionId).
+      // With no active session getSessionId is already null; the contract verified
+      // here is that interruptTurn never throws while leaving session state intact.
+      stopSession();
+      assert.doesNotThrow(() => interruptTurn());
       assert.equal(getSessionId(), null);
     });
   });

@@ -250,12 +250,12 @@ describe('StickyBottomController', () => {
     // 让 writeUnderLock 解锁
     flushRAF(2);
     assert.equal(ctrl._lockDepth, 1, 'write 已解，smooth 仍持');
-    // 让 smoothFollow 跑到底
-    for (let i = 0; i < 30 && ctrl._smoothFollowRafId !== null; i++) flushRAF(1);
-    flushRAF(1);
+    // 让 smoothFollow 跑到底（mockNow 每帧推进越过 33ms 节流门控，缓动才会逐帧移动）
+    for (let i = 0; i < 30 && ctrl._smoothFollowRafId !== null; i++) { mockNow += 40; flushRAF(1); }
+    mockNow += 40; flushRAF(1);
     // 强制让 smooth follow 完成
     el.scrollTop = el.scrollHeight - el.clientHeight; // gap=0
-    for (let i = 0; i < 30 && ctrl._smoothLockHeld; i++) flushRAF(1);
+    for (let i = 0; i < 30 && ctrl._smoothLockHeld; i++) { mockNow += 40; flushRAF(1); }
     assert.equal(ctrl._lockDepth, 0, '最后归零');
   });
 
@@ -479,5 +479,82 @@ describe('StickyBottomController', () => {
     assert.equal(stickyHistory.length, 0, 'suppressOnce 期间 onScroll 短路');
     flushRAF(1);
     assert.equal(ctrl.isLocked(), false, '一帧后解锁');
+  });
+
+  // ─── 帧率节流：mockNow 不前进时 step 跳帧（不写 scrollTop），仅在间隔越过后移动 ─────
+  it('27. smoothFollow 帧率门控：间隔内跳帧不写 scrollTop，越过 33ms 才移动', () => {
+    let sticky = true;
+    const ctrl = new StickyBottomController({
+      getSticky: () => sticky, setSticky: (v) => { sticky = v; }, getMode: () => 'desktop',
+      now: () => mockNow,
+    });
+    const el = makeFakeEl({ scrollHeight: 5000, clientHeight: 600, scrollTop: 0 }); // target=4400
+    ctrl.bind(el);
+    ctrl.startSmoothFollow(el);
+    flushRAF(2); // 双 rAF + 首帧 step：lastMoveTs=0 → 立即移动 min(4400*0.35,120)=120
+    assert.equal(el.scrollTop, 120, '首帧立即移动（不被节流）');
+    // mockNow 不前进 → 后续帧全部被门控跳过，scrollTop 不变，但 rAF 链仍存活
+    flushRAF(1);
+    flushRAF(1);
+    flushRAF(1);
+    assert.equal(el.scrollTop, 120, '间隔内的帧被跳过，未写 scrollTop');
+    assert.notEqual(ctrl._smoothFollowRafId, null, '节流期 step 链仍存活（重排 rAF）');
+    // 推进越过 33ms → 下一帧恢复移动
+    mockNow += 40;
+    flushRAF(1);
+    assert.ok(el.scrollTop > 120, '越过节流间隔后继续缓动');
+  });
+
+  // ─── 帧率可调：smoothFollowMinFrameMs=0 关闭节流，恢复每帧移动 ───────────────────
+  it('28. smoothFollowMinFrameMs=0 关闭节流：mockNow 不前进也逐帧移动', () => {
+    let sticky = true;
+    const ctrl = new StickyBottomController({
+      getSticky: () => sticky, setSticky: (v) => { sticky = v; }, getMode: () => 'desktop',
+      now: () => mockNow, smoothFollowMinFrameMs: 0,
+    });
+    const el = makeFakeEl({ scrollHeight: 5000, clientHeight: 600, scrollTop: 0 });
+    ctrl.bind(el);
+    ctrl.startSmoothFollow(el);
+    flushRAF(2);
+    assert.equal(el.scrollTop, 120, '首帧 120');
+    flushRAF(1); // 节流关闭 → 即使 mockNow 不动也再移动一帧
+    assert.ok(el.scrollTop > 120, 'frameMs=0 时不节流，逐帧移动');
+  });
+
+  // ─── 节流期取消即时性：sticky 守卫排在门控之前，节流帧里翻 sticky=false 仍立即 release ───
+  it('29. 节流窗口内 sticky=false → step 立即 release（守卫先于门控，锁不泄漏）', () => {
+    let sticky = true;
+    const ctrl = new StickyBottomController({
+      getSticky: () => sticky, setSticky: (v) => { sticky = v; }, getMode: () => 'desktop',
+      now: () => mockNow,
+    });
+    const el = makeFakeEl({ scrollHeight: 5000, clientHeight: 600, scrollTop: 0 });
+    ctrl.bind(el);
+    ctrl.startSmoothFollow(el);
+    flushRAF(2); // 首帧移动，lastMoveTs=mockNow → 后续帧落入节流窗口（mockNow 冻结）
+    assert.equal(ctrl._lockDepth, 1);
+    sticky = false; // 节流期间取消吸底
+    flushRAF(1); // step：!getSticky() 守卫在门控之前命中 → 立即 release，不被节流吞掉
+    assert.equal(ctrl._smoothLockHeld, false, '节流期 sticky=false 仍即时 release');
+    assert.equal(ctrl._lockDepth, 0, 'lock 归零（无泄漏）');
+    assert.equal(ctrl._smoothFollowRafId, null, 'step 链停，不再重排');
+  });
+
+  // ─── 节流窗口内 dispose：unbind 取消在飞 rAF、lock 强制归零，节流帧不复活 ───────────────
+  it('30. 节流窗口内 dispose → 取消在飞 step rAF + lockDepth 归零', () => {
+    let sticky = true;
+    const ctrl = new StickyBottomController({
+      getSticky: () => sticky, setSticky: (v) => { sticky = v; }, getMode: () => 'desktop',
+      now: () => mockNow,
+    });
+    const el = makeFakeEl({ scrollHeight: 5000, clientHeight: 600, scrollTop: 0 });
+    ctrl.bind(el);
+    ctrl.startSmoothFollow(el);
+    flushRAF(2); // 首帧移动，进入节流窗口
+    ctrl.dispose(); // 节流期 dispose：unbind cancel 在飞 rAF，_lockDepth 强制 0
+    assert.equal(ctrl._smoothFollowRafId, null);
+    assert.equal(ctrl._lockDepth, 0);
+    flushRAF(2); // 即使有残留回调也不复活 lock
+    assert.equal(ctrl._lockDepth, 0);
   });
 });

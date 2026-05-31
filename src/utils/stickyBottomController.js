@@ -17,6 +17,13 @@ const DEFAULT_AT_BOTTOM_PX = 60;
 // 问题可改 8ms 或动态读 screen.refreshRate（P2 backlog，待手动验证）。
 const STICKY_DECISION_DEDUP_MS = 16;
 
+// 平滑追底（startSmoothFollow → step）的帧率节流间隔（ms）。
+// step 缓动本会跟随 rAF 跑满显示器刷新率——120Hz ProMotion 屏上 ~120fps，每帧读写 scrollTop
+// 触发一次 forced reflow（trace 实测 get/set scrollTop 是 #1 JS 热点 + 229 Layout/s）。
+// 流式追底肉眼无需如此密集：门控到 ~30fps（33ms）即与刷新率解耦、视觉等效，主线程 layout/paint
+// 负载降 ~4×。可经 opts.smoothFollowMinFrameMs 调整（设 0 = 关闭节流，恢复每帧）。
+const DEFAULT_SMOOTH_FOLLOW_MIN_FRAME_MS = 33;
+
 const TOUCH_HOLD_MARKER = -1;
 
 export class StickyBottomController {
@@ -28,6 +35,7 @@ export class StickyBottomController {
     this._thresholdLeave = opts.thresholdLeave ?? DEFAULT_THRESHOLD_LEAVE;
     this._touchSuppressMs = opts.touchSuppressMs ?? DEFAULT_TOUCH_SUPPRESS_MS;
     this._atBottomPx = opts.atBottomPx ?? DEFAULT_AT_BOTTOM_PX;
+    this._smoothFollowMinFrameMs = opts.smoothFollowMinFrameMs ?? DEFAULT_SMOOTH_FOLLOW_MIN_FRAME_MS;
     this._now = opts.now || (() => Date.now());
 
     this._lockDepth = 0;
@@ -224,7 +232,9 @@ export class StickyBottomController {
 
   // 缓动追底：双 rAF 等 layout 完，然后 step easeOut（35% gap，min 1px max 120px）
   // _smoothLockHeld 是 owner 标记，整个 step 链占 1 个 lock 引用；嵌套 startSmoothFollow
-  // 不重复 increment（已持有 owner 的 lock）
+  // 不重复 increment（已持有 owner 的 lock）。
+  // 帧率节流：step 用 _smoothFollowMinFrameMs（默认 33ms≈30fps）门控——未到间隔的帧只重排
+  // rAF、不读写 scrollTop，避免每帧 forced reflow（与显示器刷新率解耦，可经 opts 调整）。
   startSmoothFollow(el) {
     if (this._disposed) return;
     const scroller = el || this._boundEl;
@@ -237,6 +247,8 @@ export class StickyBottomController {
       this._cancelRaf(this._smoothFollowRafId);
       this._smoothFollowRafId = null;
     }
+    // 上一次实际移动 scrollTop 的时间戳（闭包内，每条 step 链独立）；0 = 首帧立即移动，不被节流
+    let lastMoveTs = 0;
     const release = () => {
       if (!this._smoothLockHeld) return;
       this._smoothLockHeld = false;
@@ -246,6 +258,12 @@ export class StickyBottomController {
       this._smoothFollowRafId = null;
       if (this._disposed) { release(); return; }
       if (!this._getSticky()) { release(); return; }
+      // 帧率门控：距上次移动不足 _smoothFollowMinFrameMs 则跳过本帧（不触碰 layout），仅重排 rAF。
+      // disposed / sticky 守卫放在门控之前，保证取消语义在节流期间仍即时生效。
+      if (this._smoothFollowMinFrameMs > 0 && (this._now() - lastMoveTs) < this._smoothFollowMinFrameMs) {
+        this._smoothFollowRafId = this._raf(step);
+        return;
+      }
       const target = this._followTarget;
       const current = scroller.scrollTop ?? 0;
       const gap = target - current;
@@ -256,6 +274,7 @@ export class StickyBottomController {
         release();
         return;
       }
+      lastMoveTs = this._now();
       const delta = Math.max(1, Math.min(gap * 0.35, 120));
       try { scroller.scrollTop = current + delta; } catch {}
       this._smoothFollowRafId = this._raf(step);

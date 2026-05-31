@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.286 (2026-05-31)
+
+- fix(chat): SDK 模式「停止」改为真正 halt 在途待发——`interruptTurn` 额外清空服务端 `_messageQueue`(否则停止后 `sendUserMessage` drain 循环立刻续发下一条排队消息,多 client/连发场景可见),客户端 `handleInputStop` 同步清掉 typed-interrupt 武装的 `_pendingFlushQueue`(否则随后的 ask-hook-cancelled ack 会把它发出去);中断关弹窗的 kind→广播类型映射抽出纯函数 `sdkApprovalCloseType`(sdk-adapter.js)+ 全 kind/null 单测;`stopOptimistic` 清理收口为 `_clearStopOptimistic`(4 处去重);sdk-interrupt 在非 SDK 模式收到时打 warn 便于排查 client/server 配置漂移
+- perf(chat): 流式吸底平滑追随(`StickyBottomController.startSmoothFollow` 的 step 缓动)新增帧率节流——原本 step 跟 rAF 跑满显示器刷新率(120Hz ProMotion 屏达 ~120fps),每帧读写 scrollTop 触发 forced reflow(trace 实测 get/set scrollTop 为 #1 JS 热点);改为按 `smoothFollowMinFrameMs`(默认 33ms≈30fps,可经 opts 调整、设 0 关闭)门控,未到间隔的帧只重排 rAF 不触碰 layout,与刷新率解耦,流式期 layout/paint 负载降 ~4×;配套单测覆盖门控跳帧与可调间隔
+- fix(chat): 停止按钮按模式分流中断——SDK 模式 close 当前 query 但保留会话(下条消息 resume 续接)、drain 挂起审批并广播关闭各端审批弹窗;CLI/PTY 模式先发 focus-in(`\x1b[I`)再发 ESC,修复点 HTML 按钮致 xterm 失焦后 Claude 忽略 ESC;点击后乐观即时切非运行态(按钮/页内指示器/实时打字浮层),由 isStreaming 升/降沿 + 4s 兜底多路清除
+- refactor(chat): 移除 send 按钮外圈彗尾流式 spinner(JSX + CSS + `streamingFading` prop)
+
 ## 1.6.285 (2026-05-31)
 
 - feat(ui): 偏好设置「主题风格」新增「显示大小」预设选择器(50%-200%),经 CSS zoom 缩放整个界面(含侧边栏/顶栏/弹窗/portal),并支持 Cmd/Ctrl +/- 步进、Cmd/Ctrl 0 复位快捷键;落服务端 preferences(`displayScale`,无需改服务端)+ localStorage 首屏抢占防闪屏;移动端不受影响;桌面端 Electron 移除原生缩放菜单角色避免双重缩放;档位计算抽到纯函数 `src/utils/displayScaleHelper.js` + 配套单测

@@ -56,6 +56,14 @@ const { Text } = Typography;
 
 const QUEUE_THRESHOLD = 20;
 
+// 乐观停止兜底超时：到点仍未收到真实停止信号则强制清 stopOptimistic。必须 > AppBase 关闭路径
+// （streaming_status{active:false} 的 SSE + 2s _streamingOffTimer），否则会在 isStreaming 仍为 true
+// 时过早清除、让按钮回跳停止态。正常路径由 componentDidUpdate 的 isStreaming 下降沿先清除。
+const STOP_OPTIMISTIC_FALLBACK_MS = 4000;
+// CLI/PTY 停止：focus-in(\x1b[I) 与 ESC(\x1b) 之间的间隔——给 Claude 一次独立 PTY read 先更新聚焦态
+// 再判定 ESC。对齐 _sendUserMessageImmediate 里 input→\r 的既有 50ms 约定（避免引入新魔数）。
+const STOP_FOCUS_IN_ESC_DELAY_MS = 50;
+
 // 免审批下 PTY 子代理 prompt 去重时窗：同一 prompt 在该窗口内被反复检测时只放行一次，
 // 挡住 PTY 慢回显/重绘导致的二次自动放行（_promptSubmitting 仅 500ms，不足以覆盖）。
 const AUTO_ALLOW_PTY_DEDUPE_MS = 2000;
@@ -212,6 +220,7 @@ class ChatView extends React.Component {
       teamModalSession: null,
       mdLightboxSrc: null,
       streamingFading: false,
+      stopOptimistic: false, // 点「停止」后乐观置 true：按钮/指示器立即切非运行态，真实 isStreaming 翻 false 或兜底超时后清除
       presetItems: [],
       mobilePresetModalVisible: false,
       localAskAnswers: {}, // 提交后的本地答案映射，用于 Last Response 立即切换到非交互式
@@ -256,6 +265,7 @@ class ChatView extends React.Component {
     this._ptyBuffer = '';
     this._ptyDataSeq = 0; // increments on every PTY output event
     this._ptyDebounceTimer = null;
+    this._stopOptimisticTimer = null; // 乐观停止兜底定时器
     this._currentPtyPrompt = null; // 同步跟踪 ptyPrompt，避免闭包捕获旧 state
     // 全部 ask 状态机字段 + 方法由 this._askFlow（AskFlowController）持有，见构造末尾。
     // ChatView 不再直接读写这些字段（唯一例外：_detectPrompt 读 this._askFlow._askSubmitting）。
@@ -651,11 +661,19 @@ class ChatView extends React.Component {
       this._streamingFadeTimer = setTimeout(() => {
         this.setState({ streamingFading: false });
       }, 500);
+      // 真实停止落地：清除乐观标志与兜底定时器（正常路径，先于 4s 兜底）
+      if (this.state.stopOptimistic) this._clearStopOptimistic();
     }
     // 如果 streaming 在 fade-out 期间恢复，立即取消 fade 避免 spinner 以 opacity:0 显示
     if (!prevProps.isStreaming && this.props.isStreaming && this.state.streamingFading) {
       clearTimeout(this._streamingFadeTimer);
       this.setState({ streamingFading: false });
+    }
+    // 新一轮在「本端 handleInputSend 之外」发起（中断后队列消息自动续发 / 其他 client / 直接 PTY 键入）：
+    // isStreaming 升起的上升沿即视为陈旧乐观标志失效，立即清除——否则 uiStreaming 会被旧 stopOptimistic
+    // 压住，最长到 4s 兜底才恢复，期间无 spinner、无停止按钮。
+    if (!prevProps.isStreaming && this.props.isStreaming && this.state.stopOptimistic) {
+      this._clearStopOptimistic();
     }
     // Handle files dropped onto the app — add to pendingImages, send at submit time
     if (this.props.pendingUploadPaths && this.props.pendingUploadPaths.length > 0
@@ -680,6 +698,8 @@ class ChatView extends React.Component {
           this._incToolSessionIdx = -1;
           this._reqScanCache = { tsToIndex: {}, modelName: null, completedModelName: null, modelNameByReqIdx: [], subAgentEntries: [], processedCount: 0, subAgentProcessedCount: 0, requestCacheTokenMap: new Map(), globalIndexState: createEmptyGlobalIndexState(), globalIndexProcessedCount: 0 };
           this._sessionItemCache = [];
+          // 会话/工作区切换：清除乐观停止标志，避免陈旧 true 泄漏到新会话
+          if (this.state.stopOptimistic) this._clearStopOptimistic();
         }
         this._prevSessions = this.props.mainAgentSessions;
       }
@@ -789,6 +809,7 @@ class ChatView extends React.Component {
     if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
     if (this._planFeedbackTimer) clearTimeout(this._planFeedbackTimer);
     if (this._streamingFadeTimer) clearTimeout(this._streamingFadeTimer);
+    if (this._stopOptimisticTimer) clearTimeout(this._stopOptimisticTimer);
     // ask 流计时器 / _pendingHookAnswers / _pendingCancelIds 的清理收口到控制器 dispose()
     this._askFlow.dispose();
     // ask-cancel ack 协议清理：_pendingFlushQueue 留在 ChatView（生产者 handleInputSend），
@@ -2542,9 +2563,45 @@ class ChatView extends React.Component {
   // 委托 → AskFlowController
   handleAskQuestionSubmit = (answers, askId, questions) => this._askFlow.handleAskQuestionSubmit(answers, askId, questions);
 
+  // 清除乐观停止标志 + 兜底定时器。收口 4 处重复（流式下降沿/上升沿、会话切换、发起新一轮）；
+  // 各调用点自带触发条件，这里只统一做 timer + state 清理。
+  _clearStopOptimistic = () => {
+    clearTimeout(this._stopOptimisticTimer);
+    this.setState({ stopOptimistic: false });
+  };
+
   handleInputStop = () => {
     if (!this._inputWs || this._inputWs.readyState !== WebSocket.OPEN) return;
-    this._inputWs.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+    // Stop 应 halt 所有待发：清掉 typed-interrupt 武装的 pending-flush 队列（含 500ms 兜底 timer）。
+    // 否则随后到达的 ask-hook-cancelled ack（本端 handleAskCancel 或服务端 interruptTurn 广播）会
+    // takePendingFlush 把它发出去 —— 等于点了"停止"又自动发消息。与服务端 interruptTurn 清空
+    // _messageQueue 同源（停止即丢弃在途待发）。
+    if (this._pendingFlushQueue && this._pendingFlushQueue.length) {
+      for (const entry of this._pendingFlushQueue) clearTimeout(entry.tid);
+      this._pendingFlushQueue.length = 0;
+    }
+    // 按模式分流中断（与 _sendUserMessageImmediate 的 sdkMode 分流同源）：
+    // SDK 模式模型不在 PTY 里，ESC 无效 → 发 sdk-interrupt 让服务端 close 当前 query（保留会话）；
+    // CLI/PTY 模式 → ESC 打断 Claude TUI 当前生成。
+    if (this.props.sdkMode) {
+      this._inputWs.send(JSON.stringify({ type: 'sdk-interrupt' }));
+    } else {
+      // CLI/PTY 模式：ESC 打断 Claude TUI 当前生成。
+      // 关键修复：点击 HTML 停止按钮会让隐藏的 xterm 失焦，向 claude 上报 focus-out (\x1b[O)，
+      // 之后 claude(Ink) 会忽略 ESC（仅在「聚焦」时把 ESC 当中断）。所以先补一个 focus-in (\x1b[I)
+      // 让 claude 认为终端已聚焦，再发 ESC —— 等价于在聚焦的终端里按 Esc（终端里按 Esc 本就有效）。
+      this._inputWs.send(JSON.stringify({ type: 'input', data: '\x1b[I' }));
+      setTimeout(() => {
+        if (this._inputWs && this._inputWs.readyState === WebSocket.OPEN) {
+          this._inputWs.send(JSON.stringify({ type: 'input', data: '\x1b' }));
+        }
+      }, STOP_FOCUS_IN_ESC_DELAY_MS);
+    }
+    // 乐观即时切非运行态：中断已即时发出，按钮无需等 AppBase 的 SSE+2s 才翻 false。
+    this.setState({ stopOptimistic: true });
+    clearTimeout(this._stopOptimisticTimer);
+    // 兜底清除（见 STOP_OPTIMISTIC_FALLBACK_MS 注释）。正常路径由 isStreaming 下降沿/上升沿先清除。
+    this._stopOptimisticTimer = setTimeout(() => this.setState({ stopOptimistic: false }), STOP_OPTIMISTIC_FALLBACK_MS);
   };
 
   handleInputSend = () => {
@@ -2555,6 +2612,9 @@ class ChatView extends React.Component {
     const imagePaths = this.state.pendingImages.map(img => `"${img.path.replace(/"/g, '')}"`).join(' ');
     const text = imagePaths ? (userText ? `${imagePaths} ${userText}` : imagePaths) : userText;
     if (!text) return;
+
+    // 发起新一轮：清除可能仍挂着的乐观停止标志，确保新 run 的按钮正确显示为停止态。
+    if (this.state.stopOptimistic) this._clearStopOptimistic();
 
     // 打字打断（typed-interrupt）：检测到当前有 pending AskUserQuestion 时，先发 ask-cancel
     // + 等 server ack（ask-hook-cancelled，SDK + Hook 双路统一）后再发 user message。
@@ -3209,7 +3269,9 @@ class ChatView extends React.Component {
     // roleFilter 反选 assistant 时跳过 overlay 以遵从过滤语义（否则一边过滤一边仍实时输出自相矛盾）。
     let streamingLiveItem = null;
     const _assistantFilteredOut = _isFiltering && !this.state.roleFilterSelected.has('assistant');
-    if (this.props.streamingLatest && !_assistantFilteredOut) {
+    // 乐观停止：点「停止」后即时停掉实时打字机浮层，避免按钮/页内指示器已切非运行态、
+    // 而中断落地前的残余 SSE chunk 仍在 overlay 里继续吐字（自相矛盾）。
+    if (this.props.streamingLatest && !_assistantFilteredOut && !this.state.stopOptimistic) {
       const sl = this.props.streamingLatest;
       const liveBlocks = (sl.content || []).filter(b =>
         b.type === 'text' || b.type === 'thinking'
@@ -3250,9 +3312,11 @@ class ChatView extends React.Component {
 
     // 仅在 streaming 或淡出期间挂 <img>，避免 ChatView 冷加载就 fetch 76KB 的 shimmer + orbiting。
     // streamingFading 由 isStreaming true→false 时拉起 500ms（line ~551），覆盖淡出动画窗口。
-    const showSpinner = this.props.isStreaming || this.state.streamingFading;
+    // 乐观停止：点「停止」后立即按非运行态渲染（按钮 + 页内指示器），无需等 AppBase 的 SSE+2s。
+    const uiStreaming = this.props.isStreaming && !this.state.stopOptimistic;
+    const showSpinner = uiStreaming || this.state.streamingFading;
     const spinnerNode = showSpinner ? (
-      <div className={`${styles.streamingSpinnerWrap}${(!this.props.isStreaming || streamingLiveItem) ? ' ' + styles.streamingSpinnerHidden : ''}`}>
+      <div className={`${styles.streamingSpinnerWrap}${(!uiStreaming || streamingLiveItem) ? ' ' + styles.streamingSpinnerHidden : ''}`}>
         <object type="image/svg+xml" data={streamSpinnerUrl} width="20" height="20" aria-hidden="true" tabIndex={-1} />
       </div>
     ) : null;
@@ -3279,7 +3343,7 @@ class ChatView extends React.Component {
 
     const stickyBtn = !stickyBottom ? (
       <button className={styles.stickyBottomBtn} onClick={this.handleStickToBottom}>
-        {this.props.isStreaming && <img src={loadingPetUrl} className={styles.loadingPet} alt="" />}
+        {uiStreaming && <img src={loadingPetUrl} className={styles.loadingPet} alt="" />}
         <span>{t('ui.stickyBottom')}</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <polyline points="6 9 12 15 18 9" />
@@ -3612,8 +3676,7 @@ class ChatView extends React.Component {
                   },
                 });
               } : null}
-              isStreaming={this.props.isStreaming}
-              streamingFading={this.state.streamingFading}
+              isStreaming={uiStreaming}
               pendingImages={this.state.pendingImages}
               onRemovePendingImage={this._removePendingImage}
               setContextBarSlot={this.props.setContextBarSlot}
