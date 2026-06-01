@@ -9,6 +9,14 @@ import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manage
 import { mergeApprovalModalPrefs as vpMergeAM } from '../lib/approval-modal-prefs.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { sendEventToClients } from '../lib/log-watcher.js';
+import { listPlatforms } from '../lib/im-config.js';
+
+// IM bridge configs (dingtalk, feishu, …) carry base64 app secrets and are only exposed via the
+// admin-only /api/dingtalk/* and /api/im/* surfaces (with secrets masked). Strip every platform's
+// key from any /api/preferences read/write so an authorized LAN client can never see or set them.
+function stripImConfigs(obj) {
+  if (obj) for (const id of listPlatforms()) delete obj[id];
+}
 
 function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   let prefs = {};
@@ -18,9 +26,7 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   // 全局 auth 与每个项目的 authByProject 覆盖都要剥离(后者同样含明文密码)。
   delete prefs.auth;
   delete prefs.authByProject;
-  // dingtalk 配置（含 base64 app_secret）同存于 preferences.json，只能经 admin-only 的
-  // /api/dingtalk/* 暴露（且 secret 始终脱敏）；绝不能从这里下发给已授权的远程客户端。
-  delete prefs.dingtalk;
+  stripImConfigs(prefs); // dingtalk / feishu / … — admin-only, never to a LAN client
   prefs.logDir = LOG_DIR; // 始终返回当前运行时的日志目录
   // home-friendly 展示形态：设了 CLAUDE_CONFIG_DIR 的用户看到真实路径，默认用户看到 "~/.claude"
   // join() 而非字符串拼接，避免 Windows 分隔符不匹配导致比较失败
@@ -46,8 +52,9 @@ function preferencesPost(req, res, parsedUrl, isLocal, deps) {
       // 任意项目的覆盖,绕过 admin 门禁。
       delete incoming.auth;
       delete incoming.authByProject;
-      // dingtalk 同理：只能经 admin-only 的 /api/dingtalk/config 修改，禁止借 /api/preferences 植入凭据。
-      delete incoming.dingtalk;
+      // IM bridge configs 同理：只能经 admin-only 的 /api/dingtalk/config、/api/im/* 修改，禁止借
+      // /api/preferences 植入凭据。
+      stripImConfigs(incoming);
       // 如果修改了日志目录，先切换再保存到新位置（新目录下生成 preferences.json）
       if (incoming.logDir && typeof incoming.logDir === 'string') {
         setLogDir(incoming.logDir);
@@ -102,7 +109,7 @@ function preferencesPost(req, res, parsedUrl, isLocal, deps) {
       // 已授权的远程客户端。磁盘上的值已在上面写入,这里只清内存对象供响应用。
       delete prefs.auth;
       delete prefs.authByProject;
-      delete prefs.dingtalk;
+      stripImConfigs(prefs);
       prefs.logDir = LOG_DIR;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(prefs));

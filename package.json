@@ -1,6 +1,6 @@
 {
   "name": "cc-viewer",
-  "version": "1.6.288",
+  "version": "1.6.289",
   "description": "Claude Code Logger visualization management tool",
   "license": "MIT",
   "main": "server.js",
@@ -102,15 +102,22 @@
     "vite": "^6.3.5"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.66.0",
+    "@wecom/aibot-node-sdk": "1.0.7",
     "adm-zip": "^0.5.17",
     "dingtalk-stream": "2.1.5",
+    "discord.js": "14.26.4",
     "dompurify": "^3.3.3",
     "node-pty": "^1.1.0",
     "undici": "^7.22.0",
-    "ws": "^8.19.0"
+    "ws": "^8.21.0"
   },
   "optionalDependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.91"
+  },
+  "overrides": {
+    "axios": "^1.16.1",
+    "qs": "^6.15.2"
   },
   "c8": {
     "include": [

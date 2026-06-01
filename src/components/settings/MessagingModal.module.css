@@ -28,7 +28,8 @@
   padding: 8px 16px;
   font-size: 14px;
   line-height: 1.5;
-  border: 1px solid var(--border-primary);
+  /* 未选中态不画外框:透明边占位保持与选中态等宽(避免切换时位移),仅选中态显边框。 */
+  border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
   color: var(--text-secondary);
@@ -40,7 +41,6 @@
 }
 
 .tabBtn:hover {
-  border-color: var(--color-primary);
   color: var(--color-primary);
 }
 

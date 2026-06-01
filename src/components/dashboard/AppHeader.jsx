@@ -26,7 +26,8 @@ import ProxyModal from '../settings/ProxyModal';
 import VoicePackSettings from '../settings/VoicePackSettings';
 import ProjectAliasEditor from '../settings/ProjectAliasEditor';
 import MessagingModal from '../settings/MessagingModal';
-import DingTalkStatusChip from '../settings/DingTalkStatusChip';
+import ImStatusChip from '../settings/ImStatusChip';
+import { IM_PLATFORMS } from '../settings/imPlatforms';
 import { useProjectAlias } from '../../hooks/useProjectAlias';
 import appConfig from '../../config.json';
 import { OPTIMISTIC_CLEAR_PERCENT } from '../../AppBase';
@@ -1407,7 +1408,9 @@ class AppHeader extends React.Component {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`${styles.logoImage}${this.state.logoDropdownOpen ? ` ${styles.logoImageActive}` : ''}`}><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </span>
           </Dropdown>
-          <DingTalkStatusChip onClick={() => this.setState({ messagingModalVisible: true, messagingInitialTool: 'dingtalk' })} />
+          {IM_PLATFORMS.map((p) => (
+            <ImStatusChip key={p.id} descriptor={p} onClick={() => this.setState({ messagingModalVisible: true, messagingInitialTool: p.id })} />
+          ))}
           {this.props.activeProxyId && this.props.activeProxyId !== 'max' && (() => {
             const p = (this.props.proxyProfiles || []).find(x => x.id === this.props.activeProxyId);
             return p ? (

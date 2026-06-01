@@ -31,8 +31,13 @@ import { askPermRoutes } from './routes/ask-perm.js';
 import { teamRoutes } from './routes/team.js';
 import { authRoutes } from './routes/auth.js';
 import { dingtalkRoutes } from './routes/dingtalk.js';
-import * as dingtalkBridge from './lib/dingtalk-bridge.js';
-import { loadDingTalkConfig } from './lib/dingtalk-config.js';
+import { imRoutes } from './routes/im.js';
+import * as imCore from './lib/im-bridge-core.js';
+import './lib/adapters/dingtalk-adapter.js'; // side-effect: registers the DingTalk adapter
+import './lib/adapters/feishu-adapter.js';   // side-effect: registers the Feishu adapter
+import './lib/adapters/wecom-adapter.js';    // side-effect: registers the WeCom adapter
+import './lib/adapters/discord-adapter.js';  // side-effect: registers the Discord adapter
+import { loadConfig } from './lib/im-config.js';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -475,11 +480,17 @@ const deps = {
     return authConfig;
   },
   // Constants local to server.js.
-  // DingTalk bridge admin surface (config route → bridge lifecycle).
+  // Generic IM bridge admin surface (config routes → bridge lifecycle), keyed by platform id.
+  im: {
+    getBridgeStatus: (id) => imCore.getBridgeStatus(id),
+    reloadBridge: (id) => imCore.reloadBridge(id),
+    testConnection: (id, cfg) => imCore.testConnection(id, cfg),
+  },
+  // DingTalk back-compat alias over the generic IM core (the unchanged dingtalk route uses this).
   dingtalk: {
-    getBridgeStatus: () => dingtalkBridge.getBridgeStatus(),
-    reloadBridge: () => dingtalkBridge.reloadBridge(),
-    testConnection: (cfg) => dingtalkBridge.testConnection(cfg),
+    getBridgeStatus: () => imCore.getBridgeStatus('dingtalk'),
+    reloadBridge: () => imCore.reloadBridge('dingtalk'),
+    testConnection: (cfg) => imCore.testConnection('dingtalk', cfg),
   },
   ACCESS_TOKEN,
   INTERNAL_TOKEN,
@@ -520,6 +531,7 @@ const _routes = [
   ...askPermRoutes,
   ...teamRoutes,
   ...dingtalkRoutes,
+  ...imRoutes,
 ];
 const dispatch = createDispatcher(_routes);
 
@@ -902,20 +914,21 @@ export async function startViewer() {
               resolveSdkApproval: (...args) => _sdkResolveApproval?.(...args),
             },
           });
-          // DingTalk Stream bridge: only meaningful in CLI mode (where the singleton PTY
-          // lives). startBridge saves deps then no-ops unless enabled+creds present, so
-          // calling it unconditionally also primes reloadBridge() for later enable-via-UI.
+          // IM bridges (DingTalk, Feishu, …): only meaningful in CLI mode (where the singleton
+          // PTY lives). startAll primes each adapter's deps then no-ops unless enabled+creds
+          // present, so calling it unconditionally also primes reloadBridge() for later
+          // enable-via-UI. The PTY deps are shared across platforms; getConfig is per-platform.
           if (isCliMode) {
             const pmb = await import('./pty-manager.js');
-            dingtalkBridge.startBridge({
+            await imCore.startAll((id) => ({
               writeToPty: pmb.writeToPty,
               writeToPtySequential: pmb.writeToPtySequential,
               getPtyState: pmb.getPtyState,
               getPtyKind: pmb.getPtyKind,
               getPtySkipPermissions: pmb.getPtySkipPermissions,
               isStreaming: () => streamingState.active,
-              getConfig: () => loadDingTalkConfig(),
-            });
+              getConfig: () => loadConfig(id),
+            }));
           }
           resolve(server);
         });
@@ -1621,9 +1634,9 @@ function _emitTurnEnd(sessionId, ts, transcriptPath = null) {
     if (clients.length > 0 && sendEventToClients) {
       sendEventToClients(clients, 'turn_end', { sessionId: sid, ts: t });
     }
-    // Forward the (clean) assistant reply for this turn to DingTalk, if the bridge is live.
-    // Fire-and-forget: a bridge failure must never affect SSE broadcast.
-    try { dingtalkBridge.notifyTurnEnd(sid, t, transcriptPath); } catch { /* best-effort */ }
+    // Forward the (clean) assistant reply for this turn to whichever IM bridge owns the in-flight
+    // turn, if any. Fire-and-forget: a bridge failure must never affect SSE broadcast.
+    try { imCore.notifyTurnEnd(sid, t, transcriptPath); } catch { /* best-effort */ }
     if (typeof _onTurnEndBroadcastForTests === 'function') {
       try { _onTurnEndBroadcastForTests({ sessionId: sid, ts: t }); }
       catch (e) { if (process.env.NODE_ENV === 'test') throw e; /* prod 不让测试桩污染 */ }
@@ -1758,9 +1771,9 @@ async function _doStop() {
   // 对称 startViewer：下一次启动后第一次 active 才算 rising edge
   _lastSdkActive = false;
   _lastCliActive = false;
-  // Tear down the DingTalk Stream connection so a stop/start cycle (Electron tab switch,
-  // tests) never leaks a second WS to the same app_key. Idempotent + swallows errors.
-  try { await dingtalkBridge.stopBridge(); } catch { }
+  // Tear down all IM bridge connections so a stop/start cycle (Electron tab switch, tests) never
+  // leaks a second WS to the same app. Idempotent + swallows errors.
+  try { await imCore.stopAll(); } catch { }
   try { await Promise.race([runParallelHook('serverStopping'), new Promise(r => setTimeout(r, 3000))]); } catch { }
   // 如果用户未做选择，将临时文件转为正式文件
   if (_resumeState && _resumeState.tempFile) {

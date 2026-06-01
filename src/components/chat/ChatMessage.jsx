@@ -8,7 +8,7 @@ import { extractWebSearchGroups } from '../../utils/webSearchGrouping';
 import { mergeThinkingBlocks } from '../../utils/thinkingMerge';
 import WebSearchResultsView from '../viewers/WebSearchResultsView';
 import MarkdownBlock from '../viewers/MarkdownBlock';
-import DingTalkIcon from '../common/DingTalkIcon';
+import { IM_SOURCE_ICONS } from '../settings/imPlatforms';
 import { parseImOrigin } from '../../utils/imOrigin';
 import { getTeammateAvatar } from '../../utils/teammateAvatars';
 import { renderAssistantText } from '../../utils/systemTags';
@@ -32,11 +32,8 @@ import defaultAvatarUrl from '../../img/default-avatar.svg';
 import defaultModelAvatarUrl from '../../img/default-model-avatar.svg';
 import styles from './ChatMessage.module.css';
 
-// IM-source badge: maps the id captured from a ⟦im:<id>⟧ marker to its brand icon + color.
-// Extend here when adding another IM bridge. Unknown ids render no icon.
-const IM_SOURCE_ICONS = {
-  dingtalk: { Icon: DingTalkIcon, color: '#1677ff' },
-};
+// IM-source badge icons/colors come from the platform registry (imPlatforms.js): the id captured
+// from a ⟦im:<id>⟧ marker maps to its brand icon + color. Unknown ids render no icon.
 
 const { Text } = Typography;
 

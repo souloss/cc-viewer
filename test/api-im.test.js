@@ -1,0 +1,217 @@
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { request } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+// Isolate LOG_DIR before any findcc-loading import.
+const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-api-im-test-'));
+process.env.CCV_LOG_DIR = tmpDir;
+process.env.CLAUDE_CONFIG_DIR = tmpDir;
+process.env.CCV_WORKSPACE_MODE = '1';
+process.env.CCV_CLI_MODE = '0';
+
+// Stub the shared bridge fetch so /test never touches the network (feishu testConnection uses it).
+const core = await import('../server/lib/im-bridge-core.js');
+core.__setFetchForTests(async (url) => {
+  if (url.includes('tenant_access_token')) return { ok: true, json: async () => ({ code: 0, tenant_access_token: 't', expire: 7200 }) };
+  return { ok: true, json: async () => ({ code: 0 }) };
+});
+
+function httpRequest(port, path, { method = 'GET', body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = request({ hostname: '127.0.0.1', port, path, method, headers: body ? { 'Content-Type': 'application/json' } : {} }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data, json() { return JSON.parse(data); } }));
+    });
+    req.on('error', reject);
+    if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body));
+    req.end();
+  });
+}
+
+describe('Generic /api/im/:platform config API (loopback=admin)', { concurrency: false }, () => {
+  let stopViewer, getPort, port;
+
+  before(async () => {
+    const mod = await import('../server/server.js');
+    stopViewer = mod.stopViewer;
+    getPort = mod.getPort;
+    assert.ok(await mod.startViewer(), 'server should start');
+    port = getPort();
+    assert.ok(port > 0);
+  });
+
+  after(async () => {
+    await new Promise((resolve) => { stopViewer(); setTimeout(() => { rmSync(tmpDir, { recursive: true, force: true }); resolve(); }, 200); });
+  });
+
+  it('GET /api/im/feishu/status defaults to disabled (local admin gets an empty appSecret)', async () => {
+    const res = await httpRequest(port, '/api/im/feishu/status');
+    assert.equal(res.status, 200);
+    const d = res.json();
+    assert.equal(d.enabled, false);
+    assert.equal(d.hasSecret, false);
+    assert.equal(d.appSecret, '', 'local admin gets the plaintext appSecret (empty when unset)');
+    assert.equal(d.region, 'feishu', 'region surfaces in admin state');
+    assert.ok(d.connection && typeof d.connection === 'object');
+  });
+
+  it('POST /api/im/feishu/config saves creds + region and returns masked state', async () => {
+    const res = await httpRequest(port, '/api/im/feishu/config', {
+      method: 'POST',
+      body: { enabled: false, appId: 'cli_abc', appSecret: 'topsecret', region: 'lark', allowUserIds: ['ou_1'] },
+    });
+    assert.equal(res.status, 200);
+    const d = res.json();
+    assert.equal(d.appId, 'cli_abc');
+    assert.equal(d.region, 'lark');
+    assert.equal(d.hasSecret, true);
+    assert.equal('appSecret' in d, false);
+    assert.deepEqual(d.allowUserIds, ['ou_1']);
+    assert.ok(!res.body.includes('topsecret'), 'secret must not leak in the response');
+  });
+
+  it('preserves the secret when re-saving with an empty appSecret', async () => {
+    const res = await httpRequest(port, '/api/im/feishu/config', { method: 'POST', body: { enabled: false, appId: 'cli_z', appSecret: '' } });
+    assert.equal(res.json().hasSecret, true);
+    assert.equal(res.json().appId, 'cli_z');
+  });
+
+  it('POST /api/im/feishu/test validates creds via the stubbed token fetch', async () => {
+    const res = await httpRequest(port, '/api/im/feishu/test', { method: 'POST', body: { appId: 'cli_abc', appSecret: 'topsecret', region: 'lark' } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().ok, true);
+  });
+
+  it('POST /api/im/wecom/test with no creds returns ok:false BEFORE opening a connection', async () => {
+    // Empty body + nothing stored → the route must reject on the missing-creds guard, not reach
+    // wecom's testConnection (which would open a WebSocket the fetch stub can't intercept).
+    const res = await httpRequest(port, '/api/im/wecom/test', { method: 'POST', body: {} });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().ok, false);
+    assert.match(res.json().detail || '', /missing/);
+  });
+
+  it('GET /api/preferences strips the feishu key (no secret leak)', async () => {
+    const res = await httpRequest(port, '/api/preferences');
+    assert.equal('feishu' in res.json(), false, 'feishu must be stripped from preferences');
+    assert.ok(!res.body.includes('topsecret'), 'no secret in preferences');
+  });
+
+  it('returns 404 for an unknown platform (no crash)', async () => {
+    const res = await httpRequest(port, '/api/im/telegram/status');
+    assert.equal(res.status, 404);
+  });
+
+  it('still routes the legacy /api/dingtalk/status', async () => {
+    const res = await httpRequest(port, '/api/dingtalk/status');
+    assert.equal(res.status, 200);
+    assert.equal(res.json().enabled, false);
+  });
+
+  // WeCom is registered as a third platform via the same generic routes (no /test here — WeCom's
+  // testConnection opens a WebSocket the fetch stub can't intercept; that's covered in wecom-bridge.test.js).
+  it('GET /api/im/wecom/status defaults to disabled', async () => {
+    const res = await httpRequest(port, '/api/im/wecom/status');
+    assert.equal(res.status, 200);
+    assert.equal(res.json().enabled, false);
+    assert.equal(res.json().hasSecret, false);
+  });
+
+  it('POST /api/im/wecom/config saves creds and the strip keeps the secret out of /api/preferences', async () => {
+    const res = await httpRequest(port, '/api/im/wecom/config', { method: 'POST', body: { enabled: false, botId: 'bot_z', secret: 'wecomsecret', allowUserIds: ['lisi'] } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().botId, 'bot_z');
+    assert.equal(res.json().hasSecret, true);
+    assert.equal('secret' in res.json(), false);
+    assert.ok(!res.body.includes('wecomsecret'), 'secret must not leak in the response');
+    const prefs = await httpRequest(port, '/api/preferences');
+    assert.equal('wecom' in prefs.json(), false, 'wecom must be stripped from preferences');
+    assert.ok(!prefs.body.includes('wecomsecret'), 'no wecom secret in preferences');
+  });
+
+  // Discord is the 4th platform; unlike WeCom its testConnection is REST-based, so /test is coverable here.
+  it('GET /api/im/discord/status defaults to disabled', async () => {
+    const res = await httpRequest(port, '/api/im/discord/status');
+    assert.equal(res.status, 200);
+    assert.equal(res.json().enabled, false);
+    assert.equal(res.json().hasSecret, false);
+  });
+
+  it('POST /api/im/discord/config saves the token and the strip keeps it out of /api/preferences', async () => {
+    const res = await httpRequest(port, '/api/im/discord/config', { method: 'POST', body: { enabled: false, botToken: 'discordtoken123', allowUserIds: ['42'] } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().hasSecret, true);
+    assert.equal('botToken' in res.json(), false);
+    assert.ok(!res.body.includes('discordtoken123'), 'token must not leak');
+    const prefs = await httpRequest(port, '/api/preferences');
+    assert.equal('discord' in prefs.json(), false, 'discord must be stripped from preferences');
+    assert.ok(!prefs.body.includes('discordtoken123'), 'no discord token in preferences');
+  });
+
+  it('POST /api/im/discord/test validates the token via the stubbed REST /users/@me', async () => {
+    const res = await httpRequest(port, '/api/im/discord/test', { method: 'POST', body: { botToken: 'discordtoken123' } });
+    assert.equal(res.status, 200);
+    assert.equal(res.json().ok, true);
+  });
+});
+
+// Loopback HTTP is always isLocal:true, so cover the !isLocal 403 guard with a direct handler call.
+describe('POST /api/im/:platform/config loopback-only guard', () => {
+  it('rejects a remote caller with 403 before reading the body', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/feishu/config', 'POST'));
+    let status = 0, payload = '';
+    const res = { writeHead(s) { status = s; }, end(b) { payload = b || ''; } };
+    let reloaded = false;
+    const deps = { MAX_POST_BODY: 1e6, im: { reloadBridge() { reloaded = true; }, getBridgeStatus: () => ({}) } };
+    route.handler({ on() {} }, res, { pathname: '/api/im/feishu/config' }, /* isLocal */ false, deps);
+    assert.equal(status, 403);
+    assert.match(payload, /Loopback only/);
+    assert.equal(reloaded, false);
+  });
+
+  it('GET status strips cred fields for a remote caller', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const { saveConfig } = await import('../server/lib/im-config.js');
+    saveConfig('feishu', { enabled: true, appId: 'cli_SECRET', appSecret: 'sec_SECRET', region: 'lark', allowUserIds: ['ou_SECRET'] });
+    const route = imRoutes.find((r) => r.predicate('/api/im/feishu/status', 'GET'));
+    const deps = { im: { getBridgeStatus: () => ({ running: true, connected: true, boundConversationId: 'oc_SECRET', appKeyTail: 'CRET', lastError: 'boom' }) } };
+    let payload = '';
+    const res = { writeHead() {}, end(b) { payload = b || ''; } };
+    route.handler({}, res, { pathname: '/api/im/feishu/status' }, /* isLocal */ false, deps);
+    const rd = JSON.parse(payload);
+    assert.equal(rd.enabled, true);
+    assert.equal(rd.hasSecret, true);
+    assert.deepEqual(rd.connection, { running: true, connected: true });
+    for (const leak of ['cli_SECRET', 'sec_SECRET', 'ou_SECRET', 'oc_SECRET', 'CRET', 'boom']) {
+      assert.ok(!payload.includes(leak), `remote payload must not leak ${leak}`);
+    }
+    assert.equal('appId' in rd, false);
+    assert.equal('appSecret' in rd, false);
+    assert.equal('allowUserIds' in rd, false);
+  });
+
+  it('GET /api/im/discord/status strips the token + allowlist for a remote caller', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const { saveConfig } = await import('../server/lib/im-config.js');
+    saveConfig('discord', { enabled: true, botToken: 'tok_SECRET', allowUserIds: ['u_SECRET'] });
+    const route = imRoutes.find((r) => r.predicate('/api/im/discord/status', 'GET'));
+    const deps = { im: { getBridgeStatus: () => ({ running: true, connected: true, boundConversationId: 'dm_SECRET', lastError: 'boom' }) } };
+    let payload = '';
+    const res = { writeHead() {}, end(b) { payload = b || ''; } };
+    route.handler({}, res, { pathname: '/api/im/discord/status' }, /* isLocal */ false, deps);
+    const rd = JSON.parse(payload);
+    assert.equal(rd.enabled, true);
+    assert.equal(rd.hasSecret, true);
+    assert.deepEqual(rd.connection, { running: true, connected: true });
+    for (const leak of ['tok_SECRET', 'u_SECRET', 'dm_SECRET', 'boom']) {
+      assert.ok(!payload.includes(leak), `remote payload must not leak ${leak}`);
+    }
+    assert.equal('botToken' in rd, false);
+    assert.equal('allowUserIds' in rd, false);
+  });
+});

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- feat(im): 多 IM 平台桥接——钉钉专用桥接重构为通用编排核心 `im-bridge-core.js` + 平台适配器 `adapters/` + 配置层 `im-config.js`，钉钉保留薄壳兼容旧接口
+- feat(im): 新增飞书/Lark 桥接（长连接事件订阅，支持 feishu.cn / larksuite.com 区域选择）
+- feat(im): 新增企业微信桥接（智能机器人长连接，botId + secret）
+- feat(im): 新增 Discord 桥接（Gateway 长连接，bot token，支持 DM 与服务器频道）
+- feat(im): 通用配置 API `/api/im/:platform/status|config|test`，`/api/preferences` 剥离所有 IM 平台密钥
+- feat(ui): 消息设置改为描述符驱动（`imPlatforms.js` 注册表），新增飞书/企业微信/Discord 设置面板、状态徽标与品牌图标；未选中 tab 仅图标置灰、选中态显品牌色边框
+- fix(deps): 升级 ws 至 8.21、override axios 1.16.1 / qs 6.15.2，修复飞书 SDK 传递依赖的安全告警
+
 ## 1.6.288 (2026-06-01)
 
 - refactor(ui): 「显示大小」弃用 CSS zoom——Electron 改用原生 `webFrame.setZoomFactor`(preload 暴露 + 首屏从 localStorage 抢占),纯浏览器不再提供下拉、改在该行显示 (?) 提示用户用浏览器自带快捷键缩放(按 Mac ⌘ / Windows Ctrl 区分);Cmd/Ctrl +/- 键盘缩放仅 Electron 拦截,浏览器交还原生。规避 Chromium 128 标准化 CSS zoom 的坐标空间分裂(终端 cols/rows 不跟随、左右拖拽分隔条错位等),`ui.displayScale.browserHint` 补 18 语言
