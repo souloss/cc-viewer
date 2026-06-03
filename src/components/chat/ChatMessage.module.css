@@ -25,6 +25,14 @@
   object-fit: cover;
 }
 
+/* IM 平台 logo 头像（对话记录里助手一侧）：图标居中、不被 `.avatar > svg{width:100%}` 撑满。 */
+.imAgentGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
 .bubble {
   border-radius: 8px;
   border: 1px solid var(--border-secondary);
@@ -876,6 +884,30 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* 「Plan 自动审批」倒计时提示行：低调灰色文案 + 内联「取消」链接按钮。 */
+.planAutoApproveHint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.planAutoApproveCancel {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-primary);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.planAutoApproveCancel:hover {
+  opacity: 0.8;
 }
 
 .planApproveBtn {

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.294 (2026-06-03)
+
+- feat(ui): 顶栏「网络报文 / 对话模式」切换按钮文案精简为「网络 / 对话」；对话中居中的 SVG loading 动画设为不可选中（user-select:none + pointer-events:none）
+- feat(ui): 偏好设置「对话展示」多项设置追加 (?) 悬浮说明（权限自动审批 / 弹出全局审批 Modal / 审批提示音 / 展开思考过程 / 完整展示所有内容，补 18 语言）
+- feat(ui): 代理热切换的「Max 用户请勿使用」告警改为仅当 Default(内置)端点为 api.anthropic.com 时显示
+- feat(ui): VoicePack 设置区加浅灰底分组、上传音频按钮字号 12px；移除「恢复默认」按钮
+- feat(ui): 偏好设置「对话展示」新增「Plan 自动审批」下拉（关 / 3s / 5s / 10s / 立即，同权限自动审批配置形式）——非关闭时 CLI(PTY) 模式下 Agent 提交的计划倒计时后自动批准并继续，倒计时期间卡片显示「{n}s 后自动批准 · 取消」可转手动，「立即」则无倒计时直接批准；仅作用于 PTY 路径（不含 SDK），随 `approvalModal.planAutoApproveSeconds` 持久化（补 18 语言）；原「自动审批」更名「权限自动审批」以区分
+- feat(ui): 汉堡菜单「通讯软件」更名「通讯软件接入」；菜单文字不可选中、「钉住」按钮热区放大并加 hover 背景
+- feat(im): 飞书/微信改用真实品牌 logo，配置面板操作区与表单加分隔线，平台 tab 选中态标题色与品牌 icon 同步；发送人白名单「选填」徽标改为 (?) 悬浮说明白名单作用
+- feat(im): 「对话记录」按发送者展示真实姓名 + 头像（四平台）——origin marker 带 senderId，bridge 后台解析并持久化 senderId→{name,avatar}（钉钉用回调 senderNick 取真实姓名+默认头像、飞书走通讯录、Discord 事件免费带、企业微信 v1 降级默认），新增 `/api/im/:platform/senders`，对话气泡按发送者覆盖姓名/头像（解析不到则「外部用户」+ 默认头像，补 18 语言）
+- fix(im): 钉钉机器人不再调通讯录 `topapi/v2/user/get` 取头像——机器人凭证无通讯录权限，调用必失败且与消息发送共用同一 appKey 触发风控限流，反而阻断模型回复下发；改为只用回调免费带出的 senderNick 显示真实姓名 + 默认头像
+- feat(im): IM 桥接设置改为「配置失焦自动保存 + 启动/停止按钮」——取消「保存」按钮与「启用」开关；底部「启动/停止」显式控制 worker，启动后等 worker 真就绪才算成功（补 18 语言）
+- feat(im): 连接状态徽标以真实进程状态为准并显示服务端口（已连接 · :70xx / 启动中… / 无响应 / 未连接），状态拉取失败即复位为断连不再残留「已连接」；「对话记录」弹窗标题栏也展示同一连接状态，避免误以为没连上
+- feat(im): 「对话记录」里助手（MainAgent）一侧的头像/名字改用所属 IM 平台的 logo + 名称（如钉钉 logo +「钉钉」），仅作用于该弹窗、不影响主会话
+- feat(im): 配置面板「更多设置」新增「模型性格定义」——[编辑] 弹独立窗口编辑该 IM 的 CLAUDE.md（叠加在配置弹窗之上、不关闭下层），保存后提示下次重启该 IM 生效；新增 `GET/POST /api/im/:platform/claude-md`（loopback-only、原子写、256KB 上限，补 18 语言）
+- feat(im): 配置面板「更多设置」新增「${IM} SKILL 管理」——[+添加]（文件夹/zip/SKILL.md 上传）+ [管理]（启停开关，复用 SkillsManagerModal），作用于该 IM 工作目录下的 `.claude/skills/`；新增 `GET /api/im/:platform/skills`、`POST .../skills/toggle`、`POST .../skills/import`（loopback-only，复用 skills-api 的 listSkills/moveSkill + 从 skillsImport 抽出的可复用 importSkillTo），保存后提示下次重启该 IM 生效（补 18 语言）
+- refactor(im): 配置面板精简——「会话拒绝注入」开关说明收进 (?) 悬浮提示；去掉钉钉的风险提示文案（保留飞书/企业微信/Discord 的接入步骤说明）
+
 ## 1.6.293 (2026-06-02)
 
 - feat(ui): 汉堡菜单支持「钉住」——hover 菜单行右侧出现钉按钮，点击后钉变实心常驻，并在汉堡右侧生成常驻快捷方式图标，点击即触发对应入口；全局持久（localStorage，跨项目共享），Electron 原生 tab bar 同步显示（`ui.menuPin`/`ui.menuUnpin` 补 18 语言）

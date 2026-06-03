@@ -99,13 +99,13 @@ describe('discord inbound', () => {
   it('injects a guild message with the ⟦im:discord⟧ marker', async () => {
     receive({ guild: { id: 'g1' }, content: 'look here' });
     await tick();
-    assert.equal(injects[0], '\x1b[200~⟦im:discord⟧look here\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:discord:alice⟧look here\x1b[201~');
   });
 
   it('strips a leading bot mention', async () => {
     receive({ content: '<@123> do this' });
     await tick();
-    assert.equal(injects[0], '\x1b[200~⟦im:discord⟧do this\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:discord:alice⟧do this\x1b[201~');
   });
 
   it('ignores the bot\'s own / other bot messages (loop guard)', async () => {
@@ -129,7 +129,7 @@ describe('discord inbound', () => {
     assert.equal(injects.length, 0);
     receive({ authorId: 'alice', content: 'ok' });
     await tick();
-    assert.equal(injects[0], '\x1b[200~⟦im:discord⟧ok\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:discord:alice⟧ok\x1b[201~');
   });
 });
 

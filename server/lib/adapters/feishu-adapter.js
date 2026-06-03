@@ -99,6 +99,25 @@ const feishuAdapter = {
   // Feishu long-connection has no app-level inbound ACK (the SDK handles transport acking).
   ack() { /* no-op */ },
 
+  // 解析发送者姓名 + 头像（供「对话记录」展示）。事件只带 open_id，姓名/头像需查通讯录：
+  // 复用已建好的 sendClient（自带 tenant_access_token 缓存）调 contact.v3.user.get。
+  // 需应用具备「读取通讯录」相关 scope；无权限/外部用户/失败 → null，由 bridge 静默降级。
+  async resolveSender(cfg, senderId, ctx) {
+    if (!senderId) return null;
+    const client = ctx.store.sendClient;
+    if (!client?.contact?.v3?.user?.get) return null;
+    try {
+      const r = await client.contact.v3.user.get({
+        path: { user_id: senderId },
+        params: { user_id_type: 'open_id' },
+      });
+      if (r && typeof r.code === 'number' && r.code !== 0) return null;
+      const u = r?.data?.user || {};
+      const avatar = u.avatar?.avatar_240 || u.avatar?.avatar_72 || u.avatar?.avatar_origin || null;
+      return { name: u.name || null, avatar };
+    } catch { return null; }
+  },
+
   async sendOne(cfg, target, content, ctx) {
     const client = ctx.store.sendClient;
     if (!client) throw new Error('feishu send client not initialized');

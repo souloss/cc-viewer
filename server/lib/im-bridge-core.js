@@ -23,6 +23,7 @@ import { existsSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LOG_DIR } from '../../findcc.js';
 import { t } from '../i18n.js';
+import { upsertSender } from './im-senders.js';
 
 // ─── tunables (shared across platforms; per-platform rate caps come from adapter.rateLimit) ───
 const SEEN_MAX = 500;
@@ -93,6 +94,51 @@ function ctxFor(inst) {
   return { fetch: coreFetch, store: inst.store };
 }
 
+// 发送者身份解析的缓存有效期：同一 senderId 在此窗口内只解析一次（避免每条消息打 contact API）。
+const SENDER_RESOLVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// 负缓存有效期：解析「没拿到任何身份」（外部用户 / 无 scope / API 失败）也要短期记一笔，否则像飞书这种
+// 无免费字段、靠 contact API 的平台会对每条消息重复打 API（触发租户限流）。10min 后再重试，兼顾「拿到瞬时失败可恢复」。
+const SENDER_NEG_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * 后台解析发送者 {name, avatar} 并持久化到 IM_<id>/im-senders.json（供 /senders 路由 + 对话记录展示）。
+ * 优先用 normalizeInbound 免费带出的 senderName/senderAvatar；缺失再调可选的 adapter.resolveSender
+ * （需打 contact API 的平台）。整段静默：任何失败都不得影响消息注入。**调用方必须 void（不 await）。**
+ */
+async function resolveAndPersistSender(inst, senderId, normalized) {
+  if (!senderId) return;
+  const store = inst.store || (inst.store = {});
+  const cache = store.senderCache || (store.senderCache = {});
+  const now = Date.now();
+  // 缓存项形如 { ts, ok }：解析成功用 7d TTL，负缓存（没拿到）用 10min TTL。
+  const c = cache[senderId];
+  if (c && (now - c.ts) < (c.ok ? SENDER_RESOLVE_TTL_MS : SENDER_NEG_TTL_MS)) return;
+  try {
+    let name = normalized.senderName != null ? String(normalized.senderName) : null;
+    let avatar = normalized.senderAvatar != null ? String(normalized.senderAvatar) : null;
+    // 免费字段不全且适配器支持 → 调一次 contact API 补齐（仅 feishu；dingtalk/wecom 无 resolveSender）。
+    let attemptedResolve = false;
+    if ((!name || !avatar) && typeof inst.adapter.resolveSender === 'function') {
+      attemptedResolve = true;
+      const r = await inst.adapter.resolveSender(inst.bridgeDeps.getConfig(), senderId, ctxFor(inst));
+      if (r) {
+        if (!name && r.name != null) name = String(r.name);
+        if (!avatar && r.avatar != null) avatar = String(r.avatar);
+      }
+    }
+    if (name || avatar) {
+      upsertSender(inst.adapter.id, senderId, { name, avatar });
+      cache[senderId] = { ts: now, ok: true };
+    } else if (attemptedResolve) {
+      // 调过 contact API 但什么都没拿到 → 负缓存，避免对该发送者每条消息反复打 API。
+      cache[senderId] = { ts: now, ok: false };
+    }
+  } catch (e) {
+    cache[senderId] = { ts: now, ok: false }; // 失败也负缓存（短 TTL，10min 后自动重试）
+    audit(inst, 'resolve-sender-error', { senderId, error: String(e?.message || e) });
+  }
+}
+
 function queueCap(inst) {
   return inst.maxQueueOverride ?? MAX_QUEUE;
 }
@@ -129,12 +175,15 @@ function bracketPasteSubmit(text) {
   return ['\x1b[200~' + text + '\x1b[201~', '\r'];
 }
 
-/** Prepend the IM-origin marker `⟦im:<id>⟧`, EXCEPT for slash commands (a marker prefix would
- *  stop the CLI from recognizing `/clear` etc.). trim() guards leading whitespace / full-width
- *  spaces. KEEP IN SYNC with IM_ORIGIN_RE in src/utils/imOrigin.js. */
-function markOrigin(id, content) {
+/** Prepend the IM-origin marker `⟦im:<id>⟧` or `⟦im:<id>:<senderId>⟧`, EXCEPT for slash commands
+ *  (a marker prefix would stop the CLI from recognizing `/clear` etc.). trim() guards leading
+ *  whitespace / full-width spaces. senderId is embedded only when it's "safe" (no space / `:` / `⟧`)
+ *  so the marker stays unambiguous; otherwise it degrades to the platform-only form.
+ *  KEEP IN SYNC with IM_ORIGIN_RE in src/utils/imOrigin.js. */
+function markOrigin(id, senderId, content) {
   if (content.trim().startsWith('/')) return content;
-  return `⟦im:${id}⟧` + content;
+  const safe = (typeof senderId === 'string' && /^[^\s:⟧]+$/.test(senderId)) ? `:${senderId}` : '';
+  return `⟦im:${id}${safe}⟧` + content;
 }
 
 /**
@@ -312,6 +361,9 @@ function handleInboundInner(inst, normalized) {
   }
 
   audit(inst, 'in', { msgId, senderId, conversationId, len: text.length });
+  // 后台解析并持久化发送者身份（姓名/头像）供「对话记录」展示。fire-and-forget：
+  // 绝不 await（解析可能要打 contact API），不阻塞/不影响下面的消息注入。
+  void resolveAndPersistSender(inst, senderId, normalized);
   if (!text) return; // non-text messages (image/voice/file) are ignored in v1
 
   if (isStopCommand(text)) {
@@ -331,7 +383,7 @@ function handleInboundInner(inst, normalized) {
     void sendReply(inst, target, tr(inst, 'queueFull'));
     return;
   }
-  inst.queue.push({ ...target, content: text });
+  inst.queue.push({ ...target, senderId, content: text });
   if (activeInjection || inst.bridgeDeps.isStreaming()) {
     void sendReply(inst, target, tr(inst, 'busyQueued'));
   }
@@ -374,7 +426,7 @@ function drainQueue(inst) {
     // React to a failed injection (PTY gone/died mid-write → onComplete(false)). Without this the
     // prompt never submits, no turn_end ever comes, and the slot wedges until the timeout. Only
     // act if THIS injection still owns the slot (a /stop or timeout may have released it).
-    d.writeToPtySequential(bracketPasteSubmit(markOrigin(inst.adapter.id, item.content)), (ok) => {
+    d.writeToPtySequential(bracketPasteSubmit(markOrigin(inst.adapter.id, item.senderId, item.content)), (ok) => {
       if (ok) return;
       if (!activeInjection || activeInjection.platformId !== inst.adapter.id || activeInjection.since !== since) return;
       audit(inst, 'inject-failed', { conversationId: item.conversationId });

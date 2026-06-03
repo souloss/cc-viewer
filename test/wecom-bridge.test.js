@@ -92,7 +92,7 @@ describe('wecom inbound normalization', () => {
   it('injects a single-chat text message with the ⟦im:wecom⟧ marker', async () => {
     receive({ text: { content: 'look here' } });
     await tick();
-    assert.equal(injects[0], '\x1b[200~⟦im:wecom⟧look here\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:wecom:zhangsan⟧look here\x1b[201~');
   });
 
   it('ignores a non-text (empty text) message', async () => {
@@ -127,7 +127,7 @@ describe('wecom inbound normalization', () => {
     assert.equal(injects.length, 0);
     receive({ userid: 'alice', text: { content: 'ok' } });
     await tick();
-    assert.equal(injects[0], '\x1b[200~⟦im:wecom⟧ok\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:wecom:alice⟧ok\x1b[201~');
   });
 });
 

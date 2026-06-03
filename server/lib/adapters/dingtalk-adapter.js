@@ -44,6 +44,7 @@ function normalizeInbound(res) {
     conversationId,
     isGroup: String(conversationType) === '2',
     senderId: senderStaffId,
+    senderName: msg.senderNick || null, // 昵称回调里免费提供；头像不取（见下方 resolveSender 注释）
     msgId: res?.headers?.messageId,
     // opaque platform extras carried back to sendOne
     target: { conversationId, conversationType, robotCode, senderStaffId },
@@ -112,6 +113,12 @@ const dingtalkAdapter = {
       throw new Error(`send ${r.status}: ${j.message || j.code || 'failed'}`);
     }
   },
+
+  // 发送者姓名：回调里的 senderNick 已免费带出（见 normalizeInbound），「对话记录」直接用它。
+  // 故意不实现 resolveSender —— 头像需查通讯录（topapi/v2/user/get），而机器人应用的 appKey/appSecret
+  // 没有通讯录读取权限，调用必失败（errcode 60121/88）；且这些未授权调用会打到与消息发送同一个 appKey，
+  // 触发钉钉风控/限流，反过来阻断模型回复的下发。故 DingTalk 发送者头像在「对话记录」里降级为默认头像
+  // （名字仍是真实昵称，不报错、不抢占发送配额）。后续如引入具备通讯录 scope 的凭证再补 resolveSender。
 
   async testConnection(cfg, ctx) {
     try {

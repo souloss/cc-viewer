@@ -91,12 +91,12 @@ describe('feishu connect / lifecycle', () => {
 describe('feishu inbound normalization', () => {
   it('injects a p2p text message with the ⟦im:feishu⟧ marker', async () => {
     await receive({ msgId: 'om1', content: JSON.stringify({ text: 'look here' }) });
-    assert.equal(injects[0], '\x1b[200~⟦im:feishu⟧look here\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:feishu:ou_sender⟧look here\x1b[201~');
   });
 
   it('strips @_user_N mention placeholders from group text', async () => {
     await receive({ msgId: 'om1', chatType: 'group', content: JSON.stringify({ text: '@_user_1 do this' }) });
-    assert.equal(injects[0], '\x1b[200~⟦im:feishu⟧do this\x1b[201~');
+    assert.equal(injects[0], '\x1b[200~⟦im:feishu:ou_sender⟧do this\x1b[201~');
   });
 
   it('ignores a non-text message (no injection)', async () => {

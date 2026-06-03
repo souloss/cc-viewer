@@ -125,9 +125,13 @@ export default function ProxyModal({
     </span>
   );
 
+  // 仅当「Default(内置)」走官方 Anthropic 端点(api.anthropic.com，即 Max 订阅 OAuth 场景)时
+  // 才提示「Max 用户请勿使用」；用户已切到第三方/自建端点则无此风险，隐藏告警。
+  const showMaxWarning = /api\.anthropic\.com/i.test(defaultConfig?.origin || '');
+
   const bodyNode = (
     <div>
-      <div className={styles.proxyWarning}>⚠️ {t('ui.proxy.maxWarning')}</div>
+      {showMaxWarning && <div className={styles.proxyWarning}>⚠️ {t('ui.proxy.maxWarning')}</div>}
       <div className={styles.proxyList}>
           {profiles.map(p => (
             <div key={p.id} className={`${styles.proxyItem} ${p.id === activeId ? styles.proxyItemActive : ''}`}>

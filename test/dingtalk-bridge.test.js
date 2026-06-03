@@ -19,9 +19,12 @@ const {
   extractLastAssistantText, chunkText, testConnection,
 } = bridge;
 
+const { default: dingtalkAdapter } = await import('../server/lib/adapters/dingtalk-adapter.js');
+
 const PASTE = (s) => ['\x1b[200~' + s + '\x1b[201~', '\r'];
 // The bridge prepends an IM-origin marker to every injected prompt EXCEPT slash commands.
-const MARK = (s) => '⟦im:dingtalk⟧' + s;
+// Marker now carries the sender id (fixtures default senderStaffId → senderId 'u1').
+const MARK = (s) => '⟦im:dingtalk:u1⟧' + s;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 // shared mutable harness
@@ -155,7 +158,7 @@ describe('inbound', () => {
 
   it('prepends the IM-origin marker to a normal prompt', async () => {
     await inbound({ msgId: 'm1', content: 'look at this' });
-    assert.deepEqual(calls.writeSeq[0], PASTE('⟦im:dingtalk⟧look at this'));
+    assert.deepEqual(calls.writeSeq[0], PASTE(MARK('look at this')));
   });
 
   it('does NOT mark a slash command (a marker prefix would break CLI command parsing)', async () => {
@@ -405,4 +408,13 @@ describe('system-message i18n follows configured language', () => {
 
 after(() => {
   rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('dingtalk sender identity (name only; no contact-API avatar fetch)', () => {
+  it('does NOT implement resolveSender — robot creds lack 通讯录 scope; name comes free from senderNick', () => {
+    // The avatar fetch via topapi/v2/user/get always fails for a robot app (no contact scope) and
+    // competes with message send on the same appKey (risk-control throttle). The bridge falls back
+    // to senderNick (real name) + default avatar. See the adapter comment where resolveSender was.
+    assert.equal(typeof dingtalkAdapter.resolveSender, 'undefined');
+  });
 });

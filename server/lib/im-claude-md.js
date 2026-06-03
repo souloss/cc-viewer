@@ -3,9 +3,14 @@
 // + 强制 allowlist（见 plan §安全）。但它仍是抑制交互式工具、控制回复风格的主要手段。
 //
 // 用 openSync(path,'wx') 原子创建：从不覆盖用户已编辑的文件（避免 existsSync→write 的 TOCTOU）。
-import { openSync, writeFileSync, closeSync, mkdirSync } from 'node:fs';
+import { openSync, writeFileSync, closeSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { imDir } from './im-lock.js';
+import { renameSyncWithRetry } from './file-api.js';
+
+// CLAUDE.md 写入上限（字符数，按 String.length / UTF-16 码元计）：远超任何合理人格定义，纯防失控大 body。
+export const MAX_CLAUDE_MD_CHARS = 256 * 1024;
 
 // id → 双语展示名（CLAUDE.md 为内联内容，不走 i18n.js）。
 const PLATFORM_LABELS = {
@@ -79,4 +84,35 @@ export function ensureImClaudeMd(id, dir = imDir(id)) {
     closeSync(fd);
   }
   return true;
+}
+
+/**
+ * 读取 IM_<id>/CLAUDE.md 当前内容（供「模型性格定义」编辑器加载）。
+ * 文件不存在 → 返回预置文本（尚未落盘），让编辑器展示默认人格供用户定制；保存时才写盘。
+ */
+export function readImClaudeMd(id) {
+  try {
+    return readFileSync(join(imDir(id), 'CLAUDE.md'), 'utf-8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return buildImClaudeMdPreset(id);
+    throw e;
+  }
+}
+
+/**
+ * 覆盖写 IM_<id>/CLAUDE.md（原子：temp + rename，mode 0600）。下次该 IM worker 重启时生效
+ * （CLAUDE.md 仅在 worker 启动时读取一次）。
+ */
+export function writeImClaudeMd(id, content) {
+  const text = String(content ?? '');
+  const dir = imDir(id);
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `CLAUDE.md.tmp-${process.pid}-${randomBytes(4).toString('hex')}`);
+  try {
+    writeFileSync(tmp, text, { mode: 0o600 });
+    renameSyncWithRetry(tmp, join(dir, 'CLAUDE.md'));
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best-effort */ }
+    throw err;
+  }
 }

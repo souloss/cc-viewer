@@ -15,11 +15,16 @@
 // reports its own in-process adapter (deps.im.getBridgeStatus) — that's what the manager probes.
 import { getDescriptor, loadConfig, loadState, saveConfig } from '../lib/im-config.js';
 import { findRecentLog } from '../lib/interceptor-core.js';
+import { readSenders } from '../lib/im-senders.js';
+import { readImClaudeMd, writeImClaudeMd, MAX_CLAUDE_MD_CHARS } from '../lib/im-claude-md.js';
+import { imDir } from '../lib/im-lock.js';
+import { listSkills, moveSkill } from '../lib/skills-api.js';
+import { importSkillTo } from './skills.js';
 import { LOG_DIR } from '../../findcc.js';
 import { join, basename } from 'node:path';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
-const IM_RE = /^\/api\/im\/([a-z0-9_-]+)\/(status|config|test|process|logs)$/;
+const IM_RE = /^\/api\/im\/([a-z0-9_-]+)\/(status|config|test|process|logs|senders|claude-md|skills|skills\/toggle|skills\/import)$/;
 
 /** Resolve a known platform id from the URL, or null (→ 404) for an unknown one. */
 function platformOf(url) {
@@ -126,10 +131,15 @@ function imConfigPost(req, res, parsedUrl, isLocal, deps) {
       }
     }
     const saved = saveConfig(id, incoming);
+    // applyProcess（默认 true，保持旧调用方语义）：前端 onBlur 自动保存传 false → 仅存盘、不驱动进程，
+    // 否则每次输入框失焦都会重启 worker。显式「启动/停止」按钮则不传（=true），沿用下述驱动逻辑。
+    // 注：applyProcess 是未知字段，saveConfig/normalize 不会把它写盘。
     // 驱动进程管理器（替代旧的在进程 reloadBridge）：启用→重启 worker（吸收新凭证），停用→停 worker。
     try {
-      if (saved.enabled) await deps.im.restartProcess(id);
-      else await deps.im.stopProcess(id);
+      if (incoming.applyProcess !== false) {
+        if (saved.enabled) await deps.im.restartProcess(id);
+        else await deps.im.stopProcess(id);
+      }
     } catch (e) {
       // 进程操作失败不应阻塞配置保存的响应，但必须记录——否则 worker 起不来时用户看到乐观的
       // running:true 却毫无线索（spawn 失败 / EACCES on process.out.log 等）。
@@ -209,10 +219,114 @@ function imLogs(req, res, parsedUrl, isLocal, deps) {
   res.end(JSON.stringify({ project, latest }));
 }
 
+// 发送者身份映射（senderId → {name, avatar, ts}）：供「对话记录」按 senderId 显示真实姓名+头像。
+// loopback-only：姓名/头像属个人信息，不向局域网暴露（与 config/test/process 同级）。
+function imSenders(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  res.writeHead(200, JSON_HEADERS);
+  res.end(JSON.stringify({ platform: id, senders: readSenders(id) }));
+}
+
+// 「模型性格定义」= 该 IM worker 工作目录下的 CLAUDE.md。loopback-only：本地文件内容、admin-only。
+// CLAUDE.md 仅在 worker 启动时读取一次，故保存后需重启该 IM worker 才生效（前端据此提示用户）。
+function imClaudeMdGet(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  try {
+    res.writeHead(200, JSON_HEADERS);
+    res.end(JSON.stringify({ platform: id, content: readImClaudeMd(id) }));
+  } catch (e) {
+    res.writeHead(500, JSON_HEADERS);
+    res.end(JSON.stringify({ error: String(e?.message || e) }));
+  }
+}
+
+function imClaudeMdPost(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  readBody(req, deps, (body) => {
+    let incoming;
+    try { incoming = JSON.parse(body); }
+    catch { res.writeHead(400, JSON_HEADERS); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+    if (typeof incoming.content !== 'string') {
+      res.writeHead(400, JSON_HEADERS); res.end(JSON.stringify({ error: 'content must be a string' })); return;
+    }
+    if (incoming.content.length > MAX_CLAUDE_MD_CHARS) {
+      res.writeHead(413, JSON_HEADERS); res.end(JSON.stringify({ error: 'content too large' })); return;
+    }
+    try {
+      writeImClaudeMd(id, incoming.content);
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify({ ok: true, platform: id }));
+    } catch (e) {
+      res.writeHead(500, JSON_HEADERS);
+      res.end(JSON.stringify({ error: String(e?.message || e) }));
+    }
+  });
+}
+
+// 「${IM} SKILL 管理」= 该 IM worker 工作目录下的 .claude/skills/。loopback-only（本地文件操作、admin-only）。
+// 复用 skills-api 的 listSkills/moveSkill（按 projectDir 参数化）+ skills.js 的 importSkillTo（按 skillsRoot 参数化）。
+// IM worker 仅在启动时读取 skills，故增删/启停后需重启该 IM worker 才生效（前端提示用户）。
+function imSkills(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  try {
+    const dir = imDir(id);
+    // projectDir 与 homeDir 都指向 IM 目录：两次扫描命中同一 .claude/skills（user+project 重复），
+    // 过滤 source==='project' 去重并排除 plugin/builtin → 恰好是该 IM 自己的 skills(+skills-skip)。
+    const skills = listSkills({ projectDir: dir, homeDir: dir }).filter((s) => s.source === 'project');
+    res.writeHead(200, JSON_HEADERS);
+    res.end(JSON.stringify({ platform: id, skills }));
+  } catch (e) {
+    res.writeHead(500, JSON_HEADERS);
+    res.end(JSON.stringify({ error: String(e?.message || e) }));
+  }
+}
+
+function imSkillsToggle(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  readBody(req, deps, (body) => {
+    let incoming;
+    try { incoming = JSON.parse(body); }
+    catch { res.writeHead(400, JSON_HEADERS); res.end(JSON.stringify({ error: 'Invalid JSON' })); return; }
+    try {
+      moveSkill({ source: 'project', name: incoming.name, enable: !!incoming.enable, projectDir: imDir(id) });
+      res.writeHead(200, JSON_HEADERS);
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err) {
+      const statusMap = { INVALID_NAME: 400, INVALID_SOURCE: 400, PATH_ESCAPE: 400, SYMLINK: 400, SOURCE_MISSING: 404, DEST_CONFLICT: 409 };
+      const status = statusMap[err?.code] || 500;
+      res.writeHead(status, JSON_HEADERS);
+      res.end(JSON.stringify({ error: err?.message || 'internal_error', code: err?.code || 'unknown' }));
+    }
+  });
+}
+
+function imSkillsImport(req, res, parsedUrl, isLocal, deps) {
+  const id = platformOf(parsedUrl.pathname);
+  if (!id) { notFound(res); return; }
+  if (!isLocal) { loopbackOnly(res); return; }
+  importSkillTo(req, res, { skillsRoot: join(imDir(id), '.claude', 'skills'), windowsReserved: deps.WINDOWS_RESERVED_NAMES });
+}
+
 export const imRoutes = [
   { predicate: imPredicate('status', 'GET'), handler: imStatus },
   { predicate: imPredicate('config', 'POST'), handler: imConfigPost },
   { predicate: imPredicate('test', 'POST'), handler: imTestPost },
   { predicate: imPredicate('process', 'POST'), handler: imProcessPost },
   { predicate: imPredicate('logs', 'GET'), handler: imLogs },
+  { predicate: imPredicate('senders', 'GET'), handler: imSenders },
+  { predicate: imPredicate('claude-md', 'GET'), handler: imClaudeMdGet },
+  { predicate: imPredicate('claude-md', 'POST'), handler: imClaudeMdPost },
+  { predicate: imPredicate('skills', 'GET'), handler: imSkills },
+  { predicate: imPredicate('skills/toggle', 'POST'), handler: imSkillsToggle },
+  { predicate: imPredicate('skills/import', 'POST'), handler: imSkillsImport },
 ];

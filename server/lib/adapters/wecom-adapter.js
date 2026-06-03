@@ -61,6 +61,10 @@ const wecomAdapter = {
   hasCreds(cfg) { return !!(cfg.botId && cfg.secret); },
   statusFields(cfg) { return { botIdTail: cfg?.botId?.slice(-4) || '' }; },
 
+  // 发送者姓名/头像：v1 不实现 resolveSender —— 智能机器人长连接凭证（botId+secret）拿不到
+  // 企业通讯录的 corp_access_token，`/cgi-bin/user/get` 不可达。故 WeCom 发送者在「对话记录」里
+  // 降级为默认头像 + senderId（不报错、不阻断）。后续如引入管理员级凭证再补 resolveSender。
+
   async connect(cfg, hooks, ctx) {
     const mod = await loadSdk();
     const WSClient = resolveWSClient(mod);

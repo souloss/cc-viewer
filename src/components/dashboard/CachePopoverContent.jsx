@@ -254,12 +254,12 @@ export default function CachePopoverContent({
   );
 
   const skillsAction = (onOpenSkillsModal || onSkillImported) ? (
-    <Space size={6}>
-      {onSkillImported && (
-        <>
-          {/* 移动端（含 iPad）抽屉里去掉 Dropdown，直接 Button onClick → 文件选择器（仅 .zip/.md）。
-              文件夹入口在移动端浏览器普遍不支持 webkitdirectory，已被 SUPPORTS_DIRECTORY_UPLOAD 兜底。 */}
-          {isMobile ? (
+    <>
+      <Space size={6}>
+        {onSkillImported && (
+          // 移动端（含 iPad）抽屉里去掉 Dropdown，直接 Button onClick → 文件选择器（仅 .zip/.md）。
+          // 文件夹入口在移动端浏览器普遍不支持 webkitdirectory，已被 SUPPORTS_DIRECTORY_UPLOAD 兜底。
+          isMobile ? (
             <Button size="small" icon={<PlusOutlined />} onClick={() => skillFileInputRef.current?.click()}>
               {t('ui.skills.add')}
             </Button>
@@ -276,7 +276,17 @@ export default function CachePopoverContent({
             >
               <Button size="small" icon={<PlusOutlined />}>{t('ui.skills.add')}</Button>
             </Dropdown>
-          )}
+          )
+        )}
+        {onOpenSkillsModal && (
+          <Button size="small" icon={<SettingOutlined />} onClick={() => onOpenSkillsModal()}>
+            {t('ui.skillManage')}
+          </Button>
+        )}
+      </Space>
+      {/* 隐藏文件输入放在 Space 外：否则它们会作为 flex item 在两个按钮间额外撑出 gap。 */}
+      {onSkillImported && (
+        <>
           <input
             type="file"
             ref={skillFileInputRef}
@@ -296,12 +306,7 @@ export default function CachePopoverContent({
           )}
         </>
       )}
-      {onOpenSkillsModal && (
-        <Button type="primary" size="small" icon={<SettingOutlined />} onClick={() => onOpenSkillsModal()}>
-          {t('ui.skillManage')}
-        </Button>
-      )}
-    </Space>
+    </>
   ) : null;
 
   // 记忆区块标题尾部 (N)：仅对 [text](file.md) 形式计数；外链/锚点不计

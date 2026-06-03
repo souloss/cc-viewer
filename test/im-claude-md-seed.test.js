@@ -1,9 +1,9 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { ensureImClaudeMd, buildImClaudeMdPreset, platformLabel } from '../server/lib/im-claude-md.js';
+import { ensureImClaudeMd, buildImClaudeMdPreset, platformLabel, readImClaudeMd, writeImClaudeMd } from '../server/lib/im-claude-md.js';
 import { imDir } from '../server/lib/im-lock.js';
 
 let n = 0;
@@ -53,5 +53,36 @@ describe('im-claude-md seed', () => {
     assert.match(md, /untrusted/i);
     assert.equal(platformLabel('discord'), 'Discord');
     assert.equal(platformLabel('unknownxyz'), 'unknownxyz'); // 未知 id 回退到 id 本身
+  });
+});
+
+describe('im-claude-md read/write (模型性格定义 editor)', () => {
+  beforeEach(() => { mkdirSync(LOG_DIR, { recursive: true }); });
+
+  it('readImClaudeMd returns the preset when the file is absent (not yet persisted)', () => {
+    const id = freshId(); wipe(id);
+    const content = readImClaudeMd(id);
+    assert.equal(content, buildImClaudeMdPreset(id)); // 缺失 → 预置文本，但不落盘
+    assert.equal(existsSync(join(imDir(id), 'CLAUDE.md')), false);
+    wipe(id);
+  });
+
+  it('writeImClaudeMd persists content and readImClaudeMd reads it back', () => {
+    const id = freshId(); wipe(id);
+    const custom = '# 我的机器人\n说话简短一点。';
+    writeImClaudeMd(id, custom);
+    assert.equal(readFileSync(join(imDir(id), 'CLAUDE.md'), 'utf-8'), custom);
+    assert.equal(readImClaudeMd(id), custom);
+    wipe(id);
+  });
+
+  it('writeImClaudeMd overwrites an existing file (atomic temp+rename) and leaves no .tmp', () => {
+    const id = freshId(); wipe(id);
+    writeImClaudeMd(id, 'first');
+    writeImClaudeMd(id, 'second');
+    assert.equal(readImClaudeMd(id), 'second');
+    const leftover = readdirSync(imDir(id)).filter((f) => f.includes('.tmp-'));
+    assert.deepEqual(leftover, []);
+    wipe(id);
   });
 });

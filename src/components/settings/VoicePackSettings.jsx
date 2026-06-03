@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Switch, Slider, Select, Button, message, Tooltip } from 'antd';
-import { PlayCircleOutlined, UploadOutlined, DeleteOutlined, ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons';
-import { t, getLang } from '../../i18n';
+import { PlayCircleOutlined, UploadOutlined, DeleteOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { previewEvent, stopPreview, unlockAudio } from '../../utils/voicePackPlayer';
-import { EVENT_KEYS, DEFAULT_BINDINGS, getDefaultBindingsForLocale } from '../../../server/lib/voice-pack-events';
+import { EVENT_KEYS, DEFAULT_BINDINGS } from '../../../server/lib/voice-pack-events';
 import styles from './VoicePackSettings.module.css';
 
 // User-visible list — order matters (rendered top to bottom). EVENT_KEYS is the
@@ -149,10 +149,9 @@ export default function VoicePackSettings({ prefs, onChange, embedded = false })
       }
       // Local optimistic update for the events table — any event that referenced the
       // freshly-deleted id falls back to the static DEFAULT_BINDINGS (not locale-aware).
-      // 用 schema 字面量而非 getDefaultBindingsForLocale(getLang()) — 删除 uploaded
-      // audio 是局部清理动作,不该把用户曾经手动选过的 pack 再 re-seed 成 locale 默认
-      // (zh 用户手动切回 butler 后再删自定义音,不应突然回到 sanguo)。Reset 走另一条
-      // 路径(handleResetAll),那里 locale-aware 是合理的("回出厂"语义)。
+      // 用 schema 字面量而非 locale-aware 默认 — 删除 uploaded audio 是局部清理动作,
+      // 不该把用户曾经手动选过的 pack 再 re-seed 成 locale 默认（zh 用户手动切回 butler
+      // 后再删自定义音,不应突然回到 sanguo）。
       const patchEvents = {};
       for (const k of EVENT_LIST) {
         if (events[k] === id) patchEvents[k] = DEFAULT_BINDINGS[k];
@@ -164,13 +163,6 @@ export default function VoicePackSettings({ prefs, onChange, embedded = false })
     } catch {
       message.error(_tr('ui.voicePack.deleteFailed', null, 'Delete failed'));
     }
-  };
-
-  const handleResetAll = () => {
-    // Restore default bindings for every event — locale-aware so a zh user gets
-    // sanguo back, an en user gets butler back. Pure function; safe to call here.
-    if (!onChange) return;
-    onChange({ events: { ...getDefaultBindingsForLocale(getLang()) }, volume: 0.3 });
   };
 
   // Build select options as antd OptGroup-style nested options.
@@ -217,7 +209,7 @@ export default function VoicePackSettings({ prefs, onChange, embedded = false })
       )}
 
       {enabled && (
-        <>
+        <div className={styles.collapseArea}>
           <div className={styles.row}>
             <span className={styles.rowLabel}>{_tr('ui.voicePack.volume', null, 'Volume')}</span>
             <div className={styles.sliderWrap}>
@@ -283,18 +275,12 @@ export default function VoicePackSettings({ prefs, onChange, embedded = false })
             />
             <Button
               size="small"
+              className={styles.uploadBtn}
               icon={<UploadOutlined />}
               loading={uploading}
               onClick={handleUploadClick}
             >
               {_tr('ui.voicePack.upload', null, 'Upload audio')}
-            </Button>
-            <Button
-              size="small"
-              icon={<ReloadOutlined />}
-              onClick={handleResetAll}
-            >
-              {_tr('ui.voicePack.reset', null, 'Reset to defaults')}
             </Button>
             {/* Format/size note moved into a hover tooltip on this info icon —
                 inline span pushed the button row onto a second line in narrow panels. */}
@@ -326,7 +312,7 @@ export default function VoicePackSettings({ prefs, onChange, embedded = false })
               ))}
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

@@ -1,22 +1,22 @@
 import React from 'react';
 
-// 企业微信 (WeCom) brand glyph — a single-path chat-bubble mark (fill=currentColor so it adapts to
-// theme / the surrounding text color). Pass a `color` via style for the WeCom brand blue where
-// wanted. Single-color by design: the status chip conveys connection state via this glyph's color.
+// WeChat/WeCom brand glyph — the real two-bubbles mark (single path, 1024 viewBox).
+// fill=currentColor so it adapts to theme / the surrounding text color; pass a `color` via style for
+// the brand green where wanted. Single-color by design: the status chip conveys connection state via
+// this glyph's color.
 export default function WeComIcon({ size = 16, className, style }) {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 24 24"
+      viewBox="0 0 1024 1024"
       fill="currentColor"
-      fillRule="evenodd"
       className={className}
       style={style}
       aria-hidden="true"
       focusable="false"
     >
-      <path d="M9.5 3C5.36 3 2 5.91 2 9.5c0 2.08 1.13 3.93 2.9 5.13L4 17.5l2.74-1.4c.86.26 1.79.4 2.76.4.27 0 .53-.01.79-.03A5.6 5.6 0 0 1 10 14.5C10 11.46 12.91 9 16.5 9c.35 0 .69.02 1.03.07C16.9 5.6 13.55 3 9.5 3zm-2.6 4.4a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm5.2 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2zM16.5 10.5c-3.04 0-5.5 2.02-5.5 4.5s2.46 4.5 5.5 4.5c.7 0 1.37-.1 1.99-.29L20.5 20.5l-.62-1.78A4.9 4.9 0 0 0 22 15c0-2.48-2.46-4.5-5.5-4.5zm-1.85 3a.85.85 0 1 1 0 1.7.85.85 0 0 1 0-1.7zm3.7 0a.85.85 0 1 1 0 1.7.85.85 0 0 1 0-1.7z" />
+      <path d="M683.058 364.695c11 0 22 1.016 32.943 1.976C686.564 230.064 538.896 128 370.681 128c-188.104 0.66-342.237 127.793-342.237 289.226 0 93.068 51.379 169.827 136.725 229.256L130.72 748.43l119.796-59.368c42.918 8.395 77.37 16.79 119.742 16.79 11 0 21.46-0.48 31.914-1.442a259.168 259.168 0 0 1-10.455-71.358c0.485-148.002 128.744-268.297 291.403-268.297l-0.06-0.06z m-184.113-91.992c25.99 0 42.913 16.79 42.913 42.575 0 25.188-16.923 42.579-42.913 42.579-25.45 0-51.38-16.85-51.38-42.58 0-25.784 25.93-42.574 51.38-42.574z m-239.544 85.154c-25.384 0-51.374-16.85-51.374-42.58 0-25.784 25.99-42.574 51.374-42.574 25.45 0 42.918 16.79 42.918 42.575 0 25.188-16.924 42.579-42.918 42.579z m736.155 271.655c0-135.647-136.725-246.527-290.983-246.527-162.655 0-290.918 110.88-290.918 246.527 0 136.128 128.263 246.587 290.918 246.587 33.972 0 68.423-8.395 102.818-16.85l93.809 50.973-25.93-84.677c68.907-51.93 120.286-119.815 120.286-196.033z m-385.275-42.58c-16.923 0-34.452-16.79-34.452-34.179 0-16.79 17.529-34.18 34.452-34.18 25.99 0 42.918 16.85 42.918 34.18 0 17.39-16.928 34.18-42.918 34.18z m188.165 0c-16.984 0-33.972-16.79-33.972-34.179 0-16.79 16.927-34.18 33.972-34.18 25.93 0 42.913 16.85 42.913 34.18 0 17.39-16.983 34.18-42.913 34.18z" />
     </svg>
   );
 }

@@ -27,6 +27,28 @@ export function isPlanApprovalPrompt(prompt) {
   return false;
 }
 
+/**
+ * Pick the option number that APPROVES a plan, for auto-approval.
+ * Mirrors the approve-button heuristic in ChatMessage._renderTool_ExitPlanMode:
+ * the first option whose text matches /yes|approve|accept|proceed/i AND is NOT a
+ * feedback/edit option (those open a textarea on manual click, so auto-submitting them
+ * would be wrong); otherwise the first option; otherwise 1 (the CLI default "approve").
+ * Never returns a reject or feedback option when a plain approve option exists.
+ *
+ * @param {Array<{number:number,text?:string}>} options - plan prompt options
+ * @returns {number} the option number to send for approval
+ */
+export function pickPlanApproveOptionNumber(options) {
+  if (!Array.isArray(options) || options.length === 0) return 1;
+  const approve = options.find(o => {
+    const text = (o && o.text) || '';
+    return /yes|approve|accept|proceed/i.test(text) && !/type|tell|change|feedback|edit/i.test(text);
+  });
+  if (approve && typeof approve.number === 'number') return approve.number;
+  const first = options[0];
+  return (first && typeof first.number === 'number') ? first.number : 1;
+}
+
 export function isDangerousOperationPrompt(prompt) {
   if (!prompt || !prompt.question) return false;
   const q = prompt.question;

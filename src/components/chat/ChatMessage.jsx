@@ -185,7 +185,7 @@ class ChatMessage extends React.Component {
       p.activePtyPlanId !== n.activePtyPlanId ||
       p.requestIndex !== n.requestIndex || p.cacheTotalTokens !== n.cacheTotalTokens || p.label !== n.label || p.isTeammate !== n.isTeammate ||
       p.isHistoryLog !== n.isHistoryLog ||
-      p.userProfile !== n.userProfile || p.modelInfo !== n.modelInfo ||
+      p.userProfile !== n.userProfile || p.modelInfo !== n.modelInfo || p.imSenderMap !== n.imSenderMap || p.imAgent !== n.imAgent ||
       p.resultText !== n.resultText || p.toolName !== n.toolName ||
       p.onViewRequest !== n.onViewRequest || p.onOpenFile !== n.onOpenFile ||
       p.onPlanApprovalClick !== n.onPlanApprovalClick || p.onPlanFeedbackSubmit !== n.onPlanFeedbackSubmit ||
@@ -273,18 +273,39 @@ class ChatMessage extends React.Component {
     return <img src={defaultModelAvatarUrl} className={styles.avatarImg} alt={modelInfo?.name || 'Agent'} />;
   }
 
-  renderUserAvatar(bgColor) {
-    const { userProfile } = this.props;
-    if (userProfile?.avatar) {
-      return <img src={userProfile.avatar} className={styles.avatarImg} alt={userProfile.name || 'User'}
-        onError={(e) => { e.target.onerror = null; e.target.src = defaultAvatarUrl; }} />;
-    }
-    return <img src={defaultAvatarUrl} className={styles.avatarImg} alt={userProfile?.name || 'User'} />;
+  // IM 对话记录里，助手（MainAgent）一侧的身份用所属 IM 平台的 logo + 名称呈现（imAgent = {name, Icon, color}）。
+  // 平台图标是 currentColor 单色 svg，套进圆形头像容器：用 span 包一层避免命中 `.avatar > svg{width:100%}` 被撑满。
+  renderImAgentAvatar(imAgent) {
+    const Icon = imAgent.Icon;
+    return (
+      <div className={styles.avatar} style={{ background: 'var(--bg-model-avatar)', color: imAgent.color }}
+        role="img" aria-label={imAgent.name}>
+        {Icon ? <span className={styles.imAgentGlyph}><Icon size={20} /></span> : null}
+      </div>
+    );
   }
 
-  getUserName() {
-    const { userProfile } = this.props;
-    return userProfile?.name || 'User';
+  // override = 该条消息的发送者身份（IM 来源时按 senderId 查到的 {name, avatar}）；缺省回落全局 userProfile。
+  renderUserAvatar(bgColor, override) {
+    const profile = override || this.props.userProfile;
+    if (profile?.avatar) {
+      return <img src={profile.avatar} className={styles.avatarImg} alt={profile.name || 'User'}
+        onError={(e) => { e.target.onerror = null; e.target.src = defaultAvatarUrl; }} />;
+    }
+    return <img src={defaultAvatarUrl} className={styles.avatarImg} alt={profile?.name || 'User'} />;
+  }
+
+  getUserName(override) {
+    const profile = override || this.props.userProfile;
+    return profile?.name || 'User';
+  }
+
+  // IM 来源消息的发送者身份：从 marker 的 senderId 在 imSenderMap 里查 {name, avatar}；非 IM 或查无 → null。
+  imSenderProfile(senderId) {
+    if (!senderId) return null;
+    const m = this.props.imSenderMap;
+    const p = m && m[senderId];
+    return (p && (p.name || p.avatar)) ? p : null;
   }
 
   renderSegments(segments, trailingCursor = false) {
@@ -752,6 +773,21 @@ class ChatMessage extends React.Component {
               })}
             </div>
           )}
+          {/* 「Plan 自动审批」倒计时提示行：开关开 + 正在倒计时（由 ChatView 下发 planAutoApproveCountdown）才显示。
+              点「取消」转为手动审批（onCancelPlanAutoApprove），不影响下方批准/拒绝按钮。 */}
+          {isInteractive && !this.state.planFeedbackInput && !this.state.planApprovalSubmitting
+            && this.props.planAutoApproveCountdown != null && (
+            <div className={styles.planAutoApproveHint}>
+              <span>{t('ui.planAutoApprove.countdown', { count: this.props.planAutoApproveCountdown })}</span>
+              <button
+                type="button"
+                className={styles.planAutoApproveCancel}
+                onClick={() => this.props.onCancelPlanAutoApprove && this.props.onCancelPlanAutoApprove()}
+              >
+                {t('ui.planAutoApprove.cancel')}
+              </button>
+            </div>
+          )}
           {isInteractive && this.state.planFeedbackInput && (
             <div className={styles.planFeedbackInputWrap}>
               <textarea
@@ -969,9 +1005,12 @@ class ChatMessage extends React.Component {
     const { timestamp } = this.props;
     // Strip a leading IM-origin marker (⟦im:dingtalk⟧) so the bubble shows clean text; imSource
     // drives the IM icon shown left of the username. Normal typed messages have no marker.
-    const { text, imSource } = parseImOrigin(this.props.text);
+    const { text, imSource, senderId } = parseImOrigin(this.props.text);
+    // IM 发送者真实姓名/头像；IM 来源但未解析到身份时用中性「外部用户」+ 默认头像（而非本机 OS 用户）。
+    const senderProfile = this.imSenderProfile(senderId)
+      || (imSource ? { name: t('ui.imSender.external'), avatar: null } : null);
     const timeStr = this.formatTime(timestamp);
-    const userName = this.getUserName();
+    const userName = this.getUserName(senderProfile);
     const imBadge = this.renderImSourceBadge(imSource);
 
     // 检测 /compact 消息
@@ -999,7 +1038,7 @@ class ChatMessage extends React.Component {
               />
             ))}
           </div>
-          {this.renderUserAvatar('#1e40af')}
+          {this.renderUserAvatar('#1e40af', senderProfile)}
         </div>
       );
     }
@@ -1032,7 +1071,7 @@ class ChatMessage extends React.Component {
           </div>
           {this.renderHighlightBubble(styles.bubbleUser, bubbleContent)}
         </div>
-        {this.renderUserAvatar('#1e40af')}
+        {this.renderUserAvatar('#1e40af', senderProfile)}
       </div>
     );
   }
@@ -1453,17 +1492,17 @@ class ChatMessage extends React.Component {
   }
 
   renderAssistantMessage() {
-    const { content, toolResultMap = {}, modelInfo, timestamp, requestIndex, onViewRequest, showTrailingCursor, cacheTotalTokens, showFullToolContent } = this.props;
+    const { content, toolResultMap = {}, modelInfo, timestamp, requestIndex, onViewRequest, showTrailingCursor, cacheTotalTokens, showFullToolContent, imAgent } = this.props;
     const innerContent = this.renderAssistantContent(content, toolResultMap);
 
     if (innerContent.length === 0) return null;
 
     return (
       <div className={styles.messageRow}>
-        <ModelAvatar modelInfo={modelInfo} streaming={!!showTrailingCursor} />
+        {imAgent ? this.renderImAgentAvatar(imAgent) : <ModelAvatar modelInfo={modelInfo} streaming={!!showTrailingCursor} />}
         <div className={styles.contentCol}>
           <AssistantLabel
-            name={modelInfo?.name || 'MainAgent'}
+            name={imAgent ? imAgent.name : (modelInfo?.name || 'MainAgent')}
             timeStr={this.formatTime(timestamp)}
             requestIndex={requestIndex}
             onViewRequest={onViewRequest}

@@ -88,6 +88,19 @@ describe('mergeApprovalModalPrefs', () => {
     assert.equal(r.notifyOnlyWhenHidden, true);
   });
 
+  it('persists the planAutoApproveSeconds top-level number (write / override / preserve)', () => {
+    // write into a base that lacks it
+    let r = mergeApprovalModalPrefs({ modalEnabled: true }, { planAutoApproveSeconds: 5 });
+    assert.equal(r.planAutoApproveSeconds, 5);
+    // override an existing value (incl. the -1 "instant" sentinel)
+    r = mergeApprovalModalPrefs({ planAutoApproveSeconds: 5 }, { planAutoApproveSeconds: -1 });
+    assert.equal(r.planAutoApproveSeconds, -1);
+    // a patch that omits planAutoApproveSeconds must preserve it
+    r = mergeApprovalModalPrefs({ planAutoApproveSeconds: 3, modalEnabled: true }, { soundEnabled: true });
+    assert.equal(r.planAutoApproveSeconds, 3);
+    assert.equal(r.soundEnabled, true);
+  });
+
   it('voicePack partial update preserves untouched voicePack fields', () => {
     const base = {
       modalEnabled: true,

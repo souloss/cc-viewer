@@ -148,9 +148,9 @@ class AppHeader extends React.Component {
       { key: 'export-prompts', icon: <ExportOutlined />, label: t('ui.exportPrompts'), onClick: this.handleShowPrompts },
       { key: 'plugin-management', icon: <ApiOutlined />, label: t('ui.pluginManagement'), onClick: this.handleShowPlugins },
       { key: 'process-management', icon: <DashboardOutlined />, label: t('ui.processManagement'), onClick: this.handleShowProcesses },
+      { key: 'messaging', icon: <MessageOutlined />, label: t('ui.messaging.menu'), onClick: () => this.setState({ messagingModalVisible: true, messagingInitialTool: null }) },
       { key: 'proxy-switch', icon: <SwapOutlined />, label: t('ui.proxySwitch'), onClick: () => this.setState({ proxyModalVisible: true }), dividerAfter: true },
       { key: 'project-stats', icon: <BarChartOutlined />, label: t('ui.projectStats'), onClick: this.handleShowProjectStats },
-      { key: 'messaging', icon: <MessageOutlined />, label: t('ui.messaging.menu'), onClick: () => this.setState({ messagingModalVisible: true, messagingInitialTool: null }) },
       ...(viewMode === 'raw' ? [{ key: 'global-settings', icon: <SettingOutlined />, label: t('ui.globalSettings'), onClick: () => this.setState({ globalSettingsVisible: true }) }] : []),
       ...(viewMode === 'chat' ? [{ key: 'display-settings', icon: <SettingOutlined />, label: t('ui.settings'), onClick: () => this.setState({ settingsDrawerVisible: true }) }] : []),
     ];
@@ -1816,6 +1816,7 @@ class AppHeader extends React.Component {
         <Drawer
           title={t('ui.settings')}
           placement="left"
+          rootClassName="ccvSideDrawer"
           width={420}
           open={this.state.settingsDrawerVisible}
           onClose={() => this.setState({ settingsDrawerVisible: false })}
@@ -1823,7 +1824,12 @@ class AppHeader extends React.Component {
           <div className={styles.settingsGroupBox}>
             <div className={styles.settingsGroupTitle}>{t('ui.chatDisplay')}</div>
             <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>{t('ui.permission.autoApprove.setting')}</span>
+              <span className={styles.settingsLabel}>
+                {t('ui.permission.autoApprove.setting')}
+                <Tooltip title={t('ui.permission.autoApprove.help')}>
+                  <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                </Tooltip>
+              </span>
               <Select
                 size="small"
                 value={autoApproveSeconds || 0}
@@ -1841,14 +1847,45 @@ class AppHeader extends React.Component {
             {this.props.approvalPrefs && this.props.onApprovalPrefsChange && (
               <>
                 <div className={styles.settingsItem}>
-                  <span className={styles.settingsLabel}>{t('ui.approval.settings.modalEnabled')}</span>
+                  <span className={styles.settingsLabel}>
+                    {t('ui.approval.settings.planAutoApprove')}
+                    <Tooltip title={t('ui.approval.settings.planAutoApproveHelp')}>
+                      <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                    </Tooltip>
+                  </span>
+                  <Select
+                    size="small"
+                    value={this.props.approvalPrefs.planAutoApproveSeconds || 0}
+                    onChange={(value) => this.props.onApprovalPrefsChange({ planAutoApproveSeconds: value })}
+                    options={[
+                      { label: t('ui.permission.autoApprove.off'), value: 0 },
+                      { label: '3s', value: 3 },
+                      { label: '5s', value: 5 },
+                      { label: '10s', value: 10 },
+                      { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
+                    ]}
+                    style={{ width: 100 }}
+                  />
+                </div>
+                <div className={styles.settingsItem}>
+                  <span className={styles.settingsLabel}>
+                    {t('ui.approval.settings.modalEnabled')}
+                    <Tooltip title={t('ui.approval.settings.modalEnabled.help')}>
+                      <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                    </Tooltip>
+                  </span>
                   <Switch
                     checked={this.props.approvalPrefs.modalEnabled !== false}
                     onChange={(checked) => this.props.onApprovalPrefsChange({ modalEnabled: checked })}
                   />
                 </div>
                 <div className={styles.settingsItem}>
-                  <span className={styles.settingsLabel}>{t('ui.approval.settings.soundEnabled')}</span>
+                  <span className={styles.settingsLabel}>
+                    {t('ui.approval.settings.soundEnabled')}
+                    <Tooltip title={t('ui.approval.settings.soundEnabled.help')}>
+                      <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                    </Tooltip>
+                  </span>
                   <Switch
                     checked={!!this.props.approvalPrefs.soundEnabled}
                     onChange={(checked) => this.props.onApprovalSoundToggle && this.props.onApprovalSoundToggle(checked)}
@@ -1875,14 +1912,24 @@ class AppHeader extends React.Component {
               </>
             )}
             <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>{t('ui.expandThinking')}</span>
+              <span className={styles.settingsLabel}>
+                {t('ui.expandThinking')}
+                <Tooltip title={t('ui.expandThinking.help')}>
+                  <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                </Tooltip>
+              </span>
               <Switch
                 checked={!!expandThinking}
                 onChange={(checked) => this.context.updatePreferences({ expandThinking: checked })}
               />
             </div>
             <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>{t('ui.showFullToolContent')}</span>
+              <span className={styles.settingsLabel}>
+                {t('ui.showFullToolContent')}
+                <Tooltip title={t('ui.showFullToolContent.help')}>
+                  <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                </Tooltip>
+              </span>
               <Switch
                 checked={!!showFullToolContent}
                 onChange={(checked) => this.context.updatePreferences({ showFullToolContent: checked })}
@@ -1991,6 +2038,7 @@ class AppHeader extends React.Component {
         <Drawer
           title={<span>{t('ui.globalSettings')} <ConceptHelp doc="GlobalSettings" /></span>}
           placement="left"
+          rootClassName="ccvSideDrawer"
           width={400}
           open={this.state.globalSettingsVisible}
           onClose={() => this.setState({ globalSettingsVisible: false })}
@@ -2031,6 +2079,7 @@ class AppHeader extends React.Component {
         <Drawer
           title={<span><BarChartOutlined className={sharedChrome.titleIcon} />{t('ui.projectStats')}</span>}
           placement="left"
+          rootClassName="ccvSideDrawer"
           width={400}
           open={this.state.projectStatsVisible}
           onClose={() => this.setState({ projectStatsVisible: false })}
@@ -2063,7 +2112,7 @@ class AppHeader extends React.Component {
           open={this.state.imRecordVisible}
           platform={this.state.imRecordPlatform}
           onClose={() => this.setState({ imRecordVisible: false })}
-          onOpenConfig={(platform) => this.setState({ imRecordVisible: false, messagingModalVisible: true, messagingInitialTool: platform })}
+          onOpenConfig={(platform) => this.setState({ messagingModalVisible: true, messagingInitialTool: platform })}
         />
 
         {/* Skills Manager Modal — 从 AppHeader popover「已载入 Skill」→「管理」按钮打开 */}

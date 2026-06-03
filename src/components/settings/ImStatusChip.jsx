@@ -19,11 +19,12 @@ export default function ImStatusChip({ descriptor, onClick, onStatus }) {
   const fetchStatus = useCallback(async () => {
     try {
       const r = await fetch(apiUrl(descriptor.endpoints.status));
-      if (!r.ok) return;
+      // 失败时复位为断连态，绝不保留上一次的「已连接」——状态须以真实为准（否则断连后徽标发霉）。
+      if (!r.ok) { setConnection({ running: false, connected: false }); return; }
       const d = await r.json();
       setEnabled(!!d.enabled);
       setConnection(d.connection || null);
-    } catch { /* ignore */ }
+    } catch { setConnection({ running: false, connected: false }); }
   }, [descriptor]);
 
   useEffect(() => {

@@ -921,6 +921,7 @@ class Mobile extends AppBase {
                     onPendingPlanApproval={this.handlePendingPlanApproval}
                     onPendingAsk={this.handleApprovalAsk}
                     onPendingPtyPlan={this.handleApprovalPtyPlan}
+                    planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds}
                     ownTabId={this.state.ownTabId}
                     projectName={this.state.projectName}
                     suppressInlineApprovalPanels={true}
@@ -1140,6 +1141,29 @@ class Mobile extends AppBase {
                     style={{ width: 100 }}
                   />
                 </div>
+                {this.state.approvalPrefs && (
+                  <div className={styles.mobileSettingsRow}>
+                    <span className={styles.mobileSettingsLabel}>
+                      {t('ui.approval.settings.planAutoApprove')}
+                      <Tooltip title={t('ui.approval.settings.planAutoApproveHelp')} trigger="click">
+                        <QuestionCircleOutlined className={styles.mobileSettingsHelpIcon} />
+                      </Tooltip>
+                    </span>
+                    <Select
+                      size="small"
+                      value={this.state.approvalPrefs.planAutoApproveSeconds || 0}
+                      onChange={(value) => this.handleApprovalPrefsChange({ planAutoApproveSeconds: value })}
+                      options={[
+                        { label: t('ui.permission.autoApprove.off'), value: 0 },
+                        { label: '3s', value: 3 },
+                        { label: '5s', value: 5 },
+                        { label: '10s', value: 10 },
+                        { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
+                      ]}
+                      style={{ width: 100 }}
+                    />
+                  </div>
+                )}
                 {isPad && this.state.approvalPrefs && (
                   <>
                     <div className={styles.mobileSettingsRow}>

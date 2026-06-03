@@ -17,7 +17,7 @@ import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeam
 import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../../utils/requestType';
 import { playEvent as playVoiceEvent } from '../../utils/voicePackPlayer';
 import { buildChunksForAnswer, buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../../utils/ptyChunkBuilder';
-import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer } from '../../utils/promptClassifier';
+import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer, pickPlanApproveOptionNumber } from '../../utils/promptClassifier';
 import { isImageFile } from '../../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../../utils/fileExpandedPathsStorage';
 import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, getToolResultCache, setToolResultCache, buildSubAgentResultMap, createEmptyGlobalIndexState, appendToGlobalToolResultIndex } from '../../utils/toolResultBuilder';
@@ -233,6 +233,7 @@ class ChatView extends React.Component {
       askMetaMap: {}, // { [askId]: { startedAt, timeoutMs } } — 倒计时元数据。ask-pending 时 add，
       // ask resolve/cancel/timeout 时 delete，确保内存随 ask 生命周期回收（不会随会话增长无界累积）。
       pendingPtyPlan: null, // { id, prompt } — active plan approval. id 与 ExitPlanMode tool_use id (lastPendingPlanId) 同源，由 componentDidUpdate 从 _currentLastPendingPlanId 派生（cliMode 守卫 + _resolvedPlanIds 短暂窗口守卫）。
+      planAutoApproveCountdown: null, // number|null — 「Plan 自动审批」开启时当前 pendingPtyPlan 的剩余秒数；null=未在倒计时。下发给 inline 卡片显示「{n}s 后自动批准 · 取消」。
       pendingImages: [], // [{ path, source }] — images uploaded/pasted, shown as previews in chat input
       agentTeamEnabled: false,
       ultraplanModalOpen: false,
@@ -279,6 +280,9 @@ class ChatView extends React.Component {
     this._currentLastPendingPlanId = null;
     this._resolvedPlanIds = new Set();
     this._lastObservedLpid = null;
+    // 「Plan 自动审批」倒计时：_planAutoTimer 当前 setInterval 句柄；_planAutoCancelled 记录用户手动取消过的 plan id（避免取消后又重启）。
+    this._planAutoTimer = null;
+    this._planAutoCancelled = new Set();
     // Plan V2 文件型 plan 的异步内容缓存（input.planFilePath → 文件正文）
     this._planFileFetches = new Set();
     this._streamSpinnerUrl = props.isStreaming
@@ -647,6 +651,27 @@ class ChatView extends React.Component {
         }
       } catch {}
     }
+    // 「Plan 自动审批」倒计时生命周期：新 plan 出现（id 变化）→ 启动倒计时；plan 消失/开关关闭 → 清理。
+    // 守卫 planChanged||enableChanged 保证每次 CDU 只在相关变化时才介入，开销可忽略。
+    {
+      const curPlanId = this.state.pendingPtyPlan?.id ?? null;
+      const prevPlanId = prevState.pendingPtyPlan?.id ?? null;
+      const planChanged = prevPlanId !== curPlanId;
+      const enableChanged = prevProps.planAutoApproveSeconds !== this.props.planAutoApproveSeconds;
+      // plan 切换时清掉旧 id 的取消记录，避免 _planAutoCancelled 无界增长（同 _resolvedPlanIds 的清理思路）。
+      if (planChanged && prevPlanId) this._planAutoCancelled.delete(prevPlanId);
+      if (planChanged || enableChanged) {
+        if (!curPlanId || !this.props.planAutoApproveSeconds) {
+          this._clearPlanAutoApprove();
+        } else if (planChanged) {
+          this._clearPlanAutoApprove();
+          this._startPlanAutoApprove(curPlanId);
+        } else if (enableChanged && !this._planAutoTimer) {
+          // 用户在 plan 已 pending 时把开关打开 → 补启动倒计时。
+          this._startPlanAutoApprove(curPlanId);
+        }
+      }
+    }
     // Last Response 出现/消失时，Footer 高度变化会导致 Virtuoso atBottom 误判，需要重新吸底
     if (useVirtuoso && prevState.lastResponseItems !== this.state.lastResponseItems && this.state.stickyBottom) {
       this._stickyController.startSmoothFollow(this._virtuosoScrollerEl);
@@ -787,6 +812,7 @@ class ChatView extends React.Component {
 
   componentWillUnmount() {
     this._unmounted = true;
+    if (this._planAutoTimer) { clearInterval(this._planAutoTimer); this._planAutoTimer = null; }
     // 清理全局审批/通知 — 切 session/关 tab 时让 modal 同步消失，main 进程 badge 归零
     if (this.props.onPendingPermission) this.props.onPendingPermission(null);
     if (this.props.onPendingPlanApproval) this.props.onPendingPlanApproval(null);
@@ -1280,14 +1306,14 @@ class ChatView extends React.Component {
           // 只在有非系统内容时才渲染
           if (filteredContent.length > 0) {
             renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={filteredContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={filteredContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
             );
           }
         } else if (typeof content === 'string') {
           // 过滤字符串类型的系统文本
           if (!isSystemText(content)) {
             renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={[{ type: 'text', text: content }]} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={[{ type: 'text', text: content }]} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
             );
           }
         }
@@ -1881,7 +1907,7 @@ class ChatView extends React.Component {
                 <Divider className={styles.lastResponseDivider}>
                   <Text type="secondary" className={styles.lastResponseLabel}>{t('ui.lastResponse')}</Text>
                 </Divider>
-                <ChatMessage key="resp-asst" role="assistant" content={lrContent} timestamp={session.entryTimestamp} modelInfo={globalModelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} toolResultMap={EMPTY_MAP} askAnswerMap={Object.keys(_localAsk).length > 0 ? _localAsk : EMPTY_MAP} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} lastPendingAskId={respLastPendingAskId} lastPendingPlanId={respLastPendingPlanId} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} activeDangerousPrompt={activeDangerousPrompt} ptyPrompt={this.state.ptyPrompt} cacheTotalTokens={entryCacheTotal} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} cliMode={this.props.cliMode} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} onOpenFile={this.handleOpenToolFilePath} isHistoryLog={isHistoryLog} />
+                <ChatMessage key="resp-asst" role="assistant" content={lrContent} timestamp={session.entryTimestamp} modelInfo={globalModelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} toolResultMap={EMPTY_MAP} askAnswerMap={Object.keys(_localAsk).length > 0 ? _localAsk : EMPTY_MAP} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} lastPendingAskId={respLastPendingAskId} lastPendingPlanId={respLastPendingPlanId} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} ptyPrompt={this.state.ptyPrompt} cacheTotalTokens={entryCacheTotal} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} cliMode={this.props.cliMode} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} askMetaMap={this.state.askMetaMap} onOpenFile={this.handleOpenToolFilePath} isHistoryLog={isHistoryLog} />
               </React.Fragment>
             );
           }
@@ -2405,6 +2431,56 @@ class ChatView extends React.Component {
       this.setState({ ptyPrompt: null });
     }
   }
+
+  // ── 「Plan 自动审批」：plan 提交后短倒计时，到点自动选中批准项；期间可取消 ──────────────
+  // 倒计时跑在 ChatView（稳定单例，持有 ws / _promptSubmitting / _resolvedPlanIds 守卫与批准入口），
+  // 仅把剩余秒数与取消回调下发给 inline 卡片显示。仅 cliMode(PTY) 路径，SDK 模式不接入。
+  _startPlanAutoApprove = (planId) => {
+    if (this._planAutoTimer) return;                                   // 已在倒计时
+    const seconds = this.props.planAutoApproveSeconds;                 // 0=关 / N=N 秒倒计时 / -1=立即
+    if (!this.props.cliMode || !seconds) return;                       // 0/undefined → 关闭
+    if (!planId || this._planAutoCancelled.has(planId)) return;        // 已被用户取消的 plan 不再重启
+    const ws = this._inputWs;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;               // ws 未就绪 → 不启动（避免空发）
+    if (seconds === AUTO_APPROVE_INSTANT) { this._firePlanAutoApprove(planId); return; } // 立即批准，无倒计时
+    let remaining = seconds;
+    this.setState({ planAutoApproveCountdown: remaining });
+    this._planAutoTimer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        this._clearPlanAutoApprove();
+        this._firePlanAutoApprove(planId);
+      } else {
+        this.setState({ planAutoApproveCountdown: remaining });
+      }
+    }, 1000);
+  };
+
+  _clearPlanAutoApprove = () => {
+    if (this._planAutoTimer) { clearInterval(this._planAutoTimer); this._planAutoTimer = null; }
+    if (!this._unmounted && this.state.planAutoApproveCountdown != null) {
+      this.setState({ planAutoApproveCountdown: null });
+    }
+  };
+
+  _firePlanAutoApprove = (planId) => {
+    // 到点再校验一次：仍是同一个 pending plan、未被取消、ws 仍开。
+    if (this.state.pendingPtyPlan?.id !== planId) return;
+    if (this._planAutoCancelled.has(planId)) return;
+    const ws = this._inputWs;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // 选批准项：优先用检测到的 plan prompt 选项做文本匹配，否则回退 option 1（与卡片按钮判定一致）。
+    const planPrompt = this.state.ptyPromptHistory.slice().reverse().find(p => isPlanApprovalPrompt(p) && p.status === 'active');
+    const approveNum = pickPlanApproveOptionNumber(planPrompt?.options || []);
+    this.handlePromptOptionClick(approveNum);  // 复用同一入口：自带 _promptSubmitting / ws / _resolvedPlanIds 守卫
+  };
+
+  // 用户在倒计时期间点「取消」：记下该 plan id 不再重启，并停掉倒计时（保持待手动审批）。
+  cancelPlanAutoApprove = () => {
+    const id = this.state.pendingPtyPlan?.id;
+    if (id) this._planAutoCancelled.add(id);
+    this._clearPlanAutoApprove();
+  };
 
   handlePromptOptionClick = (number) => {
     if (this._promptSubmitting) return;

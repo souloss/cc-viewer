@@ -30,15 +30,23 @@ const DISCORD_MAX = 2_000;       // hard per-message limit
  *  event handler (before this). */
 function normalizeInbound(message) {
   const isGroup = typeof message.inGuild === 'function' ? message.inGuild() : !!message.guild;
-  const senderId = message.author?.id || '';
+  const author = message.author || {};
+  const senderId = author.id || '';
   const channelId = message.channelId;
   // Strip a leading bot mention (<@123> / <@!123>) so "@bot do X" injects as "do X".
   const text = String(message.content ?? '').replace(/^<@!?\d+>\s*/, '');
+  // 姓名 + 头像在事件里免费可得（无需 API）：优先 global_name，头像用 discord.js 的 displayAvatarURL()，
+  // 退化为按 avatar hash 拼 CDN URL（无头像则 null，由前端回落默认头像）。
+  const senderAvatar = typeof author.displayAvatarURL === 'function'
+    ? author.displayAvatarURL()
+    : (author.avatar ? `https://cdn.discordapp.com/avatars/${author.id}/${author.avatar}.png` : null);
   return {
     text,
     conversationId: channelId,
     isGroup,
     senderId,
+    senderName: author.global_name || author.username || null,
+    senderAvatar,
     msgId: message.id,
     // For a DM, channels.fetch(channelId) is broken on a partial DM channel (CHANNEL_RECIPIENT_REQUIRED),
     // so carry the user id and reply via users.fetch().createDM(). Guild channels fetch reliably by id.

@@ -133,6 +133,40 @@ describe('Generic /api/im/:platform config API (loopback=admin)', { concurrency:
     assert.ok(!prefs.body.includes('wecomsecret'), 'no wecom secret in preferences');
   });
 
+  // applyProcess:false 旁路（前端 onBlur 自动保存用）：持久化配置但不驱动进程，故不会 spawn worker。
+  // 用 enabled:true + applyProcess:false 断言：enabled 落盘、但 process 仍 dead（没起 worker），且 applyProcess 不入盘。
+  it('POST config with applyProcess:false persists config but does NOT spawn a worker', async () => {
+    const res = await httpRequest(port, '/api/im/wecom/config', {
+      method: 'POST',
+      body: { enabled: true, applyProcess: false, botId: 'bot_blur', secret: 'blursecret', allowUserIds: ['lisi'] },
+    });
+    assert.equal(res.status, 200);
+    const st = await httpRequest(port, '/api/im/wecom/status');
+    assert.equal(st.json().enabled, true, 'enabled is persisted even with applyProcess:false');
+    assert.equal(st.json().process.state, 'dead', 'no worker spawned (applyProcess:false bypasses restart)');
+    assert.equal(st.json().process.port, null, 'no port since no worker');
+    assert.equal('applyProcess' in st.json(), false, 'applyProcess is a control flag, never persisted');
+    // 复位，避免给后续测试留下 enabled:true 脏态
+    await httpRequest(port, '/api/im/wecom/config', { method: 'POST', body: { enabled: false, applyProcess: false } });
+  });
+
+  it('GET /api/im/:platform/senders returns {} when none recorded', async () => {
+    const res = await httpRequest(port, '/api/im/discord/senders');
+    assert.equal(res.status, 200);
+    const d = res.json();
+    assert.equal(d.platform, 'discord');
+    assert.deepEqual(d.senders, {});
+  });
+
+  it('GET /api/im/:platform/senders surfaces a persisted sender map', async () => {
+    const { upsertSender } = await import('../server/lib/im-senders.js');
+    upsertSender('discord', 'snow1', { name: 'Alice', avatar: 'https://a/1.png' });
+    const res = await httpRequest(port, '/api/im/discord/senders');
+    assert.equal(res.status, 200);
+    assert.equal(res.json().senders.snow1.name, 'Alice');
+    assert.equal(res.json().senders.snow1.avatar, 'https://a/1.png');
+  });
+
   // Discord is the 4th platform; unlike WeCom its testConnection is REST-based, so /test is coverable here.
   it('GET /api/im/discord/status defaults to disabled', async () => {
     const res = await httpRequest(port, '/api/im/discord/status');
@@ -244,6 +278,45 @@ describe('IM routes: allowlist optional / process control / logs (manager-backed
     assert.deepEqual(calls, [['restart', 'feishu']]);
   });
 
+  it('GET /api/im/:platform/claude-md returns the preset when no file exists yet', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/discord/claude-md', 'GET'));
+    const r = await call(route, { pathname: '/api/im/discord/claude-md', deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json().platform, 'discord');
+    assert.match(r.json().content, /AskUserQuestion/); // preset content
+  });
+
+  it('POST /api/im/:platform/claude-md persists content; GET reads it back', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const post = imRoutes.find((r) => r.predicate('/api/im/discord/claude-md', 'POST'));
+    const get = imRoutes.find((r) => r.predicate('/api/im/discord/claude-md', 'GET'));
+    const w = await call(post, { pathname: '/api/im/discord/claude-md', body: { content: '# custom persona\nbe brief' }, deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(w.status, 200);
+    assert.equal(w.json().ok, true);
+    const r = await call(get, { pathname: '/api/im/discord/claude-md', deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(r.json().content, '# custom persona\nbe brief');
+  });
+
+  it('POST /api/im/:platform/claude-md rejects non-string content (400) and non-local caller (403)', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const post = imRoutes.find((r) => r.predicate('/api/im/discord/claude-md', 'POST'));
+    const bad = await call(post, { pathname: '/api/im/discord/claude-md', body: { content: 123 }, deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(bad.status, 400);
+    const remote = await call(post, { pathname: '/api/im/discord/claude-md', body: { content: 'x' }, isLocal: false, deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(remote.status, 403);
+  });
+
+  it('POST /api/im/:platform/claude-md rejects content over MAX_CLAUDE_MD_CHARS (413)', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const { MAX_CLAUDE_MD_CHARS } = await import('../server/lib/im-claude-md.js');
+    const post = imRoutes.find((r) => r.predicate('/api/im/discord/claude-md', 'POST'));
+    const tooBig = 'a'.repeat(MAX_CLAUDE_MD_CHARS + 1);
+    // MAX_POST_BODY must exceed the JSON body so the size guard (413), not the body-limit, is what trips.
+    const r = await call(post, { pathname: '/api/im/discord/claude-md', body: { content: tooBig }, deps: { MAX_POST_BODY: MAX_CLAUDE_MD_CHARS * 2 } });
+    assert.equal(r.status, 413);
+  });
+
   it('config POST enabled with whitespace-only allowlist → fires audit warning + still 200/spawns', async () => {
     const { imRoutes } = await import('../server/routes/im.js');
     const route = imRoutes.find((r) => r.predicate('/api/im/feishu/config', 'POST'));
@@ -303,5 +376,68 @@ describe('IM routes: allowlist optional / process control / logs (manager-backed
     assert.equal(r.status, 200);
     assert.equal(r.json().project, 'IM_discord');
     assert.equal(r.json().latest, null);
+  });
+});
+
+// Per-IM skill management endpoints (GET /skills, POST /skills/import, POST /skills/toggle).
+// Scoped to IM_<id>/.claude/skills under the isolated CCV_LOG_DIR temp. Uses 'wecom' to avoid
+// colliding with the claude-md tests that wrote under IM_discord.
+describe('IM skill management endpoints (per-IM .claude/skills)', () => {
+  const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+  const jsonReq = (bodyStr) => ({ on(ev, cb) { if (ev === 'data' && bodyStr) cb(Buffer.from(bodyStr)); if (ev === 'end') cb(); return this; } });
+  const importReq = (boundary, filename, content) => {
+    const body = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n\r\n${content}\r\n--${boundary}--\r\n`;
+    const buf = Buffer.from(body, 'utf8');
+    return { headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, 'content-length': String(buf.length) }, on(ev, cb) { if (ev === 'data') cb(buf); if (ev === 'end') cb(); return this; }, destroy() {} };
+  };
+  function run(route, req, { pathname, isLocal = true, deps = {} }) {
+    let status = 0, payload = '';
+    let resolveEnd; const done = new Promise((r) => { resolveEnd = r; });
+    const res = { writeHead(s) { status = s; }, end(b) { payload = b || ''; resolveEnd(); } };
+    route.handler(req, res, { pathname }, isLocal, deps);
+    return done.then(() => ({ status, payload, json: () => JSON.parse(payload) }));
+  }
+
+  it('GET skills is empty before any import', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/wecom/skills', 'GET'));
+    const r = await run(route, jsonReq(null), { pathname: '/api/im/wecom/skills' });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json().skills, []);
+  });
+
+  it('import a SKILL.md → GET shows it (project, enabled); toggle off → enabled:false', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const imp = imRoutes.find((r) => r.predicate('/api/im/wecom/skills/import', 'POST'));
+    const get = imRoutes.find((r) => r.predicate('/api/im/wecom/skills', 'GET'));
+    const tog = imRoutes.find((r) => r.predicate('/api/im/wecom/skills/toggle', 'POST'));
+
+    const md = '---\nname: my-im-skill\n---\n# hi\n';
+    const w = await run(imp, importReq('XB', 'my-im-skill.md', md), { pathname: '/api/im/wecom/skills/import', deps: { WINDOWS_RESERVED_NAMES: RESERVED } });
+    assert.equal(w.status, 200);
+    assert.equal(w.json().name, 'my-im-skill');
+
+    let r = await run(get, jsonReq(null), { pathname: '/api/im/wecom/skills' });
+    assert.equal(r.json().skills.length, 1);
+    assert.equal(r.json().skills[0].name, 'my-im-skill');
+    assert.equal(r.json().skills[0].source, 'project');
+    assert.equal(r.json().skills[0].enabled, true);
+
+    const t = await run(tog, jsonReq(JSON.stringify({ name: 'my-im-skill', enable: false })), { pathname: '/api/im/wecom/skills/toggle', deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(t.status, 200);
+    r = await run(get, jsonReq(null), { pathname: '/api/im/wecom/skills' });
+    assert.equal(r.json().skills[0].enabled, false);
+  });
+
+  it('import rejects non-zip/md (415) and non-local caller (403); toggle bad name → 400', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const imp = imRoutes.find((r) => r.predicate('/api/im/wecom/skills/import', 'POST'));
+    const tog = imRoutes.find((r) => r.predicate('/api/im/wecom/skills/toggle', 'POST'));
+    const bad = await run(imp, importReq('XB', 'evil.txt', 'x'), { pathname: '/api/im/wecom/skills/import', deps: { WINDOWS_RESERVED_NAMES: RESERVED } });
+    assert.equal(bad.status, 415);
+    const remote = await run(imp, importReq('XB', 'a.md', 'x'), { pathname: '/api/im/wecom/skills/import', isLocal: false, deps: { WINDOWS_RESERVED_NAMES: RESERVED } });
+    assert.equal(remote.status, 403);
+    const t = await run(tog, jsonReq(JSON.stringify({ name: '../escape', enable: true })), { pathname: '/api/im/wecom/skills/toggle', deps: { MAX_POST_BODY: 1e6 } });
+    assert.equal(t.status, 400);
   });
 });

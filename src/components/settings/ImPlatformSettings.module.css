@@ -63,6 +63,14 @@
   color: var(--text-secondary);
 }
 
+/* 开关标签后的 (?) 说明图标：解释收进 hover 提示。 */
+.helpIcon {
+  margin-left: 6px;
+  color: var(--text-tertiary, #999);
+  cursor: help;
+  font-size: 13px;
+}
+
 .detailsToggle {
   display: inline-flex;
   align-items: center;
@@ -86,9 +94,17 @@
   gap: 10px;
 }
 
+/* 操作区与上方编辑区用分隔线隔开，避免按钮跟表单堆在一起显得局促。 */
 .actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 4px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-secondary);
+}
+
+/* 测试连接靠左，启动/停止留在右侧（auto margin 吃掉中间空白）。 */
+.testBtn {
+  margin-right: auto;
 }

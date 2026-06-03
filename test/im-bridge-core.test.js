@@ -34,7 +34,8 @@ function makeFake(id) {
 const recA = makeFake('imA');
 const recB = makeFake('imB');
 
-const MARK = (id, s) => `⟦im:${id}⟧` + s;
+// marker now carries the sender id: ⟦im:<id>:<senderId>⟧ (fixtures default senderId to 'u1').
+const MARK = (id, s) => `⟦im:${id}:u1⟧` + s;
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
 // Shared PTY harness — one PTY for both platforms (the whole point of the single-flight).

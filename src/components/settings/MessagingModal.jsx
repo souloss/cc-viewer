@@ -49,9 +49,9 @@ export default function MessagingModal({ open, onClose, initialTool }) {
               className={`${styles.tabBtn}${isActive ? ` ${styles.tabBtnActive}` : ''}`}
               onClick={() => setSelected(tool.id)}
             >
-              {/* Brand color on the active tab; grey when inactive. */}
+              {/* Brand color on the active tab (icon + title kept in sync); grey when inactive. */}
               <Icon size={16} style={{ color: isActive ? tool.color : 'var(--text-tertiary, #999)' }} />
-              <span>{_tr(tool.labelKey, null, tool.fallback)}</span>
+              <span style={isActive ? { color: tool.color } : undefined}>{_tr(tool.labelKey, null, tool.fallback)}</span>
             </button>
           );
         })}

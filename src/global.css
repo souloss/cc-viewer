@@ -453,6 +453,8 @@ html, body, #root {
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu {
   border: 1px solid var(--border-hover);
   border-radius: 4px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu .ant-dropdown-menu-item,
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu .ant-dropdown-menu-submenu-title {
@@ -463,13 +465,19 @@ html, body, #root {
 .ant-dropdown-menu-submenu-popup .ant-dropdown-menu {
   border: 1px solid var(--border-hover);
   border-radius: 4px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 /* 行内「钉住」按钮：默认隐藏，hover 当前行显形；钉住后(data-pinned=true)常驻。
    双类特异性压过 antd，无 !important(CLAUDE.md)。菜单在 portal 渲染，故规则放 global.css。 */
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu [data-pin-trigger] {
   opacity: 0;
   color: var(--text-tertiary);
-  transition: opacity 0.15s, color 0.15s;
+  padding: 7px 8px;
+  margin: -7px -6px -7px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s, background-color 0.15s;
 }
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu .ant-dropdown-menu-item:hover [data-pin-trigger] {
   opacity: 0.55;
@@ -477,6 +485,7 @@ html, body, #root {
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu [data-pin-trigger]:hover {
   opacity: 0.85;
   color: var(--text-secondary);
+  background-color: var(--border-hover);
 }
 .ant-dropdown .logo-dropdown-menu.logo-dropdown-menu [data-pin-trigger][data-pinned="true"] {
   opacity: 1;
@@ -565,3 +574,14 @@ html, body, #root {
 [data-theme="light"] .hljs-selector-tag { color: #800000; }
 [data-theme="light"] .hljs-selector-class { color: #267F99; }
 [data-theme="light"] .hljs-selector-id { color: #267F99; }
+
+/* 左侧滑抽屉(IM 对话记录 / 设置 / 全局设置 / 项目统计)的标题栏高度统一对齐主窗口顶栏
+   (App .header = 40px)。antd 默认 .ant-drawer-header 约 56px;这里压到 40 并清零默认 16px
+   上下内边距(.ant-drawer-header-title 内部已 flex 居中,内容在 40px 内垂直居中)。
+   统一走 rootClassName="ccvSideDrawer",新增左侧抽屉只需挂这个类即可继承样式。 */
+.ccvSideDrawer .ant-drawer-header {
+  height: 40px;
+  min-height: 40px;
+  padding-top: 0;
+  padding-bottom: 0;
+}

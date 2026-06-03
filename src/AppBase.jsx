@@ -160,6 +160,7 @@ class AppBase extends React.Component {
         modalEnabled: true,
         soundEnabled: true,
         notifyOnlyWhenHidden: true,
+        planAutoApproveSeconds: 0, // 「Plan 自动审批」倒计时秒数（同 autoApproveSeconds 语义：0=关 / N=N 秒后自动批准 / -1=立即）；仅 CLI(PTY) 路径
         voicePack: {
           enabled: true,
           volume: 0.3,
@@ -450,6 +451,7 @@ class AppBase extends React.Component {
           modalEnabled: data.approvalModal.modalEnabled !== undefined ? !!data.approvalModal.modalEnabled : prevPrefs.modalEnabled,
           soundEnabled: data.approvalModal.soundEnabled !== undefined ? !!data.approvalModal.soundEnabled : prevPrefs.soundEnabled,
           notifyOnlyWhenHidden: data.approvalModal.notifyOnlyWhenHidden !== undefined ? !!data.approvalModal.notifyOnlyWhenHidden : prevPrefs.notifyOnlyWhenHidden,
+          planAutoApproveSeconds: typeof data.approvalModal.planAutoApproveSeconds === 'number' ? data.approvalModal.planAutoApproveSeconds : prevPrefs.planAutoApproveSeconds,
           voicePack: mergedVP,
         };
         // 合并开关迁移：只要 server 端 next.soundEnabled !== next.voicePack.enabled 就强制对齐。
