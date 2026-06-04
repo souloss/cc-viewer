@@ -77,6 +77,7 @@ import { loadPlugins, runWaterfallHook, runParallelHook } from './lib/plugin-loa
 import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher.js';
 import { watchLogFile, startWatching, getWatchedFiles, sendEventToClients, sendToClients } from './lib/log-watcher.js';
 import { cleanupExtractCache } from './lib/jsonl-archive.js';
+import { createBackpressureGate } from './lib/ws-backpressure.js';
 
 
 // 动态获取 getPrefsFile()（LOG_DIR 可能在运行时被 setLogDir 修改）
@@ -1093,8 +1094,19 @@ async function setupTerminalWebSocket(httpServer) {
         try { ws.send(JSON.stringify({ type: 'data', data: buffer })); } catch {}
       }
 
+      // 反压闸门：写缓冲堆积时停发 data，恢复后用 outputBuffer 快照 resync 追赶
+      // （防 Windows ConPTY 洪泛把慢客户端 / server 内存拖垮，详见 lib/ws-backpressure.js）
+      const bpGate = createBackpressureGate({
+        getBufferedAmount: () => ws.bufferedAmount,
+        onResume: () => {
+          if (ws.readyState !== 1) return;
+          try { ws.send(JSON.stringify({ type: 'data-resync', data: getScratchOutputBuffer(id) })); } catch {}
+        },
+        onTimeout: () => { try { ws.terminate(); } catch {} },
+      });
+
       const removeDataListener = onScratchData(id, (data) => {
-        if (ws.readyState === 1) {
+        if (ws.readyState === 1 && bpGate.offer()) {
           try { ws.send(JSON.stringify({ type: 'data', data })); } catch {}
         }
       });
@@ -1124,6 +1136,7 @@ async function setupTerminalWebSocket(httpServer) {
       });
 
       ws.on('close', () => {
+        bpGate.dispose();
         removeDataListener();
         removeExitListener();
         // pty 本身**不杀**（保留以支持刷新重连），由 kill 消息或 /api/workspaces/stop 触发；
@@ -1170,9 +1183,35 @@ async function setupTerminalWebSocket(httpServer) {
       // 注：仅 PTY 已运行时才需要兜底；shell 不在 alternate-screen 不需要。
       let _needRedrawBootstrap = state.running === true;
 
+      // 反压闸门：写缓冲堆积时停发 data，恢复后用 outputBuffer 快照 resync 追赶；
+      // resync 后强制 claude TUI 全屏重绘，避免洪泛结束于 TUI 静止态时画面停在快照
+      // （防 Windows ConPTY 洪泛拖垮慢客户端 / server 内存，详见 lib/ws-backpressure.js）
+      const bpGate = createBackpressureGate({
+        getBufferedAmount: () => ws.bufferedAmount,
+        onResume: () => {
+          if (ws.readyState !== 1) return;
+          try { ws.send(JSON.stringify({ type: 'data-resync', data: getOutputBuffer() })); } catch {}
+          try {
+            if (process.platform !== 'win32') {
+              // POSIX：与下方 _needRedrawBootstrap 同款 SIGWINCH 兜底
+              const pid = getClaudePid();
+              if (pid && pid !== process.pid) process.kill(pid, 'SIGWINCH');
+            } else {
+              // Windows 无 SIGWINCH：resize 抖动经 ConPTY 通知重绘（恢复路径偶发，闪烁可接受）
+              const size = clientSizes.get(ws);
+              if (size) {
+                resizePty(size.cols, size.rows + 1);
+                resizePty(size.cols, size.rows);
+              }
+            }
+          } catch {}
+        },
+        onTimeout: () => { try { ws.terminate(); } catch {} },
+      });
+
       // PTY 输出 → WebSocket(合并 ws 后客户端自行按 msg.type 分发,server 端不再 role 过滤)
       const removeDataListener = onPtyData((data) => {
-        if (ws.readyState === 1) {
+        if (ws.readyState === 1 && bpGate.offer()) {
           ws.send(JSON.stringify({ type: 'data', data }));
         }
       });
@@ -1551,6 +1590,7 @@ async function setupTerminalWebSocket(httpServer) {
       });
 
       ws.on('close', () => {
+        bpGate.dispose();
         removeDataListener();
         removeExitListener();
         clientSizes.delete(ws);
