@@ -6,7 +6,7 @@
 import { formatToolAsXml } from './tools-xml-formatter.js';
 export { formatToolAsXml };
 
-const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent/i;
+const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent|security monitor|performing a web search/i;
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
 
 function getSystemText(body) {
@@ -56,9 +56,9 @@ export function isMainAgentEntry(entry) {
   // v2.1.81+: lightweight MainAgent may have < 10 tools, lowered threshold
   if (body.tools.length > 5) {
     const hasEdit = body.tools.some(t => t.name === 'Edit');
-    const hasBash = body.tools.some(t => t.name === 'Bash');
+    const hasShell = body.tools.some(t => t.name === 'Bash' || t.name === 'PowerShell');
     const hasTaskOrAgent = body.tools.some(t => t.name === 'Task' || t.name === 'Agent');
-    if (hasEdit && hasBash && hasTaskOrAgent) return true;
+    if (hasEdit && hasShell && hasTaskOrAgent) return true;
   }
 
   return false;

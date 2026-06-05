@@ -11,7 +11,7 @@
 // 不覆盖此检测器，必须有单独回归守卫。
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isNativeTeammate, extractNativeTeammateName } from '../src/utils/teammateDetector.js';
+import { isNativeTeammate, extractNativeTeammateName, extractCcVersion } from '../src/utils/teammateDetector.js';
 
 function mkReq({ system = '', tools = [], teammate = null, messages = [] } = {}) {
   const req = { body: { system, tools, messages } };
@@ -127,5 +127,40 @@ describe('extractNativeTeammateName', () => {
       messages: [{ role: 'user', content: 'some random task' }],
     });
     assert.equal(extractNativeTeammateName(req), null);
+  });
+});
+
+describe('extractCcVersion', () => {
+  it('captures hex-suffixed version (e.g., 2.1.162.4f0)', () => {
+    const req = mkReq({
+      system: [{ type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.162.4f0; cc_entrypoint=cli;' }],
+    });
+    assert.equal(extractCcVersion(req), '2.1.162.4f0');
+  });
+
+  it('captures all-digit suffix (e.g., 2.1.162.884)', () => {
+    const req = mkReq({
+      system: [{ type: 'text', text: 'cc_version=2.1.162.884; cc_entrypoint=cli;' }],
+    });
+    assert.equal(extractCcVersion(req), '2.1.162.884');
+  });
+
+  it('backward-compatible with old format without hex suffix', () => {
+    const req = mkReq({
+      system: [{ type: 'text', text: 'cc_version=2.1.90; cc_entrypoint=cli;' }],
+    });
+    assert.equal(extractCcVersion(req), '2.1.90');
+  });
+
+  it('returns null when system is not an array', () => {
+    const req = mkReq({ system: 'cc_version=2.1.162.4f0;' });
+    assert.equal(extractCcVersion(req), null);
+  });
+
+  it('returns null when no cc_version present', () => {
+    const req = mkReq({
+      system: [{ type: 'text', text: 'no version info here' }],
+    });
+    assert.equal(extractCcVersion(req), null);
   });
 });

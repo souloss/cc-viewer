@@ -114,7 +114,7 @@ export function extractCcVersion(req) {
   if (!Array.isArray(system)) return null;
   for (const block of system) {
     if (!block?.text) continue;
-    const m = block.text.match(/cc_version=([\d.]+)/);
+    const m = block.text.match(/cc_version=([\d.]+[a-fA-F0-9]*)/);
     if (m) return m[1];
   }
   return null;

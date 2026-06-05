@@ -33,6 +33,8 @@ function getSubAgentSubType(req) {
   if (/file search specialist/i.test(sysText)) return 'Search';
   if (/planning specialist/i.test(sysText)) return 'Plan';
   if (/general-purpose agent/i.test(sysText)) return 'General';
+  if (/security monitor/i.test(sysText)) return 'Advisor';
+  if (/performing a web search/i.test(sysText)) return 'WebSearch';
 
   const msgs = body.messages || [];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -73,6 +75,16 @@ function isCountRequest(req) {
   if (!Array.isArray(msgs) || msgs.length !== 1) return false;
   const msg = msgs[0];
   return msg.role === 'user' && msg.content === 'count';
+}
+
+function isQuotaCheck(req) {
+  const body = req.body || {};
+  if (body.max_tokens !== 1) return false;
+  if (body.system) return false;
+  if (Array.isArray(body.tools) && body.tools.length > 0) return false;
+  const msgs = body.messages;
+  if (!Array.isArray(msgs) || msgs.length !== 1) return false;
+  return msgs[0].role === 'user' && msgs[0].content === 'quota';
 }
 
 /**
@@ -157,6 +169,10 @@ export function classifyRequest(req, nextReq) {
     return { type: 'Count', subType: null };
   }
 
+  if (isQuotaCheck(req)) {
+    return { type: 'Count', subType: 'Quota' };
+  }
+
   if (isPreflightRequest(req, nextReq)) {
     // Preflight 内容以 "Implement the following plan:" 开头 → Plan:Prompt
     const text = getMessageText((req.body?.messages || [])[0]);
@@ -176,6 +192,7 @@ export function formatRequestTag(type, subType) {
   if (type === 'Plan' && subType) return `Plan:${subType}`;
   if (type === 'SubAgent' && subType) return `SubAgent:${subType}`;
   if (type === 'Synthetic' && subType) return `Synthetic:${subType}`;
+  if (type === 'Count' && subType) return `Count:${subType}`;
   return type;
 }
 

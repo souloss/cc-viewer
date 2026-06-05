@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlink
 import { renameSyncWithRetry } from './file-api.js';
 import { join } from 'node:path';
 
-const SUBAGENT_SYSTEM_RE = /(?:command execution|file search|planning) specialist|general-purpose agent/i;
+const SUBAGENT_SYSTEM_RE = /(?:command execution|file search|planning) specialist|general-purpose agent|security monitor|performing a web search/i;
 
 export function getSystemText(body) {
   const system = body?.system;
@@ -36,9 +36,9 @@ export function isMainAgentRequest(body) {
   // v2.1.81+: 轻量 MainAgent 初始请求工具数可能 < 10，降低阈值兼容
   if (body.tools.length > 5) {
     const hasEdit = body.tools.some(t => t.name === 'Edit');
-    const hasBash = body.tools.some(t => t.name === 'Bash');
+    const hasShell = body.tools.some(t => t.name === 'Bash' || t.name === 'PowerShell');
     const hasTaskOrAgent = body.tools.some(t => t.name === 'Task' || t.name === 'Agent');
-    if (hasEdit && hasBash && hasTaskOrAgent) {
+    if (hasEdit && hasShell && hasTaskOrAgent) {
       return true;
     }
   }

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 // 从 contentFilter.js / requestType.js 复制的核心逻辑
 // ============================================================================
 
-const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent/i;
+const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent|security monitor|performing a web search/i;
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
 
 function getSystemText(body) {

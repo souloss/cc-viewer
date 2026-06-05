@@ -4,7 +4,7 @@
 
 // ============== 请求体辅助 ==============
 
-const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent/i;
+const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent|security monitor|performing a web search/i;
 
 // Teammate 检测：system prompt 中包含 Agent Teammate Communication 标记（外部进程 teammate）
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
@@ -113,9 +113,9 @@ function _isMainAgentImpl(req) {
   // v2.1.81+: 轻量 MainAgent 初始请求工具数可能 < 10，降低阈值兼容
   if (body.tools.length > 5) {
     const hasEdit = body.tools.some(t => t.name === 'Edit');
-    const hasBash = body.tools.some(t => t.name === 'Bash');
+    const hasShell = body.tools.some(t => t.name === 'Bash' || t.name === 'PowerShell');
     const hasTaskOrAgent = body.tools.some(t => t.name === 'Task' || t.name === 'Agent');
-    if (hasEdit && hasBash && hasTaskOrAgent) {
+    if (hasEdit && hasShell && hasTaskOrAgent) {
       return true;
     }
   }
