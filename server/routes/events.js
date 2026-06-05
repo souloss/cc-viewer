@@ -96,7 +96,7 @@ function resumeChoice(req, res, parsedUrl, isLocal, deps) {
         } catch { }
       });
       // 流式分段广播 full_reload，避免全量加载 OOM
-      const reloadTotal = countLogEntries(LOG_FILE);
+      const reloadTotal = await countLogEntries(LOG_FILE);
       deps.clients.forEach(client => {
         try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: reloadTotal, incremental: false })}\n\n`); } catch { }
       });
@@ -313,7 +313,7 @@ async function requests(req, res) {
 }
 
 // 分页历史条目端点：移动端"加载更多"按需拉取
-function entriesPage(req, res, parsedUrl) {
+async function entriesPage(req, res, parsedUrl) {
   const before = parsedUrl.searchParams.get('before');
   const limitVal = Math.min(parseInt(parsedUrl.searchParams.get('limit'), 10) || 100, 500);
   if (!before || isNaN(new Date(before).getTime())) {
@@ -322,7 +322,7 @@ function entriesPage(req, res, parsedUrl) {
     return;
   }
   try {
-    const result = readPagedEntries(LOG_FILE, { before, limit: limitVal });
+    const result = await readPagedEntries(LOG_FILE, { before, limit: limitVal });
     // entries 是原始 JSON 字符串数组，parse 后返回给客户端
     // ExitPlanMode V2 空 input 的条目用 enrichRawIfNeeded 在 raw 阶段补全
     const entries = result.entries.map(raw => {

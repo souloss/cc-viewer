@@ -7,8 +7,8 @@ import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
 
 function workspacesList(req, res, parsedUrl, isLocal, deps) {
-  import('../workspace-registry.js').then(({ getWorkspaces }) => {
-    const workspaces = getWorkspaces();
+  import('../workspace-registry.js').then(async ({ getWorkspaces }) => {
+    const workspaces = await getWorkspaces();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ workspaces, workspaceMode: deps.isWorkspaceMode && !deps.workspaceLaunched }));
   }).catch(err => {
@@ -73,7 +73,7 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       });
 
       // 流式分段广播以刷新会话区域，避免全量加载 OOM
-      const wsReloadTotal = countLogEntries(LOG_FILE);
+      const wsReloadTotal = await countLogEntries(LOG_FILE);
       deps.clients.forEach(client => {
         try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: wsReloadTotal, incremental: false })}\n\n`); } catch {}
       });

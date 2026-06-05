@@ -1,5 +1,6 @@
 // Workspace Registry - 工作区持久化管理
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { renameSyncWithRetry } from './lib/file-api.js';
 import { withFileLockAsync } from './lib/async-file-lock.js';
 import { join, basename, resolve } from 'node:path';
@@ -88,25 +89,22 @@ export async function removeWorkspace(id) {
   return result;
 }
 
-export function getWorkspaces() {
+export async function getWorkspaces() {
   const list = loadWorkspaces();
-  return list
-    .map(w => {
-      let logCount = 0;
-      let totalSize = 0;
-      const logDir = join(LOG_DIR, w.projectName);
-      try {
-        if (existsSync(logDir)) {
-          const files = readdirSync(logDir);
-          for (const f of files) {
-            if (f.endsWith('.jsonl')) {
-              logCount++;
-              try { totalSize += statSync(join(logDir, f)).size; } catch { }
-            }
-          }
+  const enriched = await Promise.all(list.map(async (w) => {
+    let logCount = 0;
+    let totalSize = 0;
+    const logDir = join(LOG_DIR, w.projectName);
+    try {
+      const files = await readdir(logDir);
+      for (const f of files) {
+        if (f.endsWith('.jsonl')) {
+          logCount++;
+          try { totalSize += (await stat(join(logDir, f))).size; } catch { }
         }
-      } catch { }
-      return { ...w, logCount, totalSize };
-    })
-    .sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
+      }
+    } catch { }
+    return { ...w, logCount, totalSize };
+  }));
+  return enriched.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
 }

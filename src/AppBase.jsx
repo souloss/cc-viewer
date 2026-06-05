@@ -104,7 +104,7 @@ class AppBase extends React.Component {
       resumeAutoChoice: null, // null | "continue" | "new"
       autoApproveSeconds: 0, // 自动审批倒计时秒数，0=关闭
       logDir: '',
-      themeColor: 'light',
+      themeColor: /Windows/i.test(navigator.userAgent) ? 'dark' : 'light',
       displayScale: 100, // 整体显示缩放百分比(100=原始大小),仅 Electron 桌面经 webFrame.setZoomFactor 原生缩放;浏览器交由原生快捷键
 
       claudeMissing: false,
@@ -280,7 +280,7 @@ class AppBase extends React.Component {
       expandThinking: !!prefs.expandThinking,
       expandDiff: !!prefs.expandDiff,
       showFullToolContent: !!prefs.showFullToolContent,
-      onlyCurrentSession: !!prefs.onlyCurrentSession,
+      onlyCurrentSession: prefs.onlyCurrentSession !== undefined ? !!prefs.onlyCurrentSession : /Windows/i.test(navigator.userAgent),
       showThinkingSummaries: !!cs.showThinkingSummaries,
     };
   }

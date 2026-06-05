@@ -11,6 +11,7 @@
  */
 
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
 import { isCheckpointEntry, isDeltaEntry, reconstructSegment } from './delta-reconstructor.js';
 import { resolveJsonlPath } from './jsonl-archive.js';
 
@@ -57,14 +58,54 @@ function* iterateRawEntries(filePath) {
 }
 
 /**
+ * 异步 Generator：分块读取 JSONL 文件，逐条 yield 原始 JSON 字符串。
+ * 使用 fs.promises.open + fileHandle.read，不阻塞事件循环。
+ */
+async function* iterateRawEntriesAsync(filePath) {
+  filePath = resolveJsonlPath(filePath);
+  let fh;
+  try {
+    const st = await fsStat(filePath);
+    if (st.size === 0) return;
+    fh = await fsOpen(filePath, 'r');
+    const fileSize = st.size;
+    const buf = Buffer.alloc(Math.min(READ_CHUNK_SIZE, fileSize));
+    let offset = 0;
+    let pending = '';
+
+    while (offset < fileSize) {
+      const toRead = Math.min(buf.length, fileSize - offset);
+      const { bytesRead } = await fh.read(buf, 0, toRead, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+
+      const raw = pending + buf.toString('utf-8', 0, bytesRead);
+      const parts = raw.split(SEPARATOR);
+      pending = parts.pop() || '';
+
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (trimmed) yield trimmed;
+      }
+    }
+
+    if (pending.trim()) {
+      yield pending.trim();
+    }
+  } finally {
+    if (fh) await fh.close();
+  }
+}
+
+/**
  * 轻量预扫描：统计条目总数（原始条目数，不去重）。
  * 用于 SSE load_start 的 total 字段（进度显示）。
  */
-export function countLogEntries(filePath) {
+export async function countLogEntries(filePath) {
   filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return 0;
   let count = 0;
-  for (const _ of iterateRawEntries(filePath)) { count++; }
+  for await (const _ of iterateRawEntriesAsync(filePath)) { count++; }
   return count;
 }
 
@@ -157,6 +198,61 @@ export function streamReconstructedEntries(filePath, onSegment, opts = {}) {
   return sentCount;
 }
 
+export async function streamReconstructedEntriesAsync(filePath, onSegment, opts = {}) {
+  filePath = resolveJsonlPath(filePath);
+  if (!existsSync(filePath)) return 0;
+  try {
+    const st = await fsStat(filePath);
+    if (st.size === 0) return 0;
+  } catch { return 0; }
+
+  const sinceMs = opts.since ? new Date(opts.since).getTime() : 0;
+  let currentSegment = [];
+  let dedup = new Map();
+  let sentCount = 0;
+
+  async function flushSegment(nextCp) {
+    if (currentSegment.length === 0) return;
+    const dedupedSegment = Array.from(dedup.values());
+    reconstructSegment(dedupedSegment, nextCp);
+
+    let toSend = dedupedSegment;
+    if (sinceMs) {
+      toSend = dedupedSegment.filter(e => {
+        const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+        return ts > sinceMs;
+      });
+    }
+    if (toSend.length > 0) {
+      await onSegment(toSend);
+      sentCount += toSend.length;
+    }
+    currentSegment = [];
+    dedup = new Map();
+  }
+
+  for await (const rawEntry of iterateRawEntriesAsync(filePath)) {
+    let entry;
+    try { entry = JSON.parse(rawEntry); } catch { continue; }
+
+    if (isSegmentBoundary(entry) && currentSegment.length > 0) {
+      const key = `${entry.timestamp}|${entry.url}`;
+      const last = currentSegment[currentSegment.length - 1];
+      const lastKey = `${last.timestamp}|${last.url}`;
+      if (key !== lastKey) {
+        await flushSegment(entry);
+      }
+    }
+
+    const key = `${entry.timestamp}|${entry.url}`;
+    dedup.set(key, entry);
+    currentSegment.push(entry);
+  }
+
+  await flushSegment(null);
+  return sentCount;
+}
+
 // ============================================================================
 // 异步 API — 用于 SSE/HTTP：不做重建，直接发原始 JSON 字符串
 // ============================================================================
@@ -192,16 +288,15 @@ export async function streamRawEntriesAsync(filePath, onRawEntry, opts = {}) {
   const onScan = opts.onScan || null;
   const onReady = opts.onReady || null;
 
-  // 第一遍：generator 逐条读取 → dedup Map 存原始字符串（不 parse）
+  // 第一遍：异步 generator 逐条读取 → dedup Map 存原始字符串（不 parse）
   // 内存 = 去重后的原始字符串总量 ≈ 文件大小的一半（inProgress 被 completed 覆盖）
   const dedup = new Map();
-  for (const raw of iterateRawEntries(filePath)) {
+  for await (const raw of iterateRawEntriesAsync(filePath)) {
     if (onScan) onScan(raw);
     const key = extractDedupKey(raw);
     if (key) {
       dedup.set(key, raw);
     } else {
-      // 无法提取 key 的条目直接保留（用自增 id 避免被覆盖）
       dedup.set(`__nokey_${dedup.size}`, raw);
     }
   }
@@ -270,15 +365,14 @@ export async function streamRawEntriesAsync(filePath, onRawEntry, opts = {}) {
  * @param {{ before: string, limit: number }} opts
  * @returns {{ entries: string[], hasMore: boolean, oldestTimestamp: string, count: number }}
  */
-export function readPagedEntries(filePath, { before, limit }) {
+export async function readPagedEntries(filePath, { before, limit }) {
   filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
   const stat = statSync(filePath);
   if (stat.size === 0) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
 
-  // 去重
   const dedup = new Map();
-  for (const raw of iterateRawEntries(filePath)) {
+  for await (const raw of iterateRawEntriesAsync(filePath)) {
     const key = extractDedupKey(raw);
     if (key) {
       dedup.set(key, raw);

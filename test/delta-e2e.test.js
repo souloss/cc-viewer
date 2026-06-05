@@ -266,7 +266,7 @@ describe('Delta Storage E2E', () => {
     assert.ok(lastMain.body.messages.length > 0, 'MainAgent should have messages after reconstruction');
   });
 
-  it('readLocalLog 与 readLogFile 返回一致的重建结果', () => {
+  it('readLocalLog 与 readLogFile 返回一致的重建结果', async () => {
     const turns = [
       { newMessages: [msg('user', 'x')] },
       { newMessages: [msg('assistant', 'y'), msg('user', 'z')] },
@@ -277,7 +277,7 @@ describe('Delta Storage E2E', () => {
     const fromReadLogFile = readLogFile(logFile);
 
     // readLocalLog 需要 logDir + relative file
-    const fromReadLocalLog = readLocalLog(tmpDir, 'test.jsonl');
+    const fromReadLocalLog = await readLocalLog(tmpDir, 'test.jsonl');
 
     // 两者应该返回相同的结果
     assert.equal(fromReadLogFile.length, fromReadLocalLog.length);

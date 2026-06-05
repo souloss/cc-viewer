@@ -1,11 +1,15 @@
 # Changelog
 
-## 1.6.295 (2026-06-04)
+## 1.6.296 (2026-06-05)
 
 - perf(win): 异步写入队列替代 interceptor 热路径的 appendFileSync，消除每次 API 请求 50-300ms 的事件循环阻塞
 - perf(win): Atomics.wait 阻塞锁替换为异步文件锁（workspace-registry / ask-store），消除锁重试期间的线程挂起
 - perf(win): Windows 启动时自动设置 UV_THREADPOOL_SIZE=16，缓解 NTFS + Defender 下异步 I/O 线程池饱和
 - perf(win): 日志监听从 watchFile 500ms 轮询迁移至 fs.watch 事件驱动（Windows 走 ReadDirectoryChangesW），消除 stat 风暴；同目录多文件共享单个 watcher；80ms 防抖；5s 安全网兜底；CCV_FORCE_POLL=1 可回退
+- perf(win): 日志读取路径全面异步化——streamReconstructedEntries / mergeLogFiles / listLocalLogs / readLocalLog / getWorkspaces 改为 fs.promises，不再阻塞事件循环
+- perf(win): JSONL 日志分割阈值从 300MB 降至 150MB，减轻 NTFS + Defender 下大文件 I/O 压力
+- perf(win): index.html 服务改为 mtime 缓存，避免每次请求重读文件
+- feat(win): Windows 首次安装默认深色主题 + 仅展示当前会话，减少大文件加载和视觉刺眼
 - feat: CCV_SYNC_WRITES=1 环境变量回退开关，可随时切回同步模式排查问题
 - feat(im): IM 即时确认——收到消息后第一时间发送状态反馈；飞书/Discord 以可更新卡片呈现（完成后原地更新为回复），钉钉配置卡片模板后支持互动卡片（未配置则文本确认），企微降级为文本确认；超时路径补充回复通知；各平台设置新增「即时确认」开关
 - feat(im): 排队消息告知前方等待数量和队列上限（busyQueued / queueFull 含 {ahead}/{max}）

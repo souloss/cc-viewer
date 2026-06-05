@@ -6,9 +6,9 @@ import { _projectName } from '../interceptor.js';
 import { listLocalLogs, deleteLogFiles, mergeLogFiles, archiveLogFiles, validateLogPath } from '../lib/log-management.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
 
-function localLogs(req, res) {
+async function localLogs(req, res) {
   try {
-    const result = listLocalLogs(LOG_DIR, _projectName);
+    const result = await listLocalLogs(LOG_DIR, _projectName);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
   } catch (err) {
@@ -96,7 +96,7 @@ async function localLog(req, res, parsedUrl) {
     // 独立 SSE 流：直接向请求方返回 event-stream，不走 /events 广播
     validateLogPath(LOG_DIR, file);
     const filePath = join(LOG_DIR, file);
-    const total = countLogEntries(filePath);
+    const total = await countLogEntries(filePath);
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -151,10 +151,10 @@ function deleteLogs(req, res, parsedUrl, isLocal, deps) {
 function mergeLogs(req, res, parsedUrl, isLocal, deps) {
   let body = '';
   req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', () => {
+  req.on('end', async () => {
     try {
       const { files } = JSON.parse(body);
-      const merged = mergeLogFiles(LOG_DIR, files);
+      const merged = await mergeLogFiles(LOG_DIR, files);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, merged }));
     } catch (err) {

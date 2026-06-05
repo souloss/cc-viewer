@@ -79,7 +79,7 @@ describe('workspace-registry', () => {
     writeFileSync(join(projectDir, `${entry.projectName}_a.jsonl`), '{"a":1}\n');
     writeFileSync(join(projectDir, `${entry.projectName}_b.jsonl`), '{"b":2}\n');
     writeFileSync(join(projectDir, 'readme.txt'), 'x');
-    const list = getWorkspaces();
+    const list = await getWorkspaces();
     assert.equal(list.length, 1);
     assert.equal(list[0].logCount, 2);
     assert.ok(list[0].totalSize > 0);

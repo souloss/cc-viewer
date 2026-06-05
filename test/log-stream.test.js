@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { countLogEntries, streamReconstructedEntries, streamRawEntriesAsync, readPagedEntries } from '../server/lib/log-stream.js';
+import { countLogEntries, streamReconstructedEntries, streamReconstructedEntriesAsync, streamRawEntriesAsync, readPagedEntries } from '../server/lib/log-stream.js';
 import { readLogFile } from '../server/lib/log-watcher.js';
 import { reconstructSegment, reconstructEntries } from '../server/lib/delta-reconstructor.js';
 
@@ -96,6 +96,14 @@ function collectStreamEntries(filePath, opts = {}) {
   return all;
 }
 
+async function collectStreamEntriesAsync(filePath, opts = {}) {
+  const all = [];
+  await streamReconstructedEntriesAsync(filePath, (segment) => {
+    all.push(...segment);
+  }, opts);
+  return all;
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -113,31 +121,31 @@ describe('countLogEntries', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('不存在的文件返回 0', () => {
-    assert.equal(countLogEntries(join(tmpDir, 'nope.jsonl')), 0);
+  it('不存在的文件返回 0', async () => {
+    assert.equal(await countLogEntries(join(tmpDir, 'nope.jsonl')), 0);
   });
 
-  it('空文件返回 0', () => {
+  it('空文件返回 0', async () => {
     writeFileSync(logFile, '');
-    assert.equal(countLogEntries(logFile), 0);
+    assert.equal(await countLogEntries(logFile), 0);
   });
 
-  it('单条目（无尾部分隔符）', () => {
+  it('单条目（无尾部分隔符）', async () => {
     writeFileSync(logFile, '{"a":1}');
-    assert.equal(countLogEntries(logFile), 1);
+    assert.equal(await countLogEntries(logFile), 1);
   });
 
-  it('单条目（有尾部分隔符）', () => {
+  it('单条目（有尾部分隔符）', async () => {
     writeFileSync(logFile, '{"a":1}\n---\n');
-    assert.equal(countLogEntries(logFile), 1);
+    assert.equal(await countLogEntries(logFile), 1);
   });
 
-  it('多条目', () => {
+  it('多条目', async () => {
     writeFileSync(logFile, '{"a":1}\n---\n{"b":2}\n---\n{"c":3}\n---\n');
-    assert.equal(countLogEntries(logFile), 3);
+    assert.equal(await countLogEntries(logFile), 3);
   });
 
-  it('与实际 delta 写入一致', () => {
+  it('与实际 delta 写入一致', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 15; i++) {
@@ -145,7 +153,7 @@ describe('countLogEntries', () => {
     }
     simulateInterceptorWrites(logFile, turns);
     // 15 turns × 2 (inProgress + completed) = 30 条目
-    assert.equal(countLogEntries(logFile), 30);
+    assert.equal(await countLogEntries(logFile), 30);
   });
 });
 
@@ -159,18 +167,18 @@ describe('streamReconstructedEntries', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('不存在的文件返回 0 个条目', () => {
+  it('不存在的文件返回 0 个条目', async () => {
     const entries = collectStreamEntries(join(tmpDir, 'nope.jsonl'));
     assert.equal(entries.length, 0);
   });
 
-  it('空文件返回 0 个条目', () => {
+  it('空文件返回 0 个条目', async () => {
     writeFileSync(logFile, '');
     const entries = collectStreamEntries(logFile);
     assert.equal(entries.length, 0);
   });
 
-  it('5 轮对话：与 readLogFile 输出一致', () => {
+  it('5 轮对话：与 readLogFile 输出一致', async () => {
     writeFileSync(logFile, '');
     const turns = [
       { newMessages: [msg('user', 'hello')] },
@@ -204,7 +212,7 @@ describe('streamReconstructedEntries', () => {
     assert.equal(lastMain.body.messages.length, expectedConversation.length);
   });
 
-  it('跨越 checkpoint 边界（15 轮）：与 readLogFile 一致', () => {
+  it('跨越 checkpoint 边界（15 轮）：与 readLogFile 一致', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 15; i++) {
@@ -234,7 +242,7 @@ describe('streamReconstructedEntries', () => {
     }
   });
 
-  it('穿插 teammate 条目：与 readLogFile 一致', () => {
+  it('穿插 teammate 条目：与 readLogFile 一致', async () => {
     writeFileSync(logFile, '');
     const turns = [
       { newMessages: [msg('user', 'start')] },
@@ -251,7 +259,7 @@ describe('streamReconstructedEntries', () => {
     assert.equal(streamEntries.length, batchEntries.length);
   });
 
-  it('分段回调被多次调用', () => {
+  it('分段回调被多次调用', async () => {
     writeFileSync(logFile, '');
     // 写入 25 轮以确保跨越多个 checkpoint（每 10 条一个）
     const turns = [];
@@ -266,7 +274,7 @@ describe('streamReconstructedEntries', () => {
     assert.ok(segmentCount >= 2, `Expected multiple segments, got ${segmentCount}`);
   });
 
-  it('since 过滤：只返回时间戳之后的条目', () => {
+  it('since 过滤：只返回时间戳之后的条目', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 5; i++) {
@@ -288,7 +296,7 @@ describe('streamReconstructedEntries', () => {
     }
   });
 
-  it('旧格式（无 delta）条目正确处理', () => {
+  it('旧格式（无 delta）条目正确处理', async () => {
     // 直接写入旧格式全量条目
     const entries = [
       { timestamp: '2026-01-01T00:00:00Z', url: '/v1/messages', mainAgent: true, body: { messages: [msg('user', 'a'), msg('assistant', 'b')] } },
@@ -302,7 +310,7 @@ describe('streamReconstructedEntries', () => {
     assert.equal(streamEntries[1].body.messages.length, 4);
   });
 
-  it('去重：同一 timestamp|url 保留最后一个', () => {
+  it('去重：同一 timestamp|url 保留最后一个', async () => {
     const entry1 = { timestamp: '2026-01-01T00:00:00Z', url: '/v1/messages', mainAgent: true, inProgress: true, body: { messages: [msg('user', 'hello')] } };
     const entry2 = { timestamp: '2026-01-01T00:00:00Z', url: '/v1/messages', mainAgent: true, body: { messages: [msg('user', 'hello')], response: { text: 'world' } } };
     writeFileSync(logFile, [JSON.stringify(entry1), JSON.stringify(entry2)].join('\n---\n') + '\n---\n');
@@ -313,8 +321,50 @@ describe('streamReconstructedEntries', () => {
   });
 });
 
+describe('streamReconstructedEntriesAsync (async==sync parity)', () => {
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'log-stream-'));
+    logFile = join(tmpDir, 'test.jsonl');
+  });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('async 版本与 sync 版本输出一致（5 轮 delta）', async () => {
+    writeFileSync(logFile, '');
+    const turns = [
+      { newMessages: [msg('user', 'hello')] },
+      { newMessages: [msg('assistant', 'hi'), msg('user', 'how')] },
+      { newMessages: [msg('assistant', 'good'), msg('user', 'joke')] },
+      { newMessages: [msg('assistant', 'why...')] },
+      { newMessages: [msg('user', 'haha')] },
+    ];
+    simulateInterceptorWrites(logFile, turns);
+
+    const syncEntries = collectStreamEntries(logFile);
+    const asyncEntries = await collectStreamEntriesAsync(logFile);
+
+    assert.equal(asyncEntries.length, syncEntries.length, 'entry count mismatch');
+    for (let i = 0; i < syncEntries.length; i++) {
+      assert.equal(asyncEntries[i].timestamp, syncEntries[i].timestamp, `Entry ${i} timestamp mismatch`);
+      if (syncEntries[i].mainAgent && syncEntries[i].body?.messages) {
+        assert.equal(asyncEntries[i].body.messages.length, syncEntries[i].body.messages.length, `Entry ${i} messages length mismatch`);
+      }
+    }
+  });
+
+  it('空文件返回 0', async () => {
+    writeFileSync(logFile, '');
+    const entries = await collectStreamEntriesAsync(logFile);
+    assert.equal(entries.length, 0);
+  });
+
+  it('不存在的文件返回 0', async () => {
+    const entries = await collectStreamEntriesAsync(join(tmpDir, 'nope.jsonl'));
+    assert.equal(entries.length, 0);
+  });
+});
+
 describe('reconstructSegment', () => {
-  it('单条 checkpoint 段', () => {
+  it('单条 checkpoint 段', async () => {
     const entry = {
       _deltaFormat: 1, _isCheckpoint: true, _totalMessageCount: 3,
       mainAgent: true, body: { messages: [msg('user', 'a'), msg('assistant', 'b'), msg('user', 'c')] }
@@ -324,7 +374,7 @@ describe('reconstructSegment', () => {
     assert.equal(result[0].body.messages.length, 3);
   });
 
-  it('checkpoint + delta 段', () => {
+  it('checkpoint + delta 段', async () => {
     const cp = {
       _deltaFormat: 1, _isCheckpoint: true, _totalMessageCount: 2,
       mainAgent: true, body: { messages: [msg('user', 'a'), msg('assistant', 'b')] }
@@ -339,7 +389,7 @@ describe('reconstructSegment', () => {
     assert.equal(result[1].body.messages[3].content, 'd');
   });
 
-  it('broken delta 用 nextCheckpoint 修复', () => {
+  it('broken delta 用 nextCheckpoint 修复', async () => {
     const cp = {
       _deltaFormat: 1, _isCheckpoint: true, _totalMessageCount: 2,
       mainAgent: true, body: { messages: [msg('user', 'a'), msg('assistant', 'b')] }
@@ -552,7 +602,7 @@ describe('streamRawEntriesAsync', () => {
     ]);
 
     // 先计算全量原始条目数
-    const rawCount = countLogEntries(logFile);
+    const rawCount = await countLogEntries(logFile);
 
     let scanCount = 0;
     const filteredRaws = [];
@@ -838,21 +888,21 @@ describe('readPagedEntries', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('不存在的文件返回空', () => {
-    const result = readPagedEntries(join(tmpDir, 'nope.jsonl'), { before: '2099-01-01T00:00:00Z', limit: 10 });
+  it('不存在的文件返回空', async () => {
+    const result = await readPagedEntries(join(tmpDir, 'nope.jsonl'), { before: '2099-01-01T00:00:00Z', limit: 10 });
     assert.equal(result.entries.length, 0);
     assert.equal(result.hasMore, false);
     assert.equal(result.count, 0);
   });
 
-  it('空文件返回空', () => {
+  it('空文件返回空', async () => {
     writeFileSync(logFile, '');
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 10 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 10 });
     assert.equal(result.entries.length, 0);
     assert.equal(result.hasMore, false);
   });
 
-  it('过滤 timestamp < before 的条目', () => {
+  it('过滤 timestamp < before 的条目', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 10; i++) {
@@ -864,11 +914,11 @@ describe('readPagedEntries', () => {
     const allRaws = [];
     streamRawEntriesAsync(logFile, (r) => allRaws.push(r)).then(() => {});
     // 同步方式：用 readPagedEntries 自身的 before 在远未来
-    const allResult = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
+    const allResult = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
 
     // 用中间时间戳作为 before
     const midTs = JSON.parse(allResult.entries[Math.floor(allResult.entries.length / 2)]).timestamp;
-    const pageResult = readPagedEntries(logFile, { before: midTs, limit: 9999 });
+    const pageResult = await readPagedEntries(logFile, { before: midTs, limit: 9999 });
 
     // 所有返回条目的 timestamp 应 < before
     for (const raw of pageResult.entries) {
@@ -880,7 +930,7 @@ describe('readPagedEntries', () => {
     assert.ok(pageResult.entries.length < allResult.entries.length, 'Should return fewer entries than total');
   });
 
-  it('limit 限制返回条目数', () => {
+  it('limit 限制返回条目数', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 20; i++) {
@@ -888,15 +938,15 @@ describe('readPagedEntries', () => {
     }
     simulateInterceptorWrites(logFile, turns);
 
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
 
     // 可能略多于 5（checkpoint 对齐），但不应等于全量
     assert.ok(result.entries.length >= 5, `Should return at least limit entries, got ${result.entries.length}`);
-    const allResult = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
+    const allResult = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
     assert.ok(result.entries.length < allResult.entries.length, 'Should return fewer than total');
   });
 
-  it('checkpoint 对齐：第一条是 checkpoint', () => {
+  it('checkpoint 对齐：第一条是 checkpoint', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 25; i++) {
@@ -904,7 +954,7 @@ describe('readPagedEntries', () => {
     }
     simulateInterceptorWrites(logFile, turns);
 
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 3 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 3 });
     assert.ok(result.entries.length > 0, 'Should return some entries');
 
     // 第一条应该是 checkpoint
@@ -913,7 +963,7 @@ describe('readPagedEntries', () => {
     assert.ok(isCheckpoint, 'First entry should be a checkpoint after alignment');
   });
 
-  it('hasMore 正确标记', () => {
+  it('hasMore 正确标记', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 15; i++) {
@@ -922,15 +972,15 @@ describe('readPagedEntries', () => {
     simulateInterceptorWrites(logFile, turns);
 
     // 小 limit → hasMore = true
-    const smallResult = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 3 });
+    const smallResult = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 3 });
     assert.ok(smallResult.hasMore, 'hasMore should be true when there are earlier entries');
 
     // 大 limit → hasMore = false
-    const bigResult = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
+    const bigResult = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 9999 });
     assert.equal(bigResult.hasMore, false, 'hasMore should be false when all entries returned');
   });
 
-  it('oldestTimestamp 是返回条目中最早的时间戳', () => {
+  it('oldestTimestamp 是返回条目中最早的时间戳', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 10; i++) {
@@ -938,7 +988,7 @@ describe('readPagedEntries', () => {
     }
     simulateInterceptorWrites(logFile, turns);
 
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
     assert.ok(result.oldestTimestamp, 'oldestTimestamp should be set');
 
     // oldestTimestamp 应等于返回条目中最早的 timestamp
@@ -946,13 +996,13 @@ describe('readPagedEntries', () => {
     assert.equal(result.oldestTimestamp, timestamps[0], 'oldestTimestamp should match earliest entry');
   });
 
-  it('entries 是原始 JSON 字符串数组', () => {
+  it('entries 是原始 JSON 字符串数组', async () => {
     writeFileSync(logFile, '');
     simulateInterceptorWrites(logFile, [
       { newMessages: [msg('user', 'q1')] },
     ]);
 
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 10 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 10 });
     assert.ok(result.entries.length > 0);
     for (const entry of result.entries) {
       assert.equal(typeof entry, 'string', 'Each entry should be a raw JSON string');
@@ -960,18 +1010,18 @@ describe('readPagedEntries', () => {
     }
   });
 
-  it('before 早于所有条目时返回空', () => {
+  it('before 早于所有条目时返回空', async () => {
     writeFileSync(logFile, '');
     simulateInterceptorWrites(logFile, [
       { newMessages: [msg('user', 'q1')] },
     ]);
 
-    const result = readPagedEntries(logFile, { before: '1970-01-01T00:00:00Z', limit: 10 });
+    const result = await readPagedEntries(logFile, { before: '1970-01-01T00:00:00Z', limit: 10 });
     assert.equal(result.entries.length, 0);
     assert.equal(result.hasMore, false);
   });
 
-  it('count 等于 entries.length', () => {
+  it('count 等于 entries.length', async () => {
     writeFileSync(logFile, '');
     const turns = [];
     for (let i = 0; i < 10; i++) {
@@ -979,7 +1029,7 @@ describe('readPagedEntries', () => {
     }
     simulateInterceptorWrites(logFile, turns);
 
-    const result = readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
+    const result = await readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 5 });
     assert.equal(result.count, result.entries.length, 'count should equal entries.length');
   });
 });

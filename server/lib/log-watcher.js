@@ -1,9 +1,10 @@
-import { readFileSync, existsSync, watch, watchFile, unwatchFile, openSync, readSync, closeSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, watch, watchFile, unwatchFile, statSync } from 'node:fs';
+import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
 import { dirname, basename } from 'node:path';
 import { isMainAgentEntry, extractCachedContent } from './kv-cache-analyzer.js';
 import { buildContextWindowEvent, getContextSizeForModel } from './context-watcher.js';
 import { reconstructEntries, createIncrementalReconstructor } from './delta-reconstructor.js';
-import { countLogEntries, streamReconstructedEntries } from './log-stream.js';
+import { countLogEntries, streamReconstructedEntriesAsync } from './log-stream.js';
 import { enrichEntry } from './enrich-plan-input.js';
 import { resolveJsonlPath } from './jsonl-archive.js';
 
@@ -109,11 +110,11 @@ export function sendChunkToClients(clients, dataJson) {
 
 // --- 轮转切换（抽取公共逻辑） ---
 
-function _switchToRotatedFile(logFile, currentLogFile, clients, opts) {
+async function _switchToRotatedFile(logFile, currentLogFile, clients, opts) {
   _unwatchSingleFile(logFile);
-  const total = countLogEntries(currentLogFile);
+  const total = await countLogEntries(currentLogFile);
   sendEventToClients(clients, 'load_start', { total, incremental: false });
-  streamReconstructedEntries(currentLogFile, (segment) => {
+  await streamReconstructedEntriesAsync(currentLogFile, (segment) => {
     sendChunkToClients(clients, JSON.stringify(segment));
   });
   sendEventToClients(clients, 'load_end', {});
@@ -122,11 +123,14 @@ function _switchToRotatedFile(logFile, currentLogFile, clients, opts) {
 
 // --- 增量读 + 解析 + 广播（独立于触发机制） ---
 
-function _readDelta(state) {
+async function _readDelta(state) {
+  if (state._reading) return; // 防止并发调用（debounce + safetyTimer 可能重叠）
+  state._reading = true;
   const { logFile, opts, reconstructor } = state;
   const { clients, getClaudePid, runParallelHook, notifyStatsWorker, getLogFile } = opts;
   try {
-    const currentSize = statSync(logFile).size;
+    const st = await fsStat(logFile);
+    const currentSize = st.size;
 
     if (currentSize < state.lastByteOffset) {
       state.lastByteOffset = 0;
@@ -135,7 +139,7 @@ function _readDelta(state) {
 
       const currentLogFile = getLogFile();
       if (currentLogFile !== logFile && !watchedFiles.has(currentLogFile)) {
-        _switchToRotatedFile(logFile, currentLogFile, clients, opts);
+        await _switchToRotatedFile(logFile, currentLogFile, clients, opts);
         return;
       }
     }
@@ -144,11 +148,11 @@ function _readDelta(state) {
 
     const bytesToRead = currentSize - state.lastByteOffset;
     const buf = Buffer.alloc(bytesToRead);
-    const fd = openSync(logFile, 'r');
+    const fh = await fsOpen(logFile, 'r');
     try {
-      readSync(fd, buf, 0, bytesToRead, state.lastByteOffset);
+      await fh.read(buf, 0, bytesToRead, state.lastByteOffset);
     } finally {
-      closeSync(fd);
+      await fh.close();
     }
     state.lastByteOffset = currentSize;
 
@@ -191,10 +195,12 @@ function _readDelta(state) {
 
     const currentLogFile = getLogFile();
     if (currentLogFile !== logFile && !watchedFiles.has(currentLogFile)) {
-      _switchToRotatedFile(logFile, currentLogFile, clients, opts);
+      await _switchToRotatedFile(logFile, currentLogFile, clients, opts);
     }
   } catch {
     // File not yet created or transient read error
+  } finally {
+    state._reading = false;
   }
 }
 

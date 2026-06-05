@@ -407,7 +407,8 @@ export function resetWorkspace() {
   _loadProxyProfile(); // workspace 上下文消失，回落到 profile.json.active
 }
 
-const MAX_LOG_SIZE = 300 * 1024 * 1024; // 300MB
+// Windows NTFS + Defender 下大文件 I/O 代价远高于 Mac/Linux，降低分割阈值减轻压力
+const MAX_LOG_SIZE = (process.platform === 'win32' ? 150 : 300) * 1024 * 1024;
 
 async function checkAndRotateLogFile() {
   // Teammate 不做日志轮转，由 leader 负责

@@ -86,6 +86,7 @@ function getPrefsFile() { return join(LOG_DIR, 'preferences.json'); }
 let claudeSettings = {};
 // SSR theme 注入自检状态：模板缺 data-theme 时仅首次 warn（避免高 QPS 刷屏）
 let _ssrThemeAttrWarned = false;
+let _indexHtmlCache = null; // { html: string, mtime: number }
 try {
   const settingsPath = join(getClaudeConfigDir(), 'settings.json');
   if (existsSync(settingsPath)) {
@@ -685,16 +686,20 @@ async function handleRequest(req, res) {
     const serveIndexHtml = () => {
       try {
         const indexPath = join(DIST_DIR, 'index.html');
-        let html = readFileSync(indexPath, 'utf-8');
-        let themeColor = 'light';
+        // mtime 缓存：避免每次请求都 readFileSync（Windows Defender 下每次读 5-50ms）
+        let st;
+        try { st = statSync(indexPath); } catch { return false; }
+        if (!_indexHtmlCache || _indexHtmlCache.mtime !== st.mtimeMs) {
+          _indexHtmlCache = { html: readFileSync(indexPath, 'utf-8'), mtime: st.mtimeMs };
+        }
+        let html = _indexHtmlCache.html;
+        let themeColor = process.platform === 'win32' ? 'dark' : 'light';
         try {
           if (existsSync(getPrefsFile())) {
             const prefs = JSON.parse(readFileSync(getPrefsFile(), 'utf-8'));
             if (prefs.themeColor === 'dark' || prefs.themeColor === 'light') themeColor = prefs.themeColor;
           }
-        } catch { /* 读 prefs 失败就走默认 light */ }
-        // 自检：模板里没有 <html ... data-theme="..."> 时 replace 静默 no-op，SSR 优化失效但不报错。
-        // 仅首次 warn 避免高 QPS 刷屏（_ssrThemeAttrWarned 单进程一次性）。
+        } catch {}
         if (!_ssrThemeAttrWarned && !/<html[^>]*data-theme="[^"]*"/.test(html)) {
           _ssrThemeAttrWarned = true;
           console.warn('[serveIndexHtml] dist/index.html 没有 <html data-theme="..."> 属性，SSR theme 注入将不生效。检查 index.html 模板。');
