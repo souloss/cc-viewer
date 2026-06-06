@@ -30,6 +30,10 @@ export const hasNativeZoom = typeof window !== 'undefined'
 export const isMac = typeof navigator !== 'undefined'
   && /Mac/i.test(navigator.platform || navigator.userAgent || '');
 
+// Windows——终端字体栈（CJK 字形需显式落到雅黑）与 xterm 宽字形缩放仅在 Windows 启用。
+export const isWindows = typeof navigator !== 'undefined'
+  && /Win/i.test(navigator.platform || navigator.userAgent || '');
+
 if (isPad) {
   document.documentElement.classList.add('pad-mode');
 }

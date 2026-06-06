@@ -240,15 +240,16 @@ describe('server.js HTTP prelude + static serving + exports', { concurrency: fal
     before(() => { process.env.CCV_BASE_PATH = PREFIX; });
     after(() => { delete process.env.CCV_BASE_PATH; });
 
-    it('prefixed API path is NOT routed to the API (dispatcher matches un-stripped pathname) → SPA fallback', async () => {
-      // PIN 现状：handleRequest 把 `url` 剥前缀，但 dispatch() 用 parsedUrl.pathname（原始未剥）
-      // 匹配路由 → `/proxy/cc/api/cli-mode` 命不中任何 route → 落到静态/SPA → index.html。
-      // 即：CCV_BASE_PATH 反代下 API 不工作，仅静态/SPA 工作。属边界 bug，见 notes。
+    it('prefixed API path IS routed to the API (handleRequest 剥前缀后写回 parsedUrl.pathname)', async () => {
+      // 原 PIN 的 bug 已修（base-path 收口）：handleRequest 剥前缀后写回 parsedUrl.pathname，
+      // dispatch() 与各 handler 拿到的都是无前缀路径 → 前缀 API 正常命中路由返回 JSON。
+      // 完整前缀路由矩阵见 test/api-base-path.test.js。
       const res = await raw(port, `${PREFIX}/api/cli-mode`);
       assert.equal(res.status, 200);
-      assert.ok(res.headers['content-type'].includes('text/html'),
-        'prefixed API currently falls through to SPA HTML, not JSON');
-      // 而未加前缀的同一路由正常返回 JSON（对照组）
+      assert.ok(res.headers['content-type'].includes('application/json'),
+        'prefixed API must return JSON after base-path fix');
+      assert.equal(JSON.parse(res.body).cliMode, false);
+      // 未加前缀的同一路由同样正常（向后兼容对照组）
       const res2 = await raw(port, '/api/cli-mode');
       assert.ok(res2.headers['content-type'].includes('application/json'));
       assert.equal(JSON.parse(res2.body).cliMode, false);

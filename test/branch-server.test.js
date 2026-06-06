@@ -143,7 +143,8 @@ try {
     await get('127.0.0.1', port, '/proxy/');             // 前缀剥离 → index.html + base 注入
     await get('127.0.0.1', port, '/proxy/api/preferences'); // 前缀剥离 → API 路由
     await get('127.0.0.1', port, '/no-prefix-path');     // 不带前缀 → SPA fallback
-    // 双斜杠前缀：顶层 /proxy//proxy/x .slice(7) → /proxy/x（仍带前缀），静态段再剥一次 → /x（命中 684-686）。
+    // 双斜杠前缀：顶层 stripBasePath 剥一次 → //proxy/inner.js；静态段不再二次剥离
+    // （base-path 收口后双重剥离已消除），文件不存在 → SPA fallback。
     await get('127.0.0.1', port, '/proxy//proxy/inner.js');
     await get('127.0.0.1', port, '/proxy/index.html');   // 直接 index.html 命中 serveIndexHtml + base 注入
   } else if (scenario === 'authReject') {
@@ -656,7 +657,7 @@ describe('server.js 模块加载期 / startViewer env 分支（子进程）', { 
     assert.equal(res.status, 0, res.stderr);
   });
 
-  it('CCV_BASE_PATH 双前缀 → 静态段二次剥离（684-686）', () => {
+  it('CCV_BASE_PATH 双前缀 → 顶层剥一次后不再二次剥离（SPA fallback）', () => {
     const res = runScenario('basePath', {
       CCV_BASE_PATH: '/proxy',
       CCV_CLI_MODE: '0',

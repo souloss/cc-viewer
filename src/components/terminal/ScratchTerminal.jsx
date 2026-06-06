@@ -9,7 +9,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
-import { darkTerminalTheme, lightTerminalTheme } from './terminalThemes';
+import { darkTerminalTheme, lightTerminalTheme, terminalFontFamily } from './terminalThemes';
+import { isWindows } from '../../env';
 import styles from './TerminalPanel.module.css';
 import { TerminalWriteQueue } from '../../utils/terminalWriteQueue';
 import { appendToken, getBasePath } from '../../utils/apiUrl';
@@ -83,9 +84,11 @@ class ScratchTerminal extends React.Component {
       cursorStyle: 'bar',
       cursorWidth: 1,
       fontSize: 13,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      fontFamily: terminalFontFamily,
       theme: isDark ? darkTerminalTheme : lightTerminalTheme,
       allowProposedApi: true,
+      // 与 TerminalPanel 同款：Windows 下超宽字形按 cell 缩放，治 IME 中文偏移
+      rescaleOverlappingGlyphs: isWindows,
       scrollback: 1000,
       smoothScrollDuration: 0,
       scrollOnUserInput: true,
@@ -114,6 +117,15 @@ class ScratchTerminal extends React.Component {
     if (ta) {
       ta.addEventListener('focus', this._handleScratchFocus);
       ta.addEventListener('blur', this._handleScratchBlur);
+    }
+
+    // 字体异步就绪后重 fit（与 TerminalPanel 同理，复用公开 refit）
+    if (typeof document !== 'undefined' && document.fonts?.ready?.then) {
+      document.fonts.ready.then(() => {
+        if (!this.terminal) return;
+        this.refit();
+        try { this.terminal.refresh(0, this.terminal.rows - 1); } catch { /* noop */ }
+      });
     }
   }
 

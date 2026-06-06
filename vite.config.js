@@ -19,6 +19,8 @@ export default defineConfig(() => {
     //   未设置 → '/' (默认，向后兼容)
     //   '/prefix/' → 构建时硬编码前缀
     //   '' (空字符串) → 相对路径，配合运行时 <base> 标签实现动态代理
+    // 注意：不复用 server/lib/base-path.js 的 normalizeBasePath——构建期 base 是
+    // 三态语义（undefined→'/'，''→相对路径），与运行时"未设=无前缀"语义不同。
     base: (() => {
       const v = process.env.CCV_BASE_PATH;
       if (v === undefined) return '/';

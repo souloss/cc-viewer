@@ -14,6 +14,8 @@ import { t } from './server/i18n.js';
 import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath, resolveNpmClaudePath, buildShellCandidates, setLogDir, LOG_DIR, hasClaude2xWrapper, getGlobalNodeModulesDir, PACKAGES, getClaudeConfigDir } from './findcc.js';
 import { ensureHooks, removeAllManagedHooks } from './server/lib/ensure-hooks.js';
 import { injectCliJsAt, removeCliJsInjectionAt, INJECT_START as _INJECT_START, INJECT_END as _INJECT_END, buildInjectBlock as _buildInjectBlock } from './server/lib/cli-inject.js';
+import { normalizeBasePath } from './server/lib/base-path.js';
+import { createHardenedCleanup, installWinKeypressFallback } from './server/lib/term-signals.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
@@ -389,8 +391,8 @@ async function runCliMode(extraClaudeArgs = [], cwd, noOpen = false) {
 
   // 4. 自动打开浏览器
   const protocol = serverMod.getProtocol();
-  const basePath = process.env.CCV_BASE_PATH || '';
-const url = `${protocol}://127.0.0.1:${port}${basePath}`;
+  const basePath = normalizeBasePath(process.env.CCV_BASE_PATH);
+  const url = `${protocol}://127.0.0.1:${port}${basePath}`;
   if (!noOpen) {
     try {
       // URL 含 & 在 cmd.exe 下会被当命令分隔符切断 query；用 spawn 数组传参避免 shell interpolation。
@@ -421,13 +423,20 @@ const url = `${protocol}://127.0.0.1:${port}${basePath}`;
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
 
-  // 5. 注册退出处理
-  const cleanup = () => {
-    killPty();
-    serverMod.stopViewer().finally(() => process.exit());
-  };
+  // 5. 注册退出处理（hardened：watchdog 5s 强退 + 连按 Ctrl+C 立退，
+  //    防 Windows 上 ConPTY kill / IM teardown 挂住导致"Ctrl+C 完全无反应"）
+  const cleanup = createHardenedCleanup({
+    doCleanup: () => {
+      killPty();
+      return serverMod.stopViewer();
+    },
+  });
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+  // Windows 兜底：ConPTY 下控制台 Ctrl+C 事件偶发不送达（SIGINT 永不触发），
+  // raw mode keypress 直连 cleanup。silent 模式本地终端无人读 stdin，无副作用；
+  // darwin / 非 TTY 内部自动跳过。
+  installWinKeypressFallback({ onInterrupt: cleanup });
 }
 
 // 启动一个独立常驻 IM worker。本质是「在 IM_<id>/ 工作目录、绑 127.0.0.1、skip-permissions」的 runCliMode，
@@ -552,8 +561,8 @@ async function runSdkMode(extraClaudeArgs = [], cwd, noOpen = false) {
 
   // 自动打开浏览器
   const protocol = serverMod.getProtocol();
-  const basePath = process.env.CCV_BASE_PATH || '';
-const url = `${protocol}://127.0.0.1:${port}${basePath}`;
+  const basePath = normalizeBasePath(process.env.CCV_BASE_PATH);
+  const url = `${protocol}://127.0.0.1:${port}${basePath}`;
   if (!noOpen) {
     try {
       // URL 含 & 在 cmd.exe 下会被当命令分隔符切断 query；用 spawn 数组传参避免 shell interpolation。
@@ -584,13 +593,16 @@ const url = `${protocol}://127.0.0.1:${port}${basePath}`;
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
 
-  // 注册退出处理
-  const cleanup = () => {
-    sdkManager.stopSession();
-    serverMod.stopViewer().finally(() => process.exit());
-  };
+  // 注册退出处理（hardened，与 PTY 模式同款三层防御）
+  const cleanup = createHardenedCleanup({
+    doCleanup: () => {
+      sdkManager.stopSession();
+      return serverMod.stopViewer();
+    },
+  });
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+  installWinKeypressFallback({ onInterrupt: cleanup });
 }
 
 // === 主逻辑 ===

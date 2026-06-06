@@ -78,6 +78,8 @@ import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher
 import { watchLogFile, startWatching, unwatchAll, sendEventToClients, sendToClients } from './lib/log-watcher.js';
 import { cleanupExtractCache } from './lib/jsonl-archive.js';
 import { backupConfigs } from './lib/config-backup.js';
+import { normalizeBasePath, validateBasePath, stripBasePath } from './lib/base-path.js';
+import { createHardenedCleanup } from './lib/term-signals.js';
 import { createBackpressureGate } from './lib/ws-backpressure.js';
 
 
@@ -567,12 +569,13 @@ async function handleRequest(req, res) {
   let url = parsedUrl.pathname;
 
   // CCV_BASE_PATH reverse proxy: strip prefix at TOP so API/WS/static/SPA
-  // all work with original unprefixed paths. basePath normalized.
-  const bpRaw = process.env.CCV_BASE_PATH || '';
-  const bp = bpRaw && bpRaw !== '/' ? bpRaw.replace(/\/?$/, '/') : '';
-  if (bp && url.startsWith(bp)) {
-    url = url.slice(bp.length) || '/';
-  }
+  // all work with original unprefixed paths. 剥离后必须写回 parsedUrl.pathname ——
+  // dispatch()（routes/_dispatch.js）与多个 handler（files-content/ask-perm/im）直读
+  // parsedUrl.pathname 做路由匹配和偏移 slice，不写回则前缀下全部 /api/* 与 SSE /events
+  // 命不中、落 SPA fallback（PR #108 遗留 P0）。searchParams 不受 pathname 赋值影响。
+  const bp = normalizeBasePath(process.env.CCV_BASE_PATH);
+  url = stripBasePath(url, bp);
+  parsedUrl.pathname = url;
   const method = req.method;
 
   // WebSocket 路径不处理，交给 upgrade 事件
@@ -677,14 +680,9 @@ async function handleRequest(req, res) {
 
   // 静态文件服务
   if (method === 'GET') {
-    const rawBase = process.env.CCV_BASE_PATH || '';
-    // Normalize to ensure trailing slash; prevents /proxy/ws from
-    // incorrectly matching /proxy/ws-other due to startsWith ambiguity.
-    const basePath = rawBase && rawBase !== '/' ? rawBase.replace(/\/?$/, '/') : '';
+    // basePath 已在 handleRequest 顶部统一剥离，这里不可再剥——否则 /proxy/proxy/x
+    // 这类路径会被双重剥离。
     let filePath = url;
-    if (basePath && url.startsWith(basePath)) {
-      filePath = url.slice(basePath.length) || '/';
-    }
     if (filePath === '/') filePath = '/index.html';
     // 去掉 query string
     filePath = filePath.split('?')[0];
@@ -728,12 +726,12 @@ async function handleRequest(req, res) {
         html = html.replace(/<html([^>]*?)data-theme="[^"]*"/, `<html$1data-theme="${themeColor}"`);
         // 运行时注入 <base> 标签：当 CCV_BASE_PATH 设置为非空非根路径时，
         // 使浏览器将所有相对 URL 解析到代理子路径下。配合 Vite base='' 输出相对路径。
-        const basePath = process.env.CCV_BASE_PATH || '';
-        if (basePath && basePath !== '/') {
-          const safeBase = basePath.replace(/\/?$/, '/');
-                  const escapedBase = safeBase.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const jsSafeBase = safeBase.replace(/"/g, '"').replace(/<\//g, '<\/');
-        html = html.replace(/<head[^>]*>/i, m => m + `<base href="${escapedBase}"><script>window.__CCV_BASE_PATH__="${jsSafeBase}"</script>`);
+        const injectBase = normalizeBasePath(process.env.CCV_BASE_PATH);
+        if (injectBase) {
+          const escapedBase = injectBase.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          // JS 双引号字符串转义：\ → \\、" → \"、</ → <\/（防 </script> 提前闭合）
+          const jsSafeBase = injectBase.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/<\//g, '<\\/');
+          html = html.replace(/<head[^>]*>/i, m => m + `<base href="${escapedBase}"><script>window.__CCV_BASE_PATH__="${jsSafeBase}"</script>`);
         }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
         res.end(html);
@@ -877,17 +875,25 @@ export async function startViewer() {
               if (_prefs.lang) setLang(_prefs.lang);
             }
           } catch { /* 读 prefs 失败就保持默认语言 */ }
+          // CCV_BASE_PATH 配置校验：缺前导 '/' 时剥离静默失效（startsWith 永不命中），
+          // 启动期告警一次。放在 setLang 之后，告警语言才跟随用户配置。
+          {
+            const _bpCheck = validateBasePath(process.env.CCV_BASE_PATH);
+            if (_bpCheck.warning) console.warn(t(_bpCheck.warning, { value: process.env.CCV_BASE_PATH }));
+          }
           // interceptor.js runs in this same process (via proxy.js → setupInterceptor).
           // Inject live-port via module-level setter instead of process.env to avoid
           // polluting env of child_process.spawn descendants (Bash tools / MCP / Electron tabs).
           setLivePort(port, serverProtocol);
-          const url = `${serverProtocol}://127.0.0.1:${port}`;
+          // 自动打开/serverStarted hook 用的 URL 也要带反代前缀（与启动打印一致）
+          const url = `${serverProtocol}://127.0.0.1:${port}${normalizeBasePath(process.env.CCV_BASE_PATH)}`;
           if (!isCliMode) {
             console.error(t('server.started'));
-            console.error(t('server.startedLocal', { protocol: serverProtocol, port }));
+            const _bp = normalizeBasePath(process.env.CCV_BASE_PATH);
+            console.error(t('server.startedLocal', { protocol: serverProtocol, port, basePath: _bp }));
             const _ips = getAllLocalIps();
             for (const _ip of _ips) {
-              console.error(t('server.startedNetwork', { protocol: serverProtocol, ip: _ip, port, token: ACCESS_TOKEN }));
+              console.error(t('server.startedNetwork', { protocol: serverProtocol, ip: _ip, port, basePath: _bp, token: ACCESS_TOKEN }));
             }
             if (authConfig.enabled) {
               if (authConfig.password === '') console.error(t('server.passwordEmptyWarn'));
@@ -1064,12 +1070,8 @@ async function setupTerminalWebSocket(httpServer) {
 
     httpServer.on('upgrade', (req, socket, head) => {
       const wsUrl = new URL(req.url, `${serverProtocol}://${req.headers.host}`);
-      let pathname = wsUrl.pathname;
-      const bpRaw = process.env.CCV_BASE_PATH || '';
-      const wsBp = bpRaw && bpRaw !== '/' ? bpRaw.replace(/\/?$/, '/') : '';
-      if (wsBp && pathname.startsWith(wsBp)) {
-        pathname = '/' + pathname.slice(wsBp.length);
-      }
+      // upgrade 不经 handleRequest，basePath 需独立剥离（与 HTTP 段同走统一函数）
+      let pathname = stripBasePath(wsUrl.pathname, normalizeBasePath(process.env.CCV_BASE_PATH));
       // 与 HTTP 一致的鉴权（此前 WS upgrade 完全不校验 token，远程终端实为无门禁——本次堵洞）。
       // 在此显式计算 isLocal（与 handleRequest 同款三态判断），WS 视作非 HTML 请求。
       const wsRemoteIp = req.socket.remoteAddress;
@@ -1929,8 +1931,20 @@ async function _doStop() {
   _lastCliActive = false;
   // Tear down all IM bridge connections so a stop/start cycle (Electron tab switch, tests) never
   // leaks a second WS to the same app. Idempotent + swallows errors.
-  try { await imCore.stopAll(); } catch { }
-  try { await Promise.race([runParallelHook('serverStopping'), new Promise(r => setTimeout(r, 3000))]); } catch { }
+  // IM teardown + serverStopping hook 共用一个 3s 总预算（保持串行语义）：
+  // Windows 上 IM bridge WS teardown 挂住会卡死整条退出链（原本裸 await 是
+  // "Ctrl+C 完全无反应"的 B 类成因）；两段若各自 3s race 串行最坏 6s，会越过
+  // cleanup watchdog(5s) 截断其后的 temp jsonl rename（用户数据）——合并为单预算
+  // 保证 teardown ≤3s，watchdog 前始终留出 rename 余量。超时后控制流顺序继续。
+  try {
+    await Promise.race([
+      (async () => {
+        try { await imCore.stopAll(); } catch { }
+        await runParallelHook('serverStopping');
+      })(),
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+  } catch { }
   // 如果用户未做选择，将临时文件转为正式文件
   if (_resumeState && _resumeState.tempFile) {
     try {
@@ -2100,6 +2114,9 @@ function handleExit() {
 if (!globalThis._ccvServerSignalsRegistered) {
   globalThis._ccvServerSignalsRegistered = true;
   process.on('exit', handleExit);
-  process.on('SIGINT', () => { stopViewer().finally(() => process.exit()); });
-  process.on('SIGTERM', () => { stopViewer().finally(() => process.exit()); });
+  // hardened：watchdog 5s 强退 + 重复触发立退（防 Windows 上 stopViewer 内部
+  // await 挂住导致 .finally(exit) 永不执行 = Ctrl+C 完全无反应）。
+  const _hardenedStop = createHardenedCleanup({ doCleanup: () => stopViewer() });
+  process.on('SIGINT', _hardenedStop);
+  process.on('SIGTERM', _hardenedStop);
 }

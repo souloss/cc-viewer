@@ -1,4 +1,6 @@
 // 抽离自 TerminalPanel.jsx，供 TerminalPanel + ScratchTerminal 共用，破除循环 import。
+import { isWindows } from '../../env';
+
 export const darkTerminalTheme = {
   background: '#0a0a0a', foreground: '#d4d4d4', cursor: '#d4d4d4',
   selectionBackground: '#264f78',
@@ -16,3 +18,12 @@ export const lightTerminalTheme = {
   brightBlack: '#666666', brightRed: '#CD3131', brightGreen: '#14CE14', brightYellow: '#B5BA00',
   brightBlue: '#0451A5', brightMagenta: '#BC05BC', brightCyan: '#0598BC', brightWhite: '#A5A5A5',
 };
+
+// 终端字体栈（TerminalPanel + ScratchTerminal 共用）。
+// Windows：Menlo/Monaco 不存在、Courier New 无 CJK 字形 —— 中文会走浏览器随机回退字体，
+// 实际 advance 宽度 ≠ xterm 按 wcwidth 算的 2×cell，逐字符错位累积成 IME 输入"整体偏移"。
+// 显式以 Consolas/Cascadia 承接 ASCII、微软雅黑确定性承接 CJK（xterm.js#62/#3342/#4969 同类问题）。
+// 非 Windows 保持原字体栈，零回归面。
+export const terminalFontFamily = isWindows
+  ? 'Consolas, "Cascadia Mono", "Courier New", "Microsoft YaHei", "微软雅黑", monospace'
+  : 'Menlo, Monaco, "Courier New", monospace';

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.301 (2026-06-06)
+
+- fix(base-path): 修复反代子路径下 API/SSE/file-raw 路由失效（剥前缀写回 parsedUrl.pathname）；CCV_BASE_PATH normalize 收敛到 server/lib/base-path.js + 启动校验告警 + index.html 注入转义修复
+- fix(win): Ctrl+C 退出三层防御——cleanup watchdog 5s 强退 + 连按立退、win32 raw-mode keypress 兜底 SIGINT 不送达、killPty 改 taskkill /T 收割 ConPTY 进程树（server/lib/term-signals.js）
+- fix(win): web 终端中文 IME 输入整体偏移——Windows 字体栈显式承接 CJK（Consolas+雅黑）+ rescaleOverlappingGlyphs + 字体就绪后重 fit
+
 ## 1.6.300 (2026-06-06)
 
 - fix(security): 测试隔离守卫体系——findcc.js LOG_DIR/configDir 双铁闸(NODE_TEST_CONTEXT 下强制进程私有临时目录)、im-process-manager 测试态拒绝真实 spawn IM worker、updater 测试态拒绝真实 registry 请求与自更新;单元测试从机制上无法再触碰真实 ~/.claude 数据与外网

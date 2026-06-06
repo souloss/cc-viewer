@@ -5,6 +5,7 @@ import { chmodSync, statSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn } from './lib/terminal-env.js';
+import { killPtyTree } from './lib/term-signals.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -474,7 +475,14 @@ export function killPty() {
     flushBatch();
     batchBuffer = '';
     batchScheduled = false;
-    try { ptyProcess.kill(); } catch { }
+    // Windows：node-pty 的 ConPTY kill 有已知同步挂起问题（microsoft/node-pty#454），
+    // 挂住会连 Ctrl+C 退出链的 watchdog 一起废掉。改用 spawnSync taskkill /T /F 收割
+    // 整棵进程树（ConPTY agent + claude），有界（timeout 2s）且提供"返回时已死"语义
+    // （spawnClaude 内部 kill→respawn、workspaces stop→launch 依赖这一点）。
+    // win32 下完全跳过 ptyProcess.kill()。非 Windows 行为不变。
+    if (!killPtyTree(ptyProcess.pid)) {
+      try { ptyProcess.kill(); } catch { }
+    }
     ptyProcess = null;
     ptyKind = null;
     ptySkipPermissions = false;

@@ -15,7 +15,7 @@ import { t } from '../../i18n';
 import { tc, getClaudeConfigDir } from '../../utils/tClaude';
 import { TerminalWsContext } from './TerminalWsContext';
 import { apiUrl } from '../../utils/apiUrl';
-import { isMobile, isIOS, isPad } from '../../env';
+import { isMobile, isIOS, isPad, isWindows } from '../../env';
 import styles from './TerminalPanel.module.css';
 import { BUILTIN_PRESETS } from '../../utils/builtinPresets.js';
 import { buildLocalUltraplan } from '../../utils/ultraplanTemplates';
@@ -31,7 +31,7 @@ import { buildPresetShortcutsPayload } from '../../utils/presetShortcuts';
 import ImageLightbox from '../common/ImageLightbox';
 import ConfirmRemoveButton from '../common/ConfirmRemoveButton';
 import ScratchTerminal from './ScratchTerminal';
-import { darkTerminalTheme, lightTerminalTheme } from './terminalThemes';
+import { darkTerminalTheme, lightTerminalTheme, terminalFontFamily } from './terminalThemes';
 import { resizeImageIfNeeded } from '../../utils/imageResize';
 import { calcResizedSize } from '../../utils/resizeCalc';
 
@@ -621,6 +621,9 @@ class TerminalPanel extends React.Component {
         this.terminal.textarea.removeEventListener('paste', this._handlePaste, true);
       }
       this.terminal.dispose();
+      // 置 null 让晚到的异步回调（如 document.fonts.ready 重 fit）的 !this.terminal
+      // 守卫真正生效，与 ScratchTerminal 行为对齐
+      this.terminal = null;
     }
   }
 
@@ -632,9 +635,13 @@ class TerminalPanel extends React.Component {
       cursorWidth: 1,
       cursorInactiveStyle: 'none',
       fontSize: (isMobile && !isPad) ? 11 : 13,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      fontFamily: terminalFontFamily,
       theme: isDark ? darkTerminalTheme : lightTerminalTheme,
       allowProposedApi: true,
+      // Windows：超出 cell 宽度的字形（CJK 落回退字体时常见）按 cell 缩放，配合
+      // terminalFontFamily 治 IME 中文输入整体偏移；仅 win 开启，mac 渲染零变化。
+      // 注：DOM 渲染器下该选项无效（WebGL/Canvas 有效），字体栈修复不受影响。
+      rescaleOverlappingGlyphs: isWindows,
       scrollback: isPad ? 3000 : isIOS ? 200 : isMobile ? 1000 : 3000,
       smoothScrollDuration: 0,
       scrollOnUserInput: true,
@@ -685,6 +692,15 @@ class TerminalPanel extends React.Component {
         this.fitAddon.fit();
         this.terminal.focus();
       });
+      // 字体异步就绪后重 fit + 重绘：初始 fit 可能基于回退字体的 cell 测量，
+      // 字体加载完成后宽度变化会造成错位（Windows CJK 场景尤甚）。
+      if (typeof document !== 'undefined' && document.fonts?.ready?.then) {
+        document.fonts.ready.then(() => {
+          if (!this.terminal) return;
+          this._fitPreservingScroll();
+          try { this.terminal.refresh(0, this.terminal.rows - 1); } catch { /* noop */ }
+        });
+      }
     }
 
     // Shift+Enter: 发 ESC+CR（Alt+Enter 的 escape 码），和 Claude Code `/terminal-setup`

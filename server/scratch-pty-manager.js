@@ -4,6 +4,7 @@ import { chmodSync, statSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import { prepareEmbeddedShellSpawn } from './lib/terminal-env.js';
+import { killPtyTree } from './lib/term-signals.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -219,7 +220,11 @@ export function killScratch(id) {
     flushBatch(s);
     s.batchBuffer = '';
     s.batchScheduled = false;
-    try { s.ptyProcess.kill(); } catch { }
+    // 与 pty-manager.killPty 同款：win32 用 taskkill /T 收割 ConPTY 树，
+    // 绕开 node-pty kill 的同步挂起问题；非 Windows 走原路径。
+    if (!killPtyTree(s.ptyProcess.pid)) {
+      try { s.ptyProcess.kill(); } catch { }
+    }
     s.ptyProcess = null;
   }
   // 显式 kill 后整条记录清掉，监听器一并丢弃（前端 ws.close 也会清）
