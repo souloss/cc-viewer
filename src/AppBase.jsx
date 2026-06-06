@@ -21,6 +21,7 @@ import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT
 import { mergeMainAgentSessions as _mergeMainAgentSessions } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
 import { createEntrySlimmer, createIncrementalSlimmer, restoreSlimmedEntry, internEntryBigFields } from './utils/entry-slim.js';
+import { yieldToMain, runChunkedPass, INGEST_BATCH_SIZE } from './utils/ingestPipeline.js';
 import { reinitializeMermaid } from './hooks/useMermaidRender';
 import styles from './App.module.css';
 
@@ -101,7 +102,7 @@ class AppBase extends React.Component {
       resumeModalVisible: false,
       resumeFileName: '',
       resumeRememberChoice: false,
-      resumeAutoChoice: null, // null | "continue" | "new"
+      resumeAutoChoice: null, // null | "continue" | "new"；出厂默认 'continue' 由 GET /api/preferences 注入（键缺失时），这里的 null 只是 pre-hydrate 占位
       autoApproveSeconds: 0, // 自动审批倒计时秒数，0=关闭
       logDir: '',
       themeColor: /Windows/i.test(navigator.userAgent) ? 'dark' : 'light',
@@ -192,6 +193,15 @@ class AppBase extends React.Component {
     // 增量维护的 KV-Cache 缓存内容（稳定引用，不受 inProgress 闪烁影响）
     this._lastKvCacheContent = null;
     this._sseSlimmer = null; this._sseReconstructor = null;
+    // 冷启动分帧摄取管线（_runColdIngestCore）并发控制：
+    // - _ingestRunning 在途时 live 条目入 _liveGateBuffer（见 handleEventMessage），
+    //   提交后统一泄洪，防止 live 条目与未提交基线交错污染 sessionMerge
+    // - _ingestToken 自增令牌：任何 baseline 重置路径（重连/full_reload/workspace 切换/
+    //   新管线启动）bump 即废弃在途管线，废弃管线不 setState
+    this._ingestRunning = false;
+    this._ingestToken = 0;
+    this._liveGateBuffer = [];
+    this._ingestProgressCount = 0;
   }
 
   /** 批量剪枝 entries：清空旧 MainAgent 的 body.messages，保留最后一条完整。
@@ -291,13 +301,17 @@ class AppBase extends React.Component {
    * 减少 3 次 O(n) 全量扫描。
    */
   _processEntries(entries) {
-    let timestamps = [];
-    let generatedTimestamps = [];   // 跟 timestamps 平行：position → _generatedTs（assistant 才有）
-    let prevMainAgentTs = null;      // 上一次 mainAgent entry 的 ts，给本次新增 assistant msg 赋
-    let prevUserId = null;
-    let sessions = [];
-    const filtered = [];
+    const st = this._initProcessState();
+    for (let i = 0; i < entries.length; i++) {
+      this._processOneEntry(entries[i], i, st);
+    }
+    this._currentSessionId = st.currentSessionId;
+    return { mainAgentSessions: st.sessions, filtered: st.filtered };
+  }
 
+  /** _processEntries 的循环前置：实例状态重置（_rebuildRequestIndex 内联）+ 遍历局部状态对象。
+   *  同步 _processEntries 与分帧 _processEntriesChunked 共用，保证两条路径前置完全一致。 */
+  _initProcessState() {
     // _rebuildRequestIndex 内联
     this._requestIndexMap.clear();
     this._cacheLossProcessedCount = 0;
@@ -306,80 +320,272 @@ class AppBase extends React.Component {
     this._lastKvCacheContent = null;
     this._sseSlimmer = null; this._sseReconstructor = null;
 
-    let currentSessionId = null;
+    return {
+      timestamps: [],
+      generatedTimestamps: [],   // 跟 timestamps 平行：position → _generatedTs（assistant 才有）
+      prevMainAgentTs: null,      // 上一次 mainAgent entry 的 ts，给本次新增 assistant msg 赋
+      prevUserId: null,
+      sessions: [],
+      filtered: [],
+      currentSessionId: null,
+    };
+  }
 
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
+  /** _processEntries 的循环体原样抽取（局部变量改读写 st.*，其余逐行一致）。
+   *  同步与分帧路径共用此方法 —— mergeMainAgentSessions 的调用序列/参数/
+   *  _sessionId 赋值因此与抽取前完全相同（sessionMerge 脆弱区零语义变化）。 */
+  _processOneEntry(entry, i, st) {
+    // requestIndex
+    this._requestIndexMap.set(`${entry.timestamp}|${entry.url}`, i);
 
-      // requestIndex
-      this._requestIndexMap.set(`${entry.timestamp}|${entry.url}`, i);
+    // filterRelevant
+    if (isRelevantRequest(entry)) st.filtered.push(entry);
 
-      // filterRelevant
-      if (isRelevantRequest(entry)) filtered.push(entry);
+    // assignTimestamps + buildSessions（仅 mainAgent）
+    if (isMainAgent(entry) && entry.body && Array.isArray(entry.body.messages)) {
+      const messages = entry.body.messages;
+      const count = entry._messageCount || messages.length;
+      const userId = entry.body.metadata?.user_id || null;
+      const timestamp = entry.timestamp || new Date().toISOString();
 
-      // assignTimestamps + buildSessions（仅 mainAgent）
-      if (isMainAgent(entry) && entry.body && Array.isArray(entry.body.messages)) {
-        const messages = entry.body.messages;
-        const count = entry._messageCount || messages.length;
-        const userId = entry.body.metadata?.user_id || null;
-        const timestamp = entry.timestamp || new Date().toISOString();
-
-        const prevCount = timestamps.length;
-        // /clear 后的首个 checkpoint：必须当成新会话起点，绕过 transient 过滤。
-        // 否则 delta 重建后第一个条目（count=1）会被 isTransient 吞掉，
-        // 导致 /clear 标记+用户输入的 _timestamp 被后面第一个 count>4 的条目"挪走"。
-        const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
-        const isNewSession = postClearCheckpoint || (prevCount > 0 && (
-          (count < prevCount * 0.5 && (prevCount - count) > 4) ||
-          (prevUserId && userId && userId !== prevUserId)
-        ));
-        // Transient 保护：极短 entry（<=4 msgs）在长对话后不应重置 timestamps 累积
-        // 这些通常是中间态请求（request body 只有 user message，尚未拿到 response）。
-        // postClearCheckpoint 是真实的会话起点，必须豁免。
-        const isTransient = isNewSession && !postClearCheckpoint && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
-        if (isNewSession && !isTransient) {
-          currentSessionId = timestamp;
-          timestamps = [];
-          generatedTimestamps = [];
-          prevMainAgentTs = null;       // 新 session 起点：reset，防跨 session 串场
-        } else if (currentSessionId === null) {
-          currentSessionId = timestamp;
-        }
-        // 扩展两个平行数组：新增 position 拿当前 entry 的 ts；并记录 prevMainAgentTs
-        // 作为该位置「首次加入时上一个 mainAgent 的 ts」。
-        // 注意：不在 push 时 gate isAsst —— offline 批量路径下，本次 entry 可能是 _slimmed
-        // （body.messages=[]）只靠 _messageCount 占位，messages[j] 是 undefined 会让 isAsst=false
-        // 永远 push null，导致后续 unslimmed checkpoint 的 inner loop 无法 backfill _generatedTs。
-        // 角色判断挪到 inner loop（msg 对象一定存在那时），用 m.role 在写入时 gate。
-        for (let j = timestamps.length; j < count; j++) {
-          timestamps.push(timestamp);
-          generatedTimestamps.push(prevMainAgentTs || null);
-        }
-        if (messages.length > 0) {
-          for (let j = 0; j < messages.length; j++) {
-            const m = messages[j];
-            if (!m) continue;
-            m._timestamp = timestamps[j];
-            if (m.role === 'assistant' && generatedTimestamps[j]) {
-              m._generatedTs = generatedTimestamps[j];
-            }
+      const prevCount = st.timestamps.length;
+      // /clear 后的首个 checkpoint：必须当成新会话起点，绕过 transient 过滤。
+      // 否则 delta 重建后第一个条目（count=1）会被 isTransient 吞掉，
+      // 导致 /clear 标记+用户输入的 _timestamp 被后面第一个 count>4 的条目"挪走"。
+      const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
+      const isNewSession = postClearCheckpoint || (prevCount > 0 && (
+        (count < prevCount * 0.5 && (prevCount - count) > 4) ||
+        (st.prevUserId && userId && userId !== st.prevUserId)
+      ));
+      // Transient 保护：极短 entry（<=4 msgs）在长对话后不应重置 timestamps 累积
+      // 这些通常是中间态请求（request body 只有 user message，尚未拿到 response）。
+      // postClearCheckpoint 是真实的会话起点，必须豁免。
+      const isTransient = isNewSession && !postClearCheckpoint && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
+      if (isNewSession && !isTransient) {
+        st.currentSessionId = timestamp;
+        st.timestamps = [];
+        st.generatedTimestamps = [];
+        st.prevMainAgentTs = null;       // 新 session 起点：reset，防跨 session 串场
+      } else if (st.currentSessionId === null) {
+        st.currentSessionId = timestamp;
+      }
+      // 扩展两个平行数组：新增 position 拿当前 entry 的 ts；并记录 prevMainAgentTs
+      // 作为该位置「首次加入时上一个 mainAgent 的 ts」。
+      // 注意：不在 push 时 gate isAsst —— offline 批量路径下，本次 entry 可能是 _slimmed
+      // （body.messages=[]）只靠 _messageCount 占位，messages[j] 是 undefined 会让 isAsst=false
+      // 永远 push null，导致后续 unslimmed checkpoint 的 inner loop 无法 backfill _generatedTs。
+      // 角色判断挪到 inner loop（msg 对象一定存在那时），用 m.role 在写入时 gate。
+      for (let j = st.timestamps.length; j < count; j++) {
+        st.timestamps.push(timestamp);
+        st.generatedTimestamps.push(st.prevMainAgentTs || null);
+      }
+      if (messages.length > 0) {
+        for (let j = 0; j < messages.length; j++) {
+          const m = messages[j];
+          if (!m) continue;
+          m._timestamp = st.timestamps[j];
+          if (m.role === 'assistant' && st.generatedTimestamps[j]) {
+            m._generatedTs = st.generatedTimestamps[j];
           }
         }
-        prevUserId = userId;
-        // 记录本次 mainAgent entry 的 ts，下一次循环用作 prevMainAgentTs
-        prevMainAgentTs = timestamp;
-
-        // session 合并（跳过 _slimmed）
-        if (!entry._slimmed) {
-          sessions = this.mergeMainAgentSessions(sessions, entry);
-        }
       }
+      st.prevUserId = userId;
+      // 记录本次 mainAgent entry 的 ts，下一次循环用作 prevMainAgentTs
+      st.prevMainAgentTs = timestamp;
 
-      entry._sessionId = currentSessionId;
+      // session 合并（跳过 _slimmed）
+      if (!entry._slimmed) {
+        st.sessions = this.mergeMainAgentSessions(st.sessions, entry);
+      }
     }
 
-    this._currentSessionId = currentSessionId;
-    return { mainAgentSessions: sessions, filtered };
+    entry._sessionId = st.currentSessionId;
+  }
+
+  /** _processEntries 的分帧版：同一循环插入让步，调用序列与同步版完全一致。 */
+  async _processEntriesChunked(entries, ctl) {
+    const st = this._initProcessState();
+    const r = await runChunkedPass(entries.length, (i) => this._processOneEntry(entries[i], i, st), ctl);
+    if (r.aborted) return { aborted: true };
+    this._currentSessionId = st.currentSessionId;
+    return { aborted: false, mainAgentSessions: st.sessions, filtered: st.filtered };
+  }
+
+  /** _batchSlim 的分帧版：与同步版完全同序 —— intern 全量 pass → slimmer.process 全量 pass
+   *  → finalize 一次。两个 pass 各自分帧（保持"intern 先全部完成"的既有顺序假设）。 */
+  async _batchSlimChunked(entries, ctl) {
+    const r1 = await runChunkedPass(entries.length, (i) => { entries[i] = internEntryBigFields(entries[i]); }, ctl);
+    if (r1.aborted) return { aborted: true };
+    const slimmer = createEntrySlimmer(isMainAgent);
+    const r2 = await runChunkedPass(entries.length, (i) => { slimmer.process(entries[i], entries, i); }, ctl);
+    if (r2.aborted) return { aborted: true };
+    slimmer.finalize(entries);
+    return { aborted: false };
+  }
+
+  /** 分帧管线的并发控制句柄。progress 经 _loadingCountRafId rAF 节流写 fileLoadingCount。
+   *  _loadingCountRafId/_ingestProgressCount 跨管线共享 —— onProgress 与 rAF 回调都按
+   *  token 过滤，防被 supersede 的旧管线最后一批写入陈旧计数（进度数字乱跳）。 */
+  _makeIngestCtl(myToken) {
+    return {
+      shouldAbort: () => this._ingestToken !== myToken || this._unmounted,
+      onProgress: (count) => {
+        if (this._ingestToken !== myToken) return;
+        this._ingestProgressCount = count;
+        if (this._loadingCountRafId) return;
+        this._loadingCountRafId = requestAnimationFrame(() => {
+          this._loadingCountRafId = null;
+          if (this._ingestToken === myToken && !this._unmounted) {
+            this.setState({ fileLoadingCount: this._ingestProgressCount });
+          }
+        });
+      },
+      yieldFn: yieldToMain,
+      batchSize: INGEST_BATCH_SIZE,
+    };
+  }
+
+  /** 冷启动共享分帧管线：reconstruct（整体一次）→ 分帧 slim → 分帧 process。
+   *  reconstructEntries 有状态（running accumulated + _compensateBrokenEntries 全数组
+   *  前向补偿），不可切片 —— 作为独立任务隔离，算法不动。
+   *  Delta 重建必须在 entry-slim 之前：delta 条目的 body.messages 只有增量部分，
+   *  先 slim 会永久丢失增量数据，导致重建后 messages 为空。 */
+  async _runColdIngestCore(rawEntries, ctl) {
+    const entries = Array.isArray(rawEntries) ? reconstructEntries(rawEntries) : rawEntries;
+    if (ctl.shouldAbort()) return { aborted: true };
+    if (!(Array.isArray(entries) && entries.length > 0)) {
+      return { aborted: false, empty: true, entries: Array.isArray(entries) ? entries : [], mainAgentSessions: [], filtered: [] };
+    }
+    await ctl.yieldFn();   // reconstruct 是长任务，先让出一帧再进分帧 passes
+    if (ctl.shouldAbort()) return { aborted: true };
+    const s = await this._batchSlimChunked(entries, ctl);
+    if (s.aborted) return { aborted: true };
+    const p = await this._processEntriesChunked(entries, ctl);
+    if (p.aborted) return { aborted: true };
+    return { aborted: false, empty: false, entries, mainAgentSessions: p.mainAgentSessions, filtered: p.filtered };
+  }
+
+  /** 管线提交：单次原子 setState；回调里关闸 + 泄洪 live 缓冲（对已提交基线重建）。 */
+  _commitColdIngest(myToken, newState, after) {
+    if (this._ingestToken !== myToken || this._unmounted) return; // 已被 supersede
+    this.setState(newState, () => {
+      if (this._ingestToken !== myToken) return; // setState 提交期间又被 supersede
+      this._ingestRunning = false;
+      const buffered = this._liveGateBuffer;
+      this._liveGateBuffer = [];
+      if (buffered.length > 0) {
+        this._pendingEntries.push(...buffered);
+        if (!this._flushRafId) {
+          this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
+        }
+      }
+      if (after) after();
+    });
+  }
+
+  /** 废弃在途分帧管线（baseline 重置路径调用：重连/full_reload/workspace 切换）。
+   *  drain=true 时把闸门缓冲送回 _pendingEntries 走正常 flush（dedup 兜底重复）。 */
+  _abortColdIngest({ drain = false } = {}) {
+    this._ingestToken++;
+    this._ingestRunning = false;
+    const buffered = this._liveGateBuffer;
+    this._liveGateBuffer = [];
+    if (drain && buffered.length > 0) {
+      this._pendingEntries.push(...buffered);
+      if (!this._flushRafId) {
+        this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
+      }
+    }
+  }
+
+  /** initSSE load_end 的分帧版主流程（移动端 hot/cold 分层提交原样保留）。 */
+  async _runSseColdIngest(rawEntries, { isIncremental, unlockContextBar }) {
+    const myToken = ++this._ingestToken;
+    this._ingestRunning = true;
+    const ctl = this._makeIngestCtl(myToken);
+    const core = await this._runColdIngestCore(rawEntries, ctl);
+    if (core.aborted) return;
+    if (core.empty) {
+      const st = { fileLoading: false, fileLoadingCount: 0 };
+      if (unlockContextBar) st.contextBarLocked = false;
+      this._commitColdIngest(myToken, st);
+      return;
+    }
+    const { entries, mainAgentSessions, filtered } = core;
+
+    // P1: 移动端 hot/cold 分层
+    if (isMobile && mainAgentSessions.length > HOT_SESSION_COUNT) {
+      const sessionIndex = buildSessionIndex(entries, mainAgentSessions);
+      const fullIndex = isIncremental
+        ? mergeSessionIndices(this.state.sessionIndex, sessionIndex)
+        : sessionIndex;
+      const unslimmed = entries.map(e => e._slimmed ? restoreSlimmedEntry(e, entries) : e);
+      const { hotEntries, allSessions, coldGroups } = splitHotCold(
+        unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT
+      );
+      this._sseSlimmer = null; this._sseReconstructor = null;
+      // 冷 session entries 异步写入 IndexedDB
+      const pn = this.state.projectName;
+      if (pn) {
+        for (const [sid, coldEntries] of coldGroups) {
+          saveSessionEntries(pn, sid, coldEntries);
+        }
+        // 主缓存保存全量 entries（而非 hotEntries），确保下次缓存恢复时有完整数据
+        saveEntries(pn, entries);
+      }
+      // Fix #4: selectedIndex 基于 hotEntries 而非全量 filtered
+      const hotFiltered = hotEntries.filter(e => isRelevantRequest(e));
+      const newState = {
+        requests: hotEntries,
+        selectedIndex: hotFiltered.length > 0 ? hotFiltered.length - 1 : null,
+        mainAgentSessions: allSessions,
+        sessionIndex: fullIndex,
+        fileLoading: false,
+        fileLoadingCount: 0,
+      };
+      // 增量模式保留缓存恢复时设的 hasMoreHistory；非增量（limit）模式用服务端的值
+      // hasMoreHistory 必须 AND 上 _oldestTs 非空，否则后续 loadMoreHistory() 会拼 before=null 触发 400
+      if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
+      if (unlockContextBar) newState.contextBarLocked = false;
+      this._commitColdIngest(myToken, newState);
+    } else {
+      const newState = {
+        requests: entries,
+        selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
+        mainAgentSessions,
+        fileLoading: false,
+        fileLoadingCount: 0,
+      };
+      if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
+      if (unlockContextBar) newState.contextBarLocked = false;
+      this._commitColdIngest(myToken, newState, () => {
+        if (isMobile && this.state.projectName) {
+          saveEntries(this.state.projectName, entries);
+        }
+      });
+    }
+  }
+
+  /** loadLocalLogFile load_end 的分帧版主流程。 */
+  async _runLocalLogIngest(rawEntries) {
+    const myToken = ++this._ingestToken;
+    this._ingestRunning = true;
+    const ctl = this._makeIngestCtl(myToken);
+    const core = await this._runColdIngestCore(rawEntries, ctl);
+    if (core.aborted) return;
+    if (core.empty) {
+      this._commitColdIngest(myToken, { fileLoading: false, fileLoadingCount: 0, serverCachedContent: null });
+      return;
+    }
+    this._commitColdIngest(myToken, {
+      requests: core.entries,
+      selectedIndex: core.filtered.length > 0 ? core.filtered.length - 1 : null,
+      mainAgentSessions: core.mainAgentSessions,
+      fileLoading: false,
+      fileLoadingCount: 0,
+      serverCachedContent: null,
+      hasMoreHistory: !!this._hasMoreHistory && !!this._oldestTs,
+    });
   }
 
   componentDidMount() {
@@ -680,6 +886,10 @@ class AppBase extends React.Component {
     this._isIncremental = false;
     this._sseSlimmer = null;
     this._sseReconstructor = null;
+    // 分帧管线闸门兜底复位（_pendingEntries 已清空，缓冲不泄洪直接丢弃）
+    this._ingestToken++;
+    this._ingestRunning = false;
+    this._liveGateBuffer = [];
   };
 
   _reconnectSSE() {
@@ -691,6 +901,14 @@ class AppBase extends React.Component {
     }
     this._sseReconnectCount = (this._sseReconnectCount || 0) + 1;
     if (this.eventSource) { this.eventSource.close(); this.eventSource = null; }
+
+    // 必须在部分保存之前废弃在途分帧管线（review P1）：下方部分保存会同步跑
+    // _processEntries → 清空 _requestIndexMap 等实例状态，若在途管线未先废弃，
+    // 其下一批会基于被污染的状态继续写。
+    // 不 drain 是有意的：闸门缓冲条目已由 interceptor 落盘，重连后 server replay
+    // 必然重发；且下方 _teardownTransientLiveState 会清空 _pendingEntries，
+    // drain 进去也会被立即清掉 —— 泄洪在此既无意义也有合并陈旧基线的风险。
+    this._abortColdIngest();
 
     // 必须在 _teardownTransientLiveState() 之前，否则 _chunkedEntries 会被清零。
     if (this._chunkedEntries && this._chunkedEntries.length > 0 && isMobile) {
@@ -892,7 +1110,10 @@ class AppBase extends React.Component {
         try {
           const data = JSON.parse(event.data);
           // 等待偏好加载完成再判断是否跳过弹窗（避免竞态）
-          (this.context._prefsReady || Promise.resolve({})).then((prefs) => {
+          (this.context._prefsReady || Promise.resolve({})).then((initialPrefs) => {
+            // 优先读 live preferences（本会话内改过开关需立即生效，否则关了开关当次仍自动继承）；
+            // provider 尚未 setState 时回落启动快照
+            const prefs = this.context?.preferences || initialPrefs;
             if (prefs?.resumeAutoChoice) {
               // 自动跳过：直接发送选择到服务端，不触碰偏好设置（避免 setState 竞态清除偏好）
               fetch(apiUrl('/api/resume-choice'), {
@@ -964,13 +1185,15 @@ class AppBase extends React.Component {
         // replay 的旧 entry（synthetic、post-stop hook 等）误触发；mainAgent + body.messages
         // 才是"用户实际发了内容"的最强信号。覆盖 TerminalPanel /clear 后用户没走 ChatView
         // 输入框（pty 直接键入 / 外部 hook / Agent 自驱）时血条卡 0% 的场景。
+        // 注：解锁不再单独 setState，并入分帧管线末段的原子提交（避免与主提交分帧）。
+        let unlockContextBar = false;
         if (isIncremental && this.state.contextBarLocked) {
           const hasMainAgentTurn = delta.some(e => {
             if (!e || !e.mainAgent) return false;
             const msgs = e.body?.messages;
             return Array.isArray(msgs) && msgs.length > 0;
           });
-          if (hasMainAgentTurn) this.setState({ contextBarLocked: false });
+          if (hasMainAgentTurn) unlockContextBar = true;
         }
 
         // 增量模式：Map 去重合并（delta 条目覆盖同 key 的缓存条目）
@@ -978,79 +1201,35 @@ class AppBase extends React.Component {
         if (isIncremental && isMobile && this.state.requests.length > 0) {
           if (delta.length === 0) {
             // 无新数据，缓存已是最新，跳过重建（保留缓存恢复时已设置的 hasMoreHistory）
-            this.setState({ fileLoading: false, fileLoadingCount: 0 });
+            const st = { fileLoading: false, fileLoadingCount: 0 };
+            if (unlockContextBar) st.contextBarLocked = false;
+            this.setState(st);
             return;
           }
           const eKey = (e, i) => (e.timestamp && e.url) ? `${e.timestamp}|${e.url}` : `__nokey_c${i}`;
           const map = new Map();
           this.state.requests.forEach((e, i) => map.set(eKey(e, i), e));
           delta.forEach((e, i) => map.set((e.timestamp && e.url) ? `${e.timestamp}|${e.url}` : `__nokey_d${i}`, e));
+          // 注意：合并结果含 state.requests 的 live 引用 —— 分帧 slim/process 期间这些对象被
+          // 原地变异（intern/_slimmed），让步间隙的 render 会看到中间态。旧同步代码同样原地
+          // 变异（只是单任务内完成）；最终原子提交会以干净引用整体覆盖。
           rawEntries = Array.from(map.values());
         } else {
           rawEntries = delta;
         }
 
-        // Delta 重建：server 发送原始 delta 条目，客户端重建为完整 messages
-        const entries = Array.isArray(rawEntries) ? reconstructEntries(rawEntries) : rawEntries;
-
-        if (Array.isArray(entries) && entries.length > 0) {
-          this._batchSlim(entries);
-          const { mainAgentSessions, filtered } = this._processEntries(entries);
-
-          // P1: 移动端 hot/cold 分层
-          if (isMobile && mainAgentSessions.length > HOT_SESSION_COUNT) {
-            const sessionIndex = buildSessionIndex(entries, mainAgentSessions);
-            const fullIndex = isIncremental
-              ? mergeSessionIndices(this.state.sessionIndex, sessionIndex)
-              : sessionIndex;
-            const unslimmed = entries.map(e => e._slimmed ? restoreSlimmedEntry(e, entries) : e);
-            const { hotEntries, allSessions, coldGroups } = splitHotCold(
-              unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT
-            );
-            this._sseSlimmer = null; this._sseReconstructor = null;
-            // 冷 session entries 异步写入 IndexedDB
-            const pn = this.state.projectName;
-            if (pn) {
-              for (const [sid, coldEntries] of coldGroups) {
-                saveSessionEntries(pn, sid, coldEntries);
-              }
-              // 主缓存保存全量 entries（而非 hotEntries），确保下次缓存恢复时有完整数据
-              saveEntries(pn, entries);
-            }
-            // Fix #4: selectedIndex 基于 hotEntries 而非全量 filtered
-            const hotFiltered = hotEntries.filter(e => isRelevantRequest(e));
-            const newState = {
-              requests: hotEntries,
-              selectedIndex: hotFiltered.length > 0 ? hotFiltered.length - 1 : null,
-              mainAgentSessions: allSessions,
-              sessionIndex: fullIndex,
-              fileLoading: false,
-              fileLoadingCount: 0,
-            };
-            // 增量模式保留缓存恢复时设的 hasMoreHistory；非增量（limit）模式用服务端的值
-            // hasMoreHistory 必须 AND 上 _oldestTs 非空，否则后续 loadMoreHistory() 会拼 before=null 触发 400
-            if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
-            this.setState(newState);
-          } else {
-            const newState = {
-              requests: entries,
-              selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
-              mainAgentSessions,
-              fileLoading: false,
-              fileLoadingCount: 0,
-            };
-            if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
-            this.setState(newState);
-            if (isMobile && this.state.projectName) {
-              saveEntries(this.state.projectName, entries);
-            }
-          }
-        } else {
-          this.setState({ fileLoading: false, fileLoadingCount: 0 });
-        }
+        // 分帧管线：reconstruct → 分帧 slim → 分帧 process → 原子提交。
+        // async 不 await（EventSource 回调）；在途期间 live 条目入闸门缓冲（handleEventMessage）。
+        this._runSseColdIngest(rawEntries, { isIncremental, unlockContextBar });
       });
       this.eventSource.addEventListener('full_reload', (event) => {
         this._resetSSETimeout();
+        // 服务端要求整体重载 = baseline 重置：废弃在途分帧管线（防其稍后提交陈旧基线），
+        // 闸门缓冲泄回 _pendingEntries（dedup 兜底与重载数据的重复）。
+        this._abortColdIngest({ drain: true });
+        // animateLoadingCount 回调有数百 ms 窗口：期间若新分帧管线启动（token 再 bump），
+        // 本次 full_reload 的延迟 setState 不得覆盖新管线提交 —— 回调内按 token 失配丢弃。
+        const reloadToken = this._ingestToken;
         try {
           const entries = JSON.parse(event.data);
           if (Array.isArray(entries)) {
@@ -1058,6 +1237,7 @@ class AppBase extends React.Component {
             const { mainAgentSessions, filtered } = entries.length > 0 ? this._processEntries(entries) : { mainAgentSessions: [], filtered: [] };
             if (entries.length > 0) {
               this.animateLoadingCount(entries.length, () => {
+                if (this._ingestToken !== reloadToken) return; // 已被新管线 supersede
                 this.setState({
                   requests: entries,
                   selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
@@ -1098,6 +1278,9 @@ class AppBase extends React.Component {
             cancelAnimationFrame(this._loadingCountTimer);
             this._loadingCountTimer = null;
           }
+          // workspace 切换 = baseline 重置：废弃在途分帧管线，防旧项目的巨型基线
+          // 在切换后才提交、覆盖新项目数据（闸门缓冲属旧项目，直接丢弃不泄洪）
+          this._abortColdIngest();
           this._rebuildRequestIndex([]);
           // SSE workspace switch — rebind alias subscription to the new
           // project before writing the title so the title reflects the new
@@ -1287,24 +1470,9 @@ class AppBase extends React.Component {
 
     es.addEventListener('load_end', () => {
       es.close();
-      // Delta 重建必须在 entry-slim 之前：delta 条目的 body.messages 只有增量部分，
-      // 如果先 slim 会永久丢失增量数据，导致重建后 messages 为空
-      const reconstructed = reconstructEntries(entries);
-      this._batchSlim(reconstructed);
-      if (Array.isArray(reconstructed) && reconstructed.length > 0) {
-        const { mainAgentSessions, filtered } = this._processEntries(reconstructed);
-        this.setState({
-          requests: reconstructed,
-          selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
-          mainAgentSessions,
-          fileLoading: false,
-          fileLoadingCount: 0,
-          serverCachedContent: null,
-          hasMoreHistory: !!this._hasMoreHistory && !!this._oldestTs,
-        });
-      } else {
-        this.setState({ fileLoading: false, fileLoadingCount: 0, serverCachedContent: null });
-      }
+      // 分帧管线（reconstruct → 分帧 slim → 分帧 process → 原子提交）：
+      // 历史日志同样可能含巨型 checkpoint，同步管线会卡死主线程。
+      this._runLocalLogIngest(entries);
     });
 
     es.onerror = () => {
@@ -1317,6 +1485,13 @@ class AppBase extends React.Component {
   handleEventMessage(event) {
     try {
       const entry = JSON.parse(event.data);
+      // 冷启动分帧管线在途：live 条目入闸门缓冲，提交后统一泄洪（_commitColdIngest）。
+      // 否则 live flush 会基于旧 prev.requests 合并、随后被管线的基线提交整体覆盖，
+      // 且 _sseSlimmer/_sseReconstructor 会对错误基线初始化（sessionMerge 脆弱区）。
+      if (this._ingestRunning) {
+        this._liveGateBuffer.push(entry);
+        return;
+      }
       this._pendingEntries.push(entry);
       if (!this._flushRafId) {
         this._flushRafId = requestAnimationFrame(this._flushPendingEntries);

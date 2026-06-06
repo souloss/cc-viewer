@@ -45,6 +45,13 @@ describe('perm-bridge.js', () => {
     assert.equal(code, 1);
   });
 
+  it('exits 1 with stderr when CCVIEWER_PROTOCOL is invalid (perm-bridge.js:22-24)', async () => {
+    // 非 http/https 的 protocol 在模块顶层即被拒，早于 stdin 读取。
+    const { code, stderr } = await runBridge('{}', { CCVIEWER_PORT: '9999', CCVIEWER_PROTOCOL: 'ftp' });
+    assert.equal(code, 1);
+    assert.match(stderr, /invalid CCVIEWER_PROTOCOL/);
+  });
+
   it('auto-allows when CCV_BYPASS_PERMISSIONS is set', async () => {
     const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } });
     const { code, stdout } = await runBridge(input, { CCVIEWER_PORT: '9999', CCV_BYPASS_PERMISSIONS: '1' });
@@ -236,6 +243,52 @@ describe('perm-bridge.js', () => {
       const output = JSON.parse(stdout.trim());
       assert.equal(output.hookSpecificOutput.permissionDecision, 'deny');
       assert.ok(output.hookSpecificOutput.permissionDecisionReason);
+    });
+
+    // 用一次性 helper 起一个返回指定 (status, body) 的服务器，覆盖 postToViewer 的响应分支。
+    // 注：req.setTimeout 的超时臂(TIMEOUT_MS=5min)无法在合理测试时长内触发，故不覆盖。
+    function startReplyServer({ status, body }) {
+      return new Promise((resolve) => {
+        server.close();
+        server = createServer((req, res) => {
+          let b = '';
+          req.on('data', (c) => { b += c; });
+          req.on('end', () => {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(body);
+          });
+        });
+        server.listen(0, '127.0.0.1', () => { serverPort = server.address().port; resolve(); });
+      });
+    }
+
+    it('200 with non-JSON body → Invalid response JSON → terminal-UI fallback (perm-bridge.js:128-130)', async () => {
+      await startReplyServer({ status: 200, body: 'this is not json' });
+      const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo hi' } });
+      const { code, stdout, stderr } = await runBridge(input, { CCVIEWER_PORT: String(serverPort) });
+      assert.equal(code, 0);
+      assert.match(stderr, /Invalid response JSON/);
+      // catch 兜底：continue:true 让 Claude Code 回退到终端 UI（非 auto-allow）
+      assert.equal(JSON.parse(stdout.trim()).continue, true);
+    });
+
+    it('409 superseded → treated as no-decision → coerced to deny (perm-bridge.js:131-134)', async () => {
+      await startReplyServer({ status: 409, body: '{}' });
+      const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo hi' } });
+      const { code, stdout } = await runBridge(input, { CCVIEWER_PORT: String(serverPort) });
+      assert.equal(code, 0);
+      // resolve({ decision: '_superseded' }) → 非 'allow' → 主流程 coerce 为 deny
+      const out = JSON.parse(stdout.trim());
+      assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+    });
+
+    it('non-200/409 status (500) → HTTP error → terminal-UI fallback (perm-bridge.js:135-136)', async () => {
+      await startReplyServer({ status: 500, body: 'boom' });
+      const input = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo hi' } });
+      const { code, stdout, stderr } = await runBridge(input, { CCVIEWER_PORT: String(serverPort) });
+      assert.equal(code, 0);
+      assert.match(stderr, /HTTP 500/);
+      assert.equal(JSON.parse(stdout.trim()).continue, true);
     });
   });
 });

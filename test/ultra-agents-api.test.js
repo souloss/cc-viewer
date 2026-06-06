@@ -253,4 +253,22 @@ describe('GET /api/ultra-agents route', () => {
     assert.ok(data.agents.some(a => a.id === 'code-expert'));
     assert.ok(data.agents.some(a => a.id === 'research-expert'));
   });
+
+  it('responds 500 internal_error when writing the success response throws (ultra-agents.js:11-15)', async () => {
+    // 让首个 writeHead 抛错（模拟序列化/写出阶段异常），进入 catch → 500 internal_error。
+    // catch 内再次 writeHead/end 用第二次调用，故第一次抛、之后正常。
+    let calls = 0;
+    const res = {
+      statusCode: null, body: '',
+      writeHead(code) {
+        calls++;
+        if (calls === 1) throw new Error('write boom'); // try 内首个 writeHead 抛错
+        this.statusCode = code;
+      },
+      end(chunk) { this.body = chunk || ''; },
+    };
+    await handler({}, res);
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(JSON.parse(res.body), { error: 'internal_error' });
+  });
 });

@@ -5,7 +5,12 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-// 创建临时目录模拟 LOG_DIR
+// ████ 文件内显式隔离(第六层闸) — env 必须早于 server.js 动态 import(见 before)████
+// 此前 tmpDir 已建却从未被指向 env,server.js 的 LOG_DIR / 依赖链(updater CACHE_DIR、
+// ensure-hooks、settings 经 getClaudeConfigDir())会解析到真实 ~/.claude(2026-06-06 事故同源)。
+// 这里把 CCV_LOG_DIR / CLAUDE_CONFIG_DIR 指向 tmpDir,并设私有端口窗 19760-19769。
+// 禁止把这些 env 移到 server.js import 之后或依赖默认值。
+// 创建临时目录(同时充当隔离根 LOG_DIR / CLAUDE_CONFIG_DIR)
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-server-test-'));
 const fakeLogDir = join(tmpDir, 'logs');
 const fakeProjectDir = join(fakeLogDir, 'test-project');
@@ -20,7 +25,11 @@ writeFileSync(fakeLogFile, JSON.stringify({
   status: 200,
 }) + '\n---\n');
 
-// 设置环境变量，阻止自动启动和副作用
+// 设置环境变量：隔离数据根 + 私有端口窗 + 阻止自动启动和副作用
+process.env.CCV_LOG_DIR = tmpDir;
+process.env.CLAUDE_CONFIG_DIR = tmpDir;
+process.env.CCV_START_PORT = '19760';
+process.env.CCV_MAX_PORT = '19769';
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
 
@@ -96,13 +105,23 @@ describe('server API endpoints', { concurrency: false }, () => {
     assert.equal(typeof data, 'object');
   });
 
-  it('GET /api/preferences exposes claudeConfigDir as "~/.claude" by default', async () => {
-    const res = await httpRequest(port, '/api/preferences');
-    const data = res.json();
-    // 服务器启动时未设 CLAUDE_CONFIG_DIR → 默认 ~/.claude
-    // （路径比较用 path.join 以防 Windows 分隔符不匹配）
-    assert.equal(data.claudeConfigDir, '~/.claude',
-      `expected "~/.claude" for default config dir, got ${JSON.stringify(data.claudeConfigDir)}`);
+  it('GET /api/preferences maps the real ~/.claude config dir to "~/.claude"', async () => {
+    // 文件级隔离把 CLAUDE_CONFIG_DIR 锁向 tmpDir(数据安全),故不能再依赖"未设 env"来观察默认值。
+    // 这里只验证 preferences 路由的【映射逻辑】:当 getClaudeConfigDir() 解析到真实 homedir()/.claude
+    // 时,回包应折叠成 "~/.claude"。仅临时改 env 跑一次只读 GET(绝不写真实目录),随后立即还原。
+    const { homedir } = await import('node:os');
+    const prev = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+    try {
+      const res = await httpRequest(port, '/api/preferences');
+      const data = res.json();
+      // 路径比较用 path.join 以防 Windows 分隔符不匹配
+      assert.equal(data.claudeConfigDir, '~/.claude',
+        `expected "~/.claude" for the real home config dir, got ${JSON.stringify(data.claudeConfigDir)}`);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prev;
+    }
   });
 
   it('GET /api/preferences exposes claudeConfigDir as absolute path when CLAUDE_CONFIG_DIR is set', async () => {

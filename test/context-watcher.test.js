@@ -1,10 +1,21 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readModelContextSize, getContextSizeForModel, buildContextWindowEvent, readClaudeProjectModel, CONTEXT_WINDOW_FILE } from '../server/lib/context-watcher.js';
-import { getClaudeConfigDir } from '../findcc.js';
+
+// ████ 数据安全死命令(2026-06-06 事故:测试五次删用户真实 ~/.claude 数据)████
+// ESM 静态 import 会被 hoist,先于本文件任何语句执行!所以「先赋 env 再静态 import」是无效的。
+// context-watcher 的 CONTEXT_WINDOW_FILE 派生自 getClaudeConfigDir()→CLAUDE_CONFIG_DIR,在模块
+// init 时即固化 —— 因此【必须】先锁死 CLAUDE_CONFIG_DIR / CCV_LOG_DIR 到进程私有临时目录,
+// 再用顶层【动态】import 读项目模块。顺序绝不能反:env→动态 import。
+// 严禁把下面的 ../server/lib/context-watcher.js / ../findcc.js 改回顶层静态 import。
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-ctxw-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+
+const { readModelContextSize, getContextSizeForModel, buildContextWindowEvent, readClaudeProjectModel, CONTEXT_WINDOW_FILE } = await import('../server/lib/context-watcher.js');
+const { getClaudeConfigDir } = await import('../findcc.js');
 
 const CLAUDE_DIR = getClaudeConfigDir();
 

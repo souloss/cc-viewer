@@ -11,7 +11,21 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
+// ████ 文件内显式隔离(第六层闸) — env 必须早于 server.js 动态 import(见 before)████
+// server.js 加载时即固化 LOG_DIR / START_PORT / MAX_PORT,且其依赖链(updater 的 CACHE_DIR、
+// ensure-hooks、settings)派生自 getClaudeConfigDir()。在 server.js import 之前锁 CCV_LOG_DIR /
+// CLAUDE_CONFIG_DIR 到进程私有临时目录,绝不触碰真实 ~/.claude(2026-06-06 事故防再犯)。
+// 私有端口窗 19740-19749 避免与默认窗 7008-7049 / 其它 server-* 测试跨进程抢端口。
+// 禁止把这些 env 移到 before 之后或改回依赖默认值。
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-askhook-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+process.env.CCV_START_PORT = '19740';
+process.env.CCV_MAX_PORT = '19749';
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
 

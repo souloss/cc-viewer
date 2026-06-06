@@ -4,6 +4,15 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
+import { mkdtempSync as _mkdtempForTmp } from 'node:fs';
+import { tmpdir as _osTmpdir } from 'node:os';
+// 端口/缓存隔离：jsonl-archive 的 extract cache root = join(os.tmpdir(), 'ccv-extract')，
+// 是一个【全进程共享的全局目录】。jsonl-archive-gap.test.js 会 rmSync 整个 root、甚至把 root
+// 占成普通文件——两文件并行跑（node:test 每文件独立进程，但共用同一 os.tmpdir）时会互相清掉
+// 对方的 cache，导致本文件「缓存命中：mtime 不变」偶发失败。os.tmpdir() 在 POSIX 下逐次读
+// TMPDIR，故给本进程一个私有 TMPDIR，使 getExtractCacheRoot() 落到独立 root，与 gap 测试隔离。
+// 必须在首次调用 getExtractCacheRoot/resolveJsonlPath 之前设置（静态 import 仅定义函数、不读 tmpdir）。
+process.env.TMPDIR = _mkdtempForTmp(`${_osTmpdir()}/ccv-jarch-tmp-`);
 import { archiveJsonl, resolveJsonlPath, getExtractCacheRoot } from '../server/lib/jsonl-archive.js';
 import { archiveLogFiles } from '../server/lib/log-management.js';
 

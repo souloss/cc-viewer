@@ -1,127 +1,30 @@
-import { describe, it } from 'node:test';
+/**
+ * Synthetic 分类归真版：动态 import 真实 requestType.js / contentFilter.js，不再内联拷贝。
+ *
+ * src/utils 是 Vite 前端模块（无扩展名 import + svg 依赖链），纯 Node 不能直接静态 import，
+ * 故先 register vite-loader shim 再【动态 import】真实模块，驱动真实
+ * classifyRequest / isSystemText 行为。
+ *
+ * 真实模块 = 事实源。与旧内联简化副本的唯一行为差异：
+ *   - 旧内联 classifyRequest 对「非 MainAgent 且未命中合成」返回 { type:'Other' }；
+ *     真实 requestType.js 走完整 SubAgent 子类型判定，对 file-search-specialist 返回
+ *     { type:'SubAgent', subType:'Search' }。原断言意图是「SubAgent 不被升级为 Synthetic」，
+ *     归真后改断言真实 type 'SubAgent'（仍守护该意图，且更强）。
+ *   - 旧内联 isMainAgent 不覆盖新架构检测；真实模块覆盖。本套件 MainAgent fixture 均带
+ *     mainAgent:true 走早期 return，结论与真实模块一致。
+ */
+import './_shims/register.mjs';
+import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-// src/utils 是 Vite 前端模块（无扩展名 import）。Node 直接跑需要内联同款逻辑。
-// 与 test/teammate-classification.test.js 同样的做法：把 requestType.js 的关键分支
-// 抄一份出来跑断言，改源码时两处要保持同步。
-//
-// KEEP IN SYNC: 本文件内联的 SUBAGENT_SYSTEM_RE / TEAMMATE_SYSTEM_RE / isMainAgent /
-// SYNTHETIC_PROMPTS / getSyntheticSubType / classifyRequest / formatRequestTag 必须与
-// src/utils/contentFilter.js 和 src/utils/requestType.js 的对应定义保持一致。
-// 改源码时请同步改本文件的 inline 副本；简化版 isMainAgent 不覆盖新架构检测
-// （v2.1.69+ 延迟工具加载、v2.1.81+ 轻量 init），依赖此路径的断言应使用 mainAgent:true
-// 走早期 return 分支。
-
-// ============================================================================
-// 从 contentFilter.js / requestType.js 复制的核心逻辑
-// ============================================================================
-
-const SUBAGENT_SYSTEM_RE = /command execution specialist|file search specialist|planning specialist|general-purpose agent|security monitor|performing a web search/i;
-const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
-
-function getSystemText(body) {
-  const system = body?.system;
-  if (typeof system === 'string') return system;
-  if (Array.isArray(system)) {
-    return system.map(s => (s && s.text) || '').join('');
-  }
-  return '';
-}
-
-function isTeammate(req) {
-  if (!req) return false;
-  if (req.teammate) return true;
-  const sysText = getSystemText(req.body || {});
-  return TEAMMATE_SYSTEM_RE.test(sysText);
-}
-
-function isMainAgent(req) {
-  if (!req) return false;
-  if (isTeammate(req)) return false;
-  if (req.mainAgent) {
-    const sysText = getSystemText(req.body || {});
-    if (SUBAGENT_SYSTEM_RE.test(sysText)) return false;
-    return true;
-  }
-  const body = req.body || {};
-  if (!body.system || !Array.isArray(body.tools)) return false;
-  const sysText = getSystemText(body);
-  if (!sysText.includes('You are Claude Code')) return false;
-  if (SUBAGENT_SYSTEM_RE.test(sysText)) return false;
-  return true;
-}
-
-function getMessageText(msg) {
-  const c = msg?.content;
-  if (typeof c === 'string') return c;
-  if (Array.isArray(c)) {
-    for (const block of c) {
-      if (block?.type === 'text' && block.text) return block.text;
-    }
-  }
-  return '';
-}
-
-const SYNTHETIC_PROMPTS = [
-  { subType: 'Recap',   pattern: /^The user stepped away and is coming back\. Recap in under/i },
-  { subType: 'Title',   pattern: /^(Based on the above conversation, generate a|Please write a)\s+(short|concise)\s+title/i },
-  { subType: 'Compact', pattern: /^(Your task is to create a detailed summary of the conversation|This session is being continued from a previous conversation)/i },
-  { subType: 'Topic',   pattern: /^Analyze if this message indicates a new/i },
-  { subType: 'Summary', pattern: /^Summarize this coding session/i },
-];
-
-function getSyntheticSubType(req) {
-  if (!isMainAgent(req)) return null;
-  const msgs = req.body?.messages || [];
-  if (!msgs.length) return null;
-  const last = msgs[msgs.length - 1];
-  if (!last || last.role !== 'user') return null;
-  const text = getMessageText(last).trim();
-  if (!text) return null;
-  for (const { subType, pattern } of SYNTHETIC_PROMPTS) {
-    if (pattern.test(text)) return subType;
-  }
-  return null;
-}
-
-function classifyRequest(req) {
-  if (isTeammate(req)) return { type: 'Teammate', subType: req.teammate || null };
-  const syntheticSub = getSyntheticSubType(req);
-  if (syntheticSub) return { type: 'Synthetic', subType: syntheticSub };
-  if (isMainAgent(req)) return { type: 'MainAgent', subType: null };
-  return { type: 'Other', subType: null };
-}
-
-// KEEP IN SYNC: 与 src/utils/contentFilter.js 的 isSyntheticPromptText / isSystemText 同步。
-function isSyntheticPromptText(text) {
-  if (!text || typeof text !== 'string') return false;
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  for (const { pattern } of SYNTHETIC_PROMPTS) {
-    if (pattern.test(trimmed)) return true;
-  }
-  return false;
-}
-
-function isSystemText(text) {
-  if (!text) return true;
-  const trimmed = text.trim();
-  if (!trimmed) return true;
-  if (/Implement the following plan:/i.test(trimmed)) return false;
-  if (/^<[a-zA-Z_][\w-]*[\s>]/i.test(trimmed)) return true;
-  if (/^\[SUGGESTION MODE:/i.test(trimmed)) return true;
-  if (/^Your response was cut off because it exceeded the output token limit/i.test(trimmed)) return true;
-  if (/^Base directory for this skill:/i.test(trimmed)) return true;
-  if (isSyntheticPromptText(trimmed)) return true;
-  if (/^\[Request interrupted/i.test(trimmed)) return true;
-  return false;
-}
-
-function formatRequestTag(type, subType) {
-  if (type === 'Teammate' && subType) return `Teammate:${subType}`;
-  if (type === 'Synthetic' && subType) return `Synthetic:${subType}`;
-  return type;
-}
+let classifyRequest, formatRequestTag, isSystemText;
+before(async () => {
+  const rt = await import('../src/utils/requestType.js');
+  const cf = await import('../src/utils/contentFilter.js');
+  classifyRequest = rt.classifyRequest;
+  formatRequestTag = rt.formatRequestTag;
+  isSystemText = cf.isSystemText;
+});
 
 // ============================================================================
 // Fixtures
@@ -211,6 +114,7 @@ describe('Synthetic classification', () => {
     it('non-mainAgent (SubAgent) request is never upgraded to Synthetic', () => {
       // SubAgent 的 system prompt 不包含 "You are Claude Code"——即便 user message
       // 命中白名单也不应分到 Synthetic（它是 SubAgent 的真实输入，不是主会话合成的）。
+      // 真实 requestType.js 进一步判定子类型为 SubAgent:Search（file search specialist）。
       const req = {
         mainAgent: false,
         body: {
@@ -221,7 +125,9 @@ describe('Synthetic classification', () => {
           ],
         },
       };
-      assert.equal(classifyRequest(req).type, 'Other');
+      const r = classifyRequest(req);
+      assert.notEqual(r.type, 'Synthetic');
+      assert.deepEqual(r, { type: 'SubAgent', subType: 'Search' });
     });
 
     it('Teammate request with matching text is classified as Teammate, not Synthetic', () => {

@@ -1,11 +1,24 @@
+// ████ 文件内显式隔离(第六层闸) — ESM 静态 import 会被提升(hoist) ████
+// WORKSPACES_FILE = join(LOG_DIR, 'workspaces.json'),beforeEach 对其 unlinkSync。
+// LOG_DIR 在 ../findcc.js 模块加载时即固化:若先静态 import findcc 再赋 env,LOG_DIR
+// 会落到真实 ~/.claude/cc-viewer,unlinkSync 误伤用户数据(2026-06-06 事故同源)。
+// 因此必须:仅 node: 内置静态 import → 隔离段锁 env → 顶层 await 动态 import 项目模块。
+// 禁止改回静态 import findcc/workspace-registry。
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, unlinkSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync, readFileSync, existsSync, utimesSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
-import { LOG_DIR } from '../findcc.js';
-import { getWorkspaces, loadWorkspaces, registerWorkspace, removeWorkspace } from '../server/workspace-registry.js';
+
+// ── 隔离段:务必早于任何项目模块 import ──
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-wsreg-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+
+// 隔离段之后才动态 import(此时 LOG_DIR 已固化到 __isoDir)
+const { LOG_DIR } = await import('../findcc.js');
+const { getWorkspaces, loadWorkspaces, registerWorkspace, removeWorkspace } = await import('../server/workspace-registry.js');
 
 const WORKSPACES_FILE = join(LOG_DIR, 'workspaces.json');
 

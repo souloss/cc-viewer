@@ -19,6 +19,10 @@ try {
   console.warn('[SDK] Agent SDK not available:', err.message);
 }
 
+// Test seam — inject a fake query() (仿 im-bridge-core.js 的 __setFetchForTests 惯例).
+// 仅供单测注入 fake async-generator，不改任何业务逻辑。
+export function __setQueryForTests(fn) { _query = fn; }
+
 // Interactive tool names — filtered from entries, handled via canUseTool → WS
 const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 

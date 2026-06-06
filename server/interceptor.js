@@ -16,7 +16,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg } from './lib/interceptor-core.js';
+import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel } from './lib/interceptor-core.js';
 
 
 
@@ -780,15 +780,31 @@ export function setupInterceptor() {
             }
           }
         }
-        // 3. Model 替换
+        // 3. Model 替换 —— 避免对整条 wire body（-c 重启后全量 checkpoint 可达数十 MB）
+        //    二次 JSON.parse + 全量 re-stringify：用 L557 已解析的 body 读旧值，对原始
+        //    字符串做有界定向替换（唯一非歧义匹配才生效）；定位失败回退旧 parse 路径，
+        //    最坏退化为现状。注意不能复用 requestEntry.body 重建 wire —— delta 路径
+        //    （上方 needsCheckpoint=false 分支）已把它的 messages 改成增量切片。
         if (_activeProfile.activeModel && _fetchOpts?.body) {
-          try {
-            const _b = JSON.parse(_fetchOpts.body);
-            if (_b.model) {
-              _b.model = _activeProfile.activeModel;
-              _fetchOpts = { ..._fetchOpts, body: JSON.stringify(_b) };
+          const _oldModel = (body && typeof body === 'object') ? body.model : undefined;
+          if (_oldModel === _activeProfile.activeModel) {
+            // 已是目标 model，跳过（旧路径会原样 re-stringify，对上游等价）
+          } else {
+            const _replaced = (typeof _fetchOpts.body === 'string' && typeof _oldModel === 'string')
+              ? replaceTopLevelModel(_fetchOpts.body, _oldModel, _activeProfile.activeModel)
+              : null;
+            if (_replaced !== null) {
+              _fetchOpts = { ..._fetchOpts, body: _replaced };
+            } else {
+              try {
+                const _b = JSON.parse(_fetchOpts.body);
+                if (_b.model) {
+                  _b.model = _activeProfile.activeModel;
+                  _fetchOpts = { ..._fetchOpts, body: JSON.stringify(_b) };
+                }
+              } catch { }
             }
-          } catch { }
+          }
         }
         // 记录 proxy 信息到日志条目
         requestEntry.proxyProfile = _activeProfile.name;

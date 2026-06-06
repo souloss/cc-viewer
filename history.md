@@ -1,7 +1,19 @@
 # Changelog
 
+## 1.6.300 (2026-06-06)
+
+- fix(security): 测试隔离守卫体系——findcc.js LOG_DIR/configDir 双铁闸(NODE_TEST_CONTEXT 下强制进程私有临时目录)、im-process-manager 测试态拒绝真实 spawn IM worker、updater 测试态拒绝真实 registry 请求与自更新;单元测试从机制上无法再触碰真实 ~/.claude 数据与外网
+- feat: 启动期配置备份——preferences/profile/workspaces 每次启动自动备份到数据目录外的 cc-viewer-config-backups/(滚动保留 10 份)
+- fix: 更新检查 30s 定时器补 .unref() 与 stop 时 clearTimeout,消除事件循环滞留与 stop/start 循环泄漏
+- test: 新增守卫单测与静态扫描器(子进程 env 隔离纪律、spawnImProcess 注入纪律、全局 fetch 还原纪律,违规即挂整套);24 个测试文件完成路径/端口隔离改造(私有端口窗注册表,不再绑真实 7008-7099);npm test 脚本统一注入 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+- test: 分支覆盖定向补强——新增 50+ 个 branch-*.test.js 与配套守卫,全量 6402 测试 0 失败
+
 ## 1.6.299 (2026-06-06)
 
+- test: 整体行覆盖率 72%→96%——新增/补强约 100 个测试文件（server 路由、interceptor、sdk-manager、cli、server WS/PTY、src/utils 全量）；新增 test/_shims ESM loader 让 node:test 直接导入 Vite 风格前端模块；helpers/synthetic-classification 旧内联拷贝测试归真为导入真实模块；sdk-manager 新增 __setQueryForTests 测试注入钩子
+- test: 根治并行测试 flake——跨进程端口窗隔离、共享 tmp cache root 私有化、固定 sleep 改条件轮询；修复 ensure-hooks 旧测试 query-busting import 导致的覆盖率记账丢失
+- test: 测试脚本加固——test:coverage:html 补 --test-force-exit（修复跑完不退出），三个 test 脚本统一加 --test-timeout=120000 防单用例挂死整轮
+- chore: 删除死代码——cli.js runCliModeWorkspaceSelector（无调用点，electron/tab-worker.js 已内联同功能）；contentFilter.js classifyUserContent 的 skillBlocks 分离分支（被 isSystemText 同正则先行过滤，不可达，保留返回键）
 - fix(win): 桌面端首屏 SSE 加载从 1000 条降至 400 条 + idle 超时从 2s 延至 5s，消除 Windows 冷启动时 V8 编译与 SSE 数据处理竞争导致的 Chrome tab 崩溃
 
 ## 1.6.298 (2026-06-05)

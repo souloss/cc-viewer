@@ -26,6 +26,18 @@ export function getClaudeConfigDir() {
     const raw = envDir.trim();
     return raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : resolve(raw);
   }
+  // ████████ 测试隔离铁闸 L1b —— 绝对不可移除(2026-06-06 数据事故防再犯)████████
+  // CCV_LOG_DIR=tmp 只重定向 LOG_DIR,管不到本函数:updater.js 的 CACHE_DIR=
+  // join(getClaudeConfigDir(),'cc-viewer') 在测试里直指真实 ~/.claude/cc-viewer,
+  // branch-lib-updater.test.js 的 rmSync(CACHE_DIR,{recursive}) 曾因此把用户 40GB
+  // 历史日志整树删除(2026-06-06 第 1/4 次事故确证真凶)。settings.json、ensure-hooks、
+  // ~/.claude/* 展开全部派生于此 —— 测试态(node:test 注入 NODE_TEST_CONTEXT)未显式
+  // 设 CLAUDE_CONFIG_DIR 时,一律走进程私有临时目录,绝不解析到真实 ~/.claude。
+  // 单测:test/logdir-test-guard.test.js。
+  if (process.env.NODE_TEST_CONTEXT) {
+    return join(tmpdir(), 'cc-viewer-test', `guard-cfg-${process.pid}-${threadId}`);
+  }
+  // ████████████████████████████████████████████████████████████████████████████
   return join(homedir(), '.claude');
 }
 
@@ -39,6 +51,13 @@ function resolveLogDir() {
     }
     const expanded = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
     return resolve(expanded);
+  }
+  // 测试隔离铁闸:node:test 环境(NODE_TEST_CONTEXT 由测试 runner 自动注入,spread env
+  // 的子进程会继承)下若未显式设 CCV_LOG_DIR,绝不解析到真实用户目录——强制进程私有临时
+  // 目录。2026-06-06 事故:无 env 的测试探针把真实 ~/.claude/cc-viewer 当 LOG_DIR,
+  // 清理逻辑将用户数据整树删除。任何测试运行不允许触碰在用的文件体系和本地存储。
+  if (process.env.NODE_TEST_CONTEXT) {
+    return join(tmpdir(), 'cc-viewer-test', `guard-${process.pid}-${threadId}`);
   }
   return join(getClaudeConfigDir(), 'cc-viewer');
 }

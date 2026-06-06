@@ -140,7 +140,7 @@ export function isAnyCcvBusy({ currentPid, busy, portRange, lsofImpl } = {}) {
 //                       却被当显式传值，从而绕过自动检测，让 brew 用户被错误地走 npm 路径升级。
 //
 // 返回 status:
-//   disabled | skipped | latest | major_available | deferred_busy
+//   disabled | skipped | skipped_test_context | latest | major_available | deferred_busy
 //   | brew_managed | upgrading_in_background | error
 export async function checkAndUpdate(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
@@ -163,6 +163,23 @@ export async function checkAndUpdate(options = {}) {
   if (!shouldCheck()) {
     return { status: 'skipped', currentVersion, remoteVersion: null };
   }
+
+  // ████████ 测试隔离铁闸 L5 —— 绝对不可移除(2026-06-06 数据事故防再犯)████████
+  // 单元测试【绝不允许】发送真实网络请求:起真实 server 的测试,启动链的 30s 定时器
+  // (server.js startViewer)会走到这里,真打 registry.npmjs.org,同大版本空闲时甚至
+  // 触发 detached `npm install` 真实自更新——测试能改写用户的 cc-viewer 安装。
+  // 条件说明:
+  //  - NODE_TEST_CONTEXT:node:test runner 自动注入,覆盖测试进程及 spread env 子进程;
+  //  - NODE_ENV==='test' 兜底:覆盖测试用 spawnSync 起的孙进程(NODE_TEST_CONTEXT 跨代
+  //    传递不保证,如 branch-server.test.js 的 runScenario);
+  //  - 注入 fetchImpl 的 updater 单测(假网络)不受影响,走正常逻辑;
+  //  - 闸位必须在 disabled/skipped 早退【之后】、真实 fetch【之前】:放函数入口会劫持
+  //    存量无-fetchImpl 用例对 disabled/skipped 的断言。
+  // 守卫单测:test/updater-test-guard.test.js。
+  if ((process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test') && !options.fetchImpl) {
+    return { status: 'skipped_test_context', currentVersion, remoteVersion: null };
+  }
+  // ████████████████████████████████████████████████████████████████████████████
 
   try {
     const res = await fetchImpl('https://registry.npmjs.org/cc-viewer');

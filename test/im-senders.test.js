@@ -1,10 +1,21 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_DIR } from '../findcc.js';
-import { imDir } from '../server/lib/im-lock.js';
-import { readSenders, upsertSender, MAX_SENDERS } from '../server/lib/im-senders.js';
+import { tmpdir } from 'node:os';
+
+// ████ 数据安全 — 禁止改回静态 import(2026-06-06 事故) ████
+// LOG_DIR/CACHE_DIR 等在 findcc.js / server/lib 模块【加载时】即从 env 派生。
+// ESM 静态 import 会被提升到本文件任何语句之前执行,所以「先设 env 再静态 import」无效。
+// 必须:① node 内置模块静态 import;② 隔离段设 env;③ 项目模块用顶层 await 动态 import。
+// 改回静态 import findcc/server 会让本文件单跑(无外部 CCV_LOG_DIR)时落到真实 ~/.claude。
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-imsenders-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+
+const { LOG_DIR } = await import('../findcc.js');
+const { imDir } = await import('../server/lib/im-lock.js');
+const { readSenders, upsertSender, MAX_SENDERS } = await import('../server/lib/im-senders.js');
 
 let n = 0;
 function freshId() { return `test_senders_${process.pid}_${n++}`; }
@@ -80,6 +91,24 @@ describe('im-senders', () => {
     // earliest ids should have been evicted
     assert.equal('u0' in map, false);
     assert.equal(`u${MAX_SENDERS + 9}` in map, true);
+    wipe(id);
+  });
+
+  it('write failure → cleans up temp and returns false (im-senders.js:37-39 + 68-69)', () => {
+    // 把目标 im-senders.json 路径占成一个非空目录 → renameSyncWithRetry(tmp, target) 抛错。
+    // writeSenders catch 删除 temp 并 rethrow；upsertSender catch 吞掉返回 false（持久化失败不致命）。
+    const id = freshId(); wipe(id);
+    const dir = imDir(id);
+    mkdirSync(dir, { recursive: true });
+    const targetAsDir = join(dir, 'im-senders.json');
+    mkdirSync(targetAsDir, { recursive: true });
+    // 让该目录非空，确保 rename 覆盖必失败（ENOTEMPTY），而非被当成空目录替换。
+    writeFileSync(join(targetAsDir, 'keep'), 'x');
+
+    assert.equal(upsertSender(id, 'u1', { name: 'Alice' }), false, '写盘失败时 upsert 应返回 false');
+    // 目标仍是原来的目录（未被破坏），且没有遗留 .tmp 文件（catch 已 unlink）。
+    const leftover = (() => { try { return readdirSync(dir); } catch { return []; } })();
+    assert.ok(!leftover.some((f) => f.startsWith('im-senders.json.tmp-')), '失败后不应遗留 temp 文件');
     wipe(id);
   });
 });

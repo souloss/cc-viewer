@@ -34,6 +34,7 @@ const {
   setProjectAlias,
   clearProjectAlias,
   subscribeToAlias,
+  __resetBusForTest,
   _internals,
 } = mod;
 
@@ -165,5 +166,63 @@ describe('subscribeToAlias same-tab pubsub', () => {
     const off = subscribeToAlias(null, () => {});
     assert.equal(typeof off, 'function');
     off();
+  });
+});
+
+describe('subscribeToAlias cross-tab (storage event) + bus reset', () => {
+  // Node 没有 window；用一个最小 EventTarget 作 window stub，让 subscribeToAlias 的
+  // window 分支(line 112-113, 117)生效，并能 dispatch 'storage' 事件触发 crossTabHandler。
+  let savedWindow;
+  before(() => {
+    savedWindow = globalThis.window;
+    globalThis.window = new EventTarget();
+  });
+  // 还原放在文件级 after 不便（before-only 套件）；这里用一个收尾 it 还原，保持隔离。
+
+  it('fires onChange on a cross-tab storage event with the matching key (projectAlias.js:112-113)', () => {
+    let received = null;
+    const off = subscribeToAlias('cc-viewer', (a) => { received = a; });
+    const key = _internals._keyFor('cc-viewer');
+    // 模拟另一个 tab 写入 → window 'storage' 事件。用普通 Event + 附加 key/newValue 字段。
+    const evt = new Event('storage');
+    evt.key = key;
+    evt.newValue = 'FromOtherTab';
+    globalThis.window.dispatchEvent(evt);
+    assert.equal(received, 'FromOtherTab');
+
+    // 不匹配的 key 不应触发
+    received = null;
+    const other = new Event('storage');
+    other.key = 'ccv_unrelated';
+    other.newValue = 'nope';
+    globalThis.window.dispatchEvent(other);
+    assert.equal(received, null);
+
+    // newValue 为 null（key 被删除）→ onChange('')
+    const cleared = new Event('storage');
+    cleared.key = key;
+    cleared.newValue = null;
+    globalThis.window.dispatchEvent(cleared);
+    assert.equal(received, '');
+
+    off();
+  });
+
+  it('__resetBusForTest swaps in a fresh bus so old same-tab listeners stop firing (projectAlias.js:129-131)', () => {
+    let count = 0;
+    const off = subscribeToAlias('cc-viewer', () => { count += 1; });
+    setProjectAlias('cc-viewer', 'a');
+    assert.equal(count, 1);
+    // 重置 bus：旧 listener 挂在旧 bus 上，后续 set 走新 bus，旧 listener 不再触发。
+    __resetBusForTest();
+    setProjectAlias('cc-viewer', 'b');
+    assert.equal(count, 1, 'listener on the old bus must not fire after reset');
+    off();
+  });
+
+  it('restores the original window reference', () => {
+    if (savedWindow === undefined) delete globalThis.window;
+    else globalThis.window = savedWindow;
+    assert.ok(true);
   });
 });

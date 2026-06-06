@@ -1,13 +1,24 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_DIR } from '../findcc.js';
-import { saveConfig } from '../server/lib/im-config.js';
-import { imDir, acquireImLock, updateImLockPort, readImLock, clearImLock } from '../server/lib/im-lock.js';
-import {
+import { tmpdir } from 'node:os';
+
+// ████ 数据安全 — 禁止改回静态 import(2026-06-06 事故) ████
+// LOG_DIR/CACHE_DIR 等在 findcc.js / server/lib 模块【加载时】即从 env 派生。
+// ESM 静态 import 会被提升到本文件任何语句之前执行,所以「先设 env 再静态 import」无效。
+// 必须:① node 内置模块静态 import;② 隔离段设 env;③ 项目模块用顶层 await 动态 import。
+// 改回静态 import findcc/server 会让本文件单跑(无外部 CCV_LOG_DIR)时落到真实 ~/.claude。
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-impm-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+
+const { LOG_DIR } = await import('../findcc.js');
+const { saveConfig } = await import('../server/lib/im-config.js');
+const { imDir, acquireImLock, updateImLockPort, readImLock, clearImLock } = await import('../server/lib/im-lock.js');
+const {
   buildChildEnv, spawnImProcess, stopImProcess, getImProcessStatus, reconcileImProcesses,
-} from '../server/lib/im-process-manager.js';
+} = await import('../server/lib/im-process-manager.js');
 
 let n = 0;
 const freshId = () => `test_pm_${process.pid}_${n++}`;

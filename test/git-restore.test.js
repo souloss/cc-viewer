@@ -35,6 +35,11 @@ execSync('git add seed.txt && git commit -m "init"', { cwd: PROJECT, stdio: 'pip
 process.env.CCV_PROJECT_DIR = PROJECT;
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
+// 私有高位端口窗,避免与用户真实 ccv 服务(7008-7099)抢端口(2026-06-06 审计 port-clash)。
+// server.js 顶层把 CCV_START_PORT/MAX_PORT 冻结为 const,故必须在 import server.js 之前设好。
+// 注:顶部 line 22 静态 import 的是 file-api.js(仅 node 内置依赖,不拉 server.js),server.js 由 before() 动态 import,此处端口窗在其加载前已生效。
+process.env.CCV_START_PORT = '17940';
+process.env.CCV_MAX_PORT = '17949';
 
 function httpJson(port, path, method, body) {
   return new Promise((resolve, reject) => {

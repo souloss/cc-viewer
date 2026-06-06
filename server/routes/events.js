@@ -194,6 +194,15 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   let latestKvCache = null;
   let latestContextWindow = null;
   let pushedContextWindow = false;
+  // 只记忆最后 K 条 mainAgent 候选原始字符串，Pass 1 结束后 newest-first 结构化校验
+  // （isMainAgentEntry），最多 parse K 次。旧逻辑在 onScan 里对每条 mainAgent raw 全量
+  // JSON.parse —— `-c` 大会话日志里多个数十 MB 的 checkpoint 会让每次 SSE 连接阻塞
+  // event loop 数秒（Windows 卡死主因之一）。
+  // ring=3 的容错意义：团队会话末尾常有连续 teammate 伪 mainAgent 条目，单记忆位会被
+  // 挤掉真实 mainAgent；子串预过滤的理论误伤（键/值恰为 "teammate" 的真实条目）也由
+  // 环内更早候选兜底。
+  const MAINAGENT_SCAN_RING = 3;
+  const mainAgentRawRing = [];
 
   await streamRawEntriesAsync(LOG_FILE, async (raw) => {
     // 直接发送原始 JSON 字符串，不做 parse/reconstruct/stringify
@@ -221,21 +230,13 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     since: useIncremental ? sinceParam : undefined,
     limit: useLimit ? effectiveLimit : undefined,
     onScan: (raw) => {
-      // 轻量追踪最新 MainAgent 的 KV-Cache 和 context_window（仅 regex 检测）
-      if (raw.includes('"mainAgent":true') || raw.includes('"mainAgent": true')) {
-        try {
-          const entry = JSON.parse(raw);
-          if (isMainAgentEntry(entry)) {
-            const cached = extractCachedContent(entry);
-            if (cached) latestKvCache = cached;
-            const usage = entry.response?.body?.usage;
-            if (usage) {
-              const contextSize = getContextSizeForModel(entry.body?.model);
-              const cw = buildContextWindowEvent(usage, contextSize);
-              if (cw) latestContextWindow = cw;
-            }
-          }
-        } catch { }
+      // 只做子串检测 + 入环，不 parse（巨型 checkpoint 逐条 parse 会阻塞 event loop）。
+      // teammate 条目恒带 "teammate" 字段，子串预过滤减少环污染；结构化判定留给
+      // Pass 1 结束后的 newest-first 校验（isMainAgentEntry），预过滤误伤由环容错。
+      if ((raw.includes('"mainAgent":true') || raw.includes('"mainAgent": true')) &&
+          !raw.includes('"teammate"')) {
+        mainAgentRawRing.push(raw);
+        if (mainAgentRawRing.length > MAINAGENT_SCAN_RING) mainAgentRawRing.shift();
       }
     },
     onReady: ({ totalCount, hasMore, oldestTs }) => {
@@ -252,6 +253,27 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   });
 
   res.write(`event: load_end\ndata: {}\n\n`);
+
+  // Pass 1 入环的候选 newest-first 校验 + parse（≤K 次）。kv_cache 与 context_window
+  // 各自取"最新一条能提供该值的真实 mainAgent"—— 与旧版逐条覆盖语义等价（环深度内）。
+  for (let ri = mainAgentRawRing.length - 1; ri >= 0 && (!latestKvCache || !latestContextWindow); ri--) {
+    try {
+      const entry = JSON.parse(mainAgentRawRing[ri]);
+      if (!isMainAgentEntry(entry)) continue;
+      if (!latestKvCache) {
+        const cached = extractCachedContent(entry);
+        if (cached) latestKvCache = cached;
+      }
+      if (!latestContextWindow) {
+        const usage = entry.response?.body?.usage;
+        if (usage) {
+          const contextSize = getContextSizeForModel(entry.body?.model);
+          const cw = buildContextWindowEvent(usage, contextSize);
+          if (cw) latestContextWindow = cw;
+        }
+      }
+    } catch { }
+  }
 
   // 发送最新 MainAgent 的 KV-Cache 和 context_window
   if (latestKvCache) {

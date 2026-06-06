@@ -60,6 +60,20 @@ export function buildChildEnv(id, base = process.env) {
  * @returns {{ pid:number|undefined, dir:string, outLog:string }}
  */
 export function spawnImProcess(id, opts = {}) {
+  // ████████ 测试隔离铁闸 L4 —— 绝对不可移除(2026-06-06 数据事故防再犯)████████
+  // 单元测试【绝不允许】拉起真实 detached IM worker:
+  //  1) detached worker 脱离测试生命周期常驻(PPID=1),测试结束后仍在运行;
+  //  2) buildChildEnv 按设计剥离 CCV_*,worker 子链最终把真实 ~/.claude/cc-viewer 当 LOG_DIR;
+  //  3) 测试与用户真实 worker 在锁/端口(7050-7099)/配置上互相干扰——
+  //     2026-06-06 该链条曾三次把用户 40GB 历史日志整树删除。
+  // 注入 spawnImpl 的纯单测(假 spawn)不受影响;确需真实 spawn 的集成测试必须显式
+  // CCV_TEST_ALLOW_IM_SPAWN=1 并自行负责完全隔离(私有 CCV_LOG_DIR + 私有端口窗)。
+  if (process.env.NODE_TEST_CONTEXT && !opts.spawnImpl && process.env.CCV_TEST_ALLOW_IM_SPAWN !== '1') {
+    const dir = imDir(id);
+    console.warn(`[im-process-manager] 测试环境拒绝真实 spawn IM worker '${id}'(L4 铁闸;如确需请设 CCV_TEST_ALLOW_IM_SPAWN=1)`);
+    return { pid: undefined, dir, outLog: join(dir, 'process.out.log'), blockedByTestGuard: true };
+  }
+  // ████████████████████████████████████████████████████████████████████████
   const spawnImpl = opts.spawnImpl || nodeSpawn;
   const dir = imDir(id);
   mkdirSync(dir, { recursive: true });

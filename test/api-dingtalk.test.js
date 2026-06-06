@@ -5,12 +5,26 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// ████████ 死命令(2026-06-06 数据事故,绝对不可违反)████████
+// 本文件起【真实 server 整链】,POST /api/dingtalk/config 会打到真实 im-process-manager。
+// 历史教训:enabled:true 的整链 POST 曾触发 spawnImProcess 拉起 detached 真实 IM worker
+// (脱离测试生命周期常驻、子链剥离 CCV_* 后以真实 ~/.claude/cc-viewer 为 LOG_DIR),
+// 与用户真实环境互相破坏,三次把用户 40GB 历史日志整树删除。
+// 现状:im-process-manager.spawnImProcess 有 L4 铁闸(NODE_TEST_CONTEXT 下拒绝真实 spawn)。
+// 本文件内任何用例【绝不允许】:设 CCV_TEST_ALLOW_IM_SPAWN、绕过铁闸、或以任何方式
+// 拉起/杀灭真实 worker;需要验证 restart 行为一律走「直接 handler + 注入 stub deps」模式
+// (见下方 allowlist describe 块)。新增用例先读 server/lib/im-process-manager.js 顶部铁闸注释。
+// █████████████████████████████████████████████████████████
 // Isolate LOG_DIR (dingtalk config shares preferences.json) before any findcc-loading import.
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-dingtalk-api-test-'));
 process.env.CCV_LOG_DIR = tmpDir;
 process.env.CLAUDE_CONFIG_DIR = tmpDir;
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
+// 私有高位端口窗,避免与用户真实 ccv 服务(7008-7099)抢端口(2026-06-06 审计 port-clash)。
+// server.js 顶层把 CCV_START_PORT/MAX_PORT 冻结为 const,故必须在 import server.js 之前设好(本文件 before() 内动态 import,此处即生效)。
+process.env.CCV_START_PORT = '19780';
+process.env.CCV_MAX_PORT = '19789';
 
 // Stub the bridge's outbound fetch so /test never touches the network.
 const bridge = await import('../server/lib/dingtalk-bridge.js');
@@ -170,5 +184,65 @@ describe('POST /api/dingtalk/config allowlist optional', () => {
     assert.equal(r.status, 200);
     assert.equal(r.json().connection.running, true);
     assert.deepEqual(calls, ['restart']);
+  });
+
+  it('invalid JSON body → 400 Invalid JSON (dingtalk.js:62-65)', async () => {
+    const { dingtalkRoutes } = await import('../server/routes/dingtalk.js');
+    const route = dingtalkRoutes.find((r) => r.path === '/api/dingtalk/config' && r.method === 'POST');
+    let status = 0, payload = '';
+    let resolveEnd; const done = new Promise((r) => { resolveEnd = r; });
+    const res = { writeHead(s) { status = s; }, end(b) { payload = b || ''; resolveEnd(); } };
+    const deps = { MAX_POST_BODY: 1e6, dingtalk: { restartProcess: async () => {}, stopProcess: async () => {} } };
+    route.handler(fakeReq('{not valid json'), res, { pathname: '/api/dingtalk/config' }, /* isLocal */ true, deps);
+    await done;
+    assert.equal(status, 400);
+    assert.match(payload, /Invalid JSON/);
+  });
+
+  it('process apply error is swallowed → still 200 (dingtalk.js:91-92)', async () => {
+    // restartProcess 抛错时 catch 记日志但不影响响应：仍回 200 + connection。
+    const { dingtalkRoutes } = await import('../server/routes/dingtalk.js');
+    const route = dingtalkRoutes.find((r) => r.path === '/api/dingtalk/config' && r.method === 'POST');
+    const deps = { MAX_POST_BODY: 1e6, dingtalk: { restartProcess: async () => { throw new Error('apply-boom'); }, stopProcess: async () => {} } };
+    const r = await call(route, { enabled: true, appKey: 'a', appSecret: 'b', allowStaffIds: ['s1'] }, deps);
+    assert.equal(r.status, 200, 'config save responds 200 even if worker apply throws');
+    assert.equal(r.json().connection.running, true);
+  });
+});
+
+// POST /api/dingtalk/test —— loopback gate + 缺凭据短路（不触网络）
+describe('POST /api/dingtalk/test branches', () => {
+  it('remote caller → 403 Loopback only before reading body (dingtalk.js:100-103)', async () => {
+    const { dingtalkRoutes } = await import('../server/routes/dingtalk.js');
+    const route = dingtalkRoutes.find((r) => r.path === '/api/dingtalk/test' && r.method === 'POST');
+    let status = 0, payload = '';
+    const res = { writeHead(s) { status = s; }, end(b) { payload = b || ''; } };
+    let tested = false;
+    const deps = { MAX_POST_BODY: 1e6, dingtalk: { testConnection: async () => { tested = true; return { ok: true }; } } };
+    route.handler({ on() {} }, res, { pathname: '/api/dingtalk/test' }, /* isLocal */ false, deps);
+    assert.equal(status, 403);
+    assert.match(payload, /Loopback only/);
+    assert.equal(tested, false, 'must not call testConnection for a remote caller');
+  });
+
+  it('missing appKey/appSecret (none stored) → 200 { ok:false } without touching the network (dingtalk.js:114-117)', async () => {
+    const { dingtalkRoutes } = await import('../server/routes/dingtalk.js');
+    const { saveDingTalkConfig } = await import('../server/lib/dingtalk-config.js');
+    // 清掉已存配置，确保 stored.appKey/appSecret 也为空 → 命中缺凭据短路。
+    saveDingTalkConfig({ enabled: false, appKey: '', appSecret: '', allowStaffIds: [] });
+    const route = dingtalkRoutes.find((r) => r.path === '/api/dingtalk/test' && r.method === 'POST');
+    let status = 0, payload = '';
+    let resolveEnd; const done = new Promise((r) => { resolveEnd = r; });
+    const res = { writeHead(s) { status = s; }, end(b) { payload = b || ''; resolveEnd(); } };
+    let tested = false;
+    const fakeReq = (bodyStr) => ({ on(ev, cb) { if (ev === 'data' && bodyStr) cb(Buffer.from(bodyStr)); if (ev === 'end') cb(); return this; } });
+    const deps = { MAX_POST_BODY: 1e6, dingtalk: { testConnection: async () => { tested = true; return { ok: true }; } } };
+    route.handler(fakeReq(JSON.stringify({ appKey: '', appSecret: '' })), res, { pathname: '/api/dingtalk/test' }, /* isLocal */ true, deps);
+    await done;
+    assert.equal(status, 200);
+    const d = JSON.parse(payload);
+    assert.equal(d.ok, false);
+    assert.match(d.detail, /missing appKey\/appSecret/);
+    assert.equal(tested, false, 'must short-circuit before calling testConnection');
   });
 });

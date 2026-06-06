@@ -313,11 +313,10 @@ export function classifyUserContent(content) {
     textBlocks = textBlocks.filter(b => !/<command-message>/i.test(b.text || ''));
   }
 
-  // 分离 skill 块
-  const skillBlocks = textBlocks.filter(b => isSkillText(b.text));
-  if (skillBlocks.length > 0) {
-    textBlocks = textBlocks.filter(b => !isSkillText(b.text));
-  }
+  // skill 文本（isSkillText）必然先被 isSystemText 的同一正则（"Base directory for this skill:"）
+  // 过滤，textBlocks 两条进入路径（初次过滤/二次回收）都要求 !isSystemText，故 skill 块不可能
+  // 出现在 textBlocks 中；保留 skillBlocks 键以维持返回 shape（ChatView/ImConversationModal 消费）。
+  const skillBlocks = [];
 
   return { commands, textBlocks, skillBlocks, teammateBlocks, taskNotificationBlocks };
 }

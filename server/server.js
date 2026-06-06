@@ -77,6 +77,7 @@ import { loadPlugins, runWaterfallHook, runParallelHook } from './lib/plugin-loa
 import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher.js';
 import { watchLogFile, startWatching, unwatchAll, sendEventToClients, sendToClients } from './lib/log-watcher.js';
 import { cleanupExtractCache } from './lib/jsonl-archive.js';
+import { backupConfigs } from './lib/config-backup.js';
 import { createBackpressureGate } from './lib/ws-backpressure.js';
 
 
@@ -803,6 +804,10 @@ export async function startViewer() {
 
   // 清理过期解压缓存（fire-and-forget；任何错误吞掉）
   setImmediate(() => { try { cleanupExtractCache(); } catch { /* ignore */ } });
+
+  // 启动期配置备份:preferences/profile/workspaces → LOG_DIR 外的 cc-viewer-config-backups/
+  // (滚动留 10 份)。2026-06-06 事故:配置随 LOG_DIR 整树丢失后无处可恢复。fire-and-forget。
+  setImmediate(() => { try { backupConfigs(); } catch { /* ignore */ } });
 
   // 启动时清理磁盘上 ASK_HOOK_TIMEOUT_MS 之前的 ask 条目（兜底防泄漏）。
   // 内存 Map 不 hydrate：旧 res 已死、新 ask-bridge 重连同 toolUseId 会自动复用槽位
@@ -1883,6 +1888,10 @@ export function broadcastTurnEnd(sessionId = null, ts = Date.now()) {
 // 流式状态 SSE 推送定时器：检测 streamingState 变化并广播给所有客户端。
 // rising-edge → turn_end flush 由 _observeStreamingTick 统一处理。
 let _streamingStatusTimer = null;
+// 启动后 30s 的更新检查 timer 句柄。必须可清理:
+//  - .unref() 防止它把事件循环 keep-alive 30s(测试进程靠 --test-force-exit 兜底是时序侥幸);
+//  - _doStop 里 clearTimeout 防止 stop/start 循环(Electron tab / 测试)泄漏多个 pending 检查。
+let _updateCheckTimer = null;
 function startStreamingStatusTimer() {
   if (_streamingStatusTimer) return;
   _streamingStatusTimer = setInterval(() => {
@@ -1956,6 +1965,10 @@ async function _doStop() {
   if (_streamingStatusTimer) {
     clearInterval(_streamingStatusTimer);
     _streamingStatusTimer = null;
+  }
+  if (_updateCheckTimer) {
+    clearTimeout(_updateCheckTimer);
+    _updateCheckTimer = null;
   }
   resetStreamingState();
   // 清 interceptor 的 live-port，避免 stop/start 循环（Electron tab 切换 / 测试）间隙内
@@ -2036,7 +2049,9 @@ if (!isWorkspaceMode) {
       // 为什么是 30s 而非 3s：空闲/忙判断的核心是 `clients.length`(SSE 已连) + PTY + SDK。
       // 3s 时大多数 client 还没连上 → busy 恒 false → 升级照打断用户。30s 给"活跃会话"留出进入窗口。
       // 同大版本直接后台 detached npm install（不阻塞事件循环）；跨大版本 / 忙时 → 仅广播 banner，用户下次启动再升。
-      setTimeout(async () => {
+      // 句柄必须保存:_doStop 要 clearTimeout(stop/start 循环防泄漏);.unref() 防 keep-alive。
+      // 测试侧三重防护:此处 unref + updater.js 的 L5 铁闸 + npm test 脚本 DISABLE_NONESSENTIAL_TRAFFIC。
+      _updateCheckTimer = setTimeout(async () => {
         let ptyRunning = false;
         try {
           const { getPtyState } = await import('./pty-manager.js');
@@ -2061,6 +2076,7 @@ if (!isWorkspaceMode) {
           }
         } catch { /* update check 失败静默 */ }
       }, 30_000);
+      _updateCheckTimer.unref();
     }).catch(err => {
       console.error('Failed to start CC Viewer:', err);
     });

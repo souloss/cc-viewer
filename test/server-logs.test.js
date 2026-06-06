@@ -1,12 +1,26 @@
+// ████ 文件内显式隔离(第六层闸) — ESM 静态 import 会被提升(hoist) ████
+// LOG_DIR 在 ../findcc.js 加载时即固化:projectDir=join(LOG_DIR,...) 会被 mkdirSync/rmSync。
+// 若先静态 import findcc 再赋 env,LOG_DIR 落到真实 ~/.claude/cc-viewer,误伤用户数据
+// (2026-06-06 事故同源)。必须:node: 内置静态 import → 隔离段锁 env → 动态 import 项目模块。
+// 私有端口窗 19750-19759 避免与默认窗 / 其它 server-* 测试跨进程抢端口。禁止改回静态 import。
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_DIR } from '../findcc.js';
+import { tmpdir } from 'node:os';
 
+// ── 隔离段:务必早于任何项目模块 import ──
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-srvlogs-'));
+process.env.CCV_LOG_DIR = __isoDir;
+process.env.CLAUDE_CONFIG_DIR = __isoDir;
+process.env.CCV_START_PORT = '19750';
+process.env.CCV_MAX_PORT = '19759';
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
+
+// 隔离段之后才动态 import(此时 LOG_DIR 已固化到 __isoDir)
+const { LOG_DIR } = await import('../findcc.js');
 
 function httpRequest(port, path, { method = 'GET', body = null } = {}) {
   return new Promise((resolve, reject) => {

@@ -1,6 +1,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { request } from 'node:http';
+import { request, createServer } from 'node:http';
+import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
@@ -153,6 +155,50 @@ describe('server plugin endpoints', { concurrency: false }, () => {
     });
     assert.equal(res.status, 500);
     assert.ok(res.json().error.includes('Failed to fetch'));
+  });
+
+  it('POST /api/plugins/install-from-url installs a reachable plugin (success path, plugins.js:78-81)', async () => {
+    // 起一个本地 origin 服务真实插件 JS，命中 installPluginFromUrl 的下载→保存成功路径，
+    // 进而覆盖 route 的成功臂（loadPlugins + 200 + plugins 列表回写）。
+    const pluginJs = "export default { name: 'installed-from-url', hooks: {} };\n";
+    const origin = createServer((oReq, oRes) => {
+      oRes.writeHead(200, { 'Content-Type': 'application/javascript' });
+      oRes.end(pluginJs);
+    });
+    await new Promise((r) => origin.listen(0, '127.0.0.1', r));
+    const oPort = origin.address().port;
+    try {
+      const res = await httpRequest(port, '/api/plugins/install-from-url', {
+        method: 'POST',
+        body: { url: `http://127.0.0.1:${oPort}/install-url-plugin.js` },
+      });
+      assert.equal(res.status, 200);
+      const data = res.json();
+      assert.ok(Array.isArray(data.plugins));
+      assert.equal(typeof data.pluginsDir, 'string');
+      // extract-plugin-name.mjs 子进程读出插件 export 的 name 字段 → 文件名 installed-from-url.js
+      const found = data.plugins.find(p => p.file && p.file.startsWith('installed-from-url'));
+      assert.ok(found, 'newly installed plugin should appear in the list');
+      assert.equal(found.name, 'installed-from-url');
+      // 清理：删掉刚装入的插件文件
+      await httpRequest(port, `/api/plugins?file=${encodeURIComponent(found.file)}`, { method: 'DELETE' });
+    } finally {
+      await new Promise((r) => origin.close(r));
+    }
+  });
+
+  it('DELETE /api/plugins returns 500 when unlink fails (target is a directory, plugins.js:34-36)', async () => {
+    // 在 pluginsDir 下造一个与「文件名」同名的子目录，unlinkSync 对目录抛错 → 命中 catch 500 臂。
+    const { getPluginsDir } = await import('../server/lib/plugin-loader.js');
+    const dirAsFile = join(getPluginsDir(), 'isdir-plugin.js');
+    mkdirSync(dirAsFile, { recursive: true });
+    try {
+      const res = await httpRequest(port, '/api/plugins?file=isdir-plugin.js', { method: 'DELETE' });
+      assert.equal(res.status, 500);
+      assert.ok(res.json().error, 'error message from unlink failure should be returned');
+    } finally {
+      if (existsSync(dirAsFile)) rmSync(dirAsFile, { recursive: true, force: true });
+    }
   });
 
   // --- /api/perm-hook decision whitelist (fix/pr70-review B4) ---

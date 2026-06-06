@@ -400,3 +400,43 @@ export function rotateLogFile(currentFile, newFile, maxSize) {
   } catch { }
   return { rotated: false };
 }
+
+/**
+ * 在原始 JSON 字符串上定向替换顶层 "model" 字段的值，避免对巨型 wire body
+ * （`-c` 重启后的全量 checkpoint 请求可达数十 MB）做二次 JSON.parse + 全量 re-stringify。
+ *
+ * 安全性依据：
+ * - JSON 字符串值内的引号必然转义为 \"，裸 `"model":"<old>"` 字节序列只能出现在真实结构处；
+ * - 候选必须满足成员边界（前一个非空白字符是 `{` 或 `,`）；
+ * - 顶层 model 恒存在恒命中 → 嵌套对象若有同值 model 键则候选 ≥2 → 返回 null 由调用方
+ *   回退 parse/stringify 旧路径（最坏退化为现状，绝不误改）。
+ *
+ * @param {string} jsonStr - 原始 wire body（紧凑或带单空格的 JSON 字符串）
+ * @param {string} oldModel - 当前顶层 model 值（来自已解析的 body.model）
+ * @param {string} newModel - 目标 model 值
+ * @returns {string|null} 替换后的字符串；无法唯一定位时返回 null（调用方回退）
+ */
+export function replaceTopLevelModel(jsonStr, oldModel, newModel) {
+  if (typeof jsonStr !== 'string' || typeof oldModel !== 'string' || !oldModel ||
+      typeof newModel !== 'string' || !newModel) return null;
+  const oldVal = JSON.stringify(oldModel);
+  // 覆盖紧凑（JSON.stringify 默认）与冒号后单空格两种序列化形态；其它形态 → 0 候选 → 回退
+  const needles = [`"model":${oldVal}`, `"model": ${oldVal}`];
+  const candidates = [];
+  for (const needle of needles) {
+    let idx = jsonStr.indexOf(needle);
+    while (idx !== -1) {
+      // 成员边界校验：前一个非空白字符必须是 { 或 ,
+      let p = idx - 1;
+      while (p >= 0 && (jsonStr[p] === ' ' || jsonStr[p] === '\t' || jsonStr[p] === '\n' || jsonStr[p] === '\r')) p--;
+      if (p >= 0 && (jsonStr[p] === '{' || jsonStr[p] === ',')) {
+        candidates.push({ idx, needle });
+      }
+      idx = jsonStr.indexOf(needle, idx + 1);
+    }
+  }
+  if (candidates.length !== 1) return null;
+  const { idx, needle } = candidates[0];
+  const replaced = needle.slice(0, needle.length - oldVal.length) + JSON.stringify(newModel);
+  return jsonStr.slice(0, idx) + replaced + jsonStr.slice(idx + needle.length);
+}

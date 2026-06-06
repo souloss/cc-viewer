@@ -45,8 +45,12 @@ describe('findcc: resolveLogDir', () => {
     assert.equal(logDir, '/tmp/custom-ccv-logs');
   });
 
+  // 注意(2026-06-06 事故后):以下两个用例断言的是【生产环境】默认解析。findcc 的 L1/L1b
+  // 测试铁闸会在 NODE_TEST_CONTEXT 存在时强制私有目录(防止测试触碰真实 ~/.claude)——
+  // 因此子进程 env 必须剥掉 NODE_TEST_CONTEXT 才能模拟生产语义。铁闸自身行为由
+  // test/logdir-test-guard.test.js 专门钉死,两边互补,谁都不许删。
   it('defaults to ~/.claude/cc-viewer when env is empty', () => {
-    const { CLAUDE_CONFIG_DIR: _, CCV_LOG_DIR: __, ...cleanEnv } = process.env;
+    const { CLAUDE_CONFIG_DIR: _, CCV_LOG_DIR: __, NODE_TEST_CONTEXT: ___, ...cleanEnv } = process.env;
     const result = execFileSync(process.execPath, [
       '--input-type=module',
       '-e',
@@ -61,6 +65,7 @@ describe('findcc: resolveLogDir', () => {
   });
 
   it('respects CLAUDE_CONFIG_DIR for default LOG_DIR', () => {
+    const { NODE_TEST_CONTEXT: _, ...prodEnv } = process.env;
     const result = execFileSync(process.execPath, [
       '--input-type=module',
       '-e',
@@ -68,7 +73,7 @@ describe('findcc: resolveLogDir', () => {
     ], {
       cwd: join(import.meta.dirname, '..'),
       encoding: 'utf-8',
-      env: { ...process.env, CCV_LOG_DIR: '', CLAUDE_CONFIG_DIR: '/tmp/custom-claude' },
+      env: { ...prodEnv, CCV_LOG_DIR: '', CLAUDE_CONFIG_DIR: '/tmp/custom-claude' },
       timeout: 5000,
     });
     assert.equal(result, '/tmp/custom-claude/cc-viewer');
