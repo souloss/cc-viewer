@@ -145,6 +145,26 @@
 .stateRunning { color: var(--text-secondary); }
 .stateQueued { color: var(--text-gray); }
 
+.statePulse { animation: ccvWfPulse 1.1s ease-in-out infinite; }
+
+@keyframes ccvWfPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-success, #3fb950);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statePulse { animation: none; }
+}
+
 .agentLabel {
   flex: 1 1 auto;
   min-width: 0;

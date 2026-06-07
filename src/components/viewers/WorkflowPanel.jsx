@@ -9,6 +9,7 @@ const TERMINAL_STATES = new Set(['done', 'completed', 'failed', 'error', 'cancel
 
 const STATUS_KEYS = {
   running: 'ui.workflow.status.running',
+  finishing: 'ui.workflow.status.finishing',
   completed: 'ui.workflow.status.completed',
   failed: 'ui.workflow.status.failed',
   paused: 'ui.workflow.status.paused',
@@ -51,7 +52,7 @@ function AgentRow({ agent }) {
   const dur = fmtDuration(agent.durationMs);
   return (
     <div className={styles.agentRow}>
-      <span className={`${styles.stateDot} ${stateClass(agent.state)}`} title={agent.state}>
+      <span className={`${styles.stateDot} ${stateClass(agent.state)} ${running ? styles.statePulse : ''}`} title={agent.state}>
         {stateGlyph(agent.state)}
       </span>
       <span className={styles.agentLabel} title={agent.label}>{agent.label || agent.agentType || agent.agentId}</span>
@@ -61,7 +62,7 @@ function AgentRow({ agent }) {
       <span className={styles.agentMeta}>
         <span className={styles.metaTok}>{fmtTokens(agent.tokens)} {t('ui.workflow.tok')}</span>
         <span className={styles.metaTool}>{agent.toolCalls} {t('ui.workflow.tools')}</span>
-        {dur && <span className={styles.metaDur}>{running ? t('ui.workflow.idle', { dur }) : dur}</span>}
+        {dur && <span className={styles.metaDur}>{dur}</span>}
       </span>
     </div>
   );
@@ -151,8 +152,10 @@ export default function WorkflowPanel({ workflow, resultText, defaultCollapsed }
       .then(r => r.json())
       .then(j => {
         if (!alive) return;
-        if (j && j.ok && j.data) setData(j.data);
-        else setError(true);
+        if (j && j.ok && j.data) {
+          // 若 SSE 已先送达权威完成快照（live!==true），别用可能滞后的 REST（含运行中）覆盖回退
+          setData(prev => (prev && prev.live === false && j.data.live) ? prev : j.data);
+        } else setError(true);
       })
       .catch(() => { if (alive) setError(true); })
       .finally(() => { if (alive) setLoading(false); });
@@ -181,6 +184,7 @@ export default function WorkflowPanel({ workflow, resultText, defaultCollapsed }
           {data?.summary && <span className={styles.wfSummary}>{data.summary}</span>}
         </div>
         <div className={styles.headerMeta}>
+          {data?.live && <span className={`${styles.liveDot} ${styles.statePulse}`} title={statusLabel} />}
           {data && (
             <span className={styles.headerStat}>
               {t('ui.workflow.agentsShort', { count: data.agentCount || 0 })}

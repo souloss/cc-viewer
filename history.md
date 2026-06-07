@@ -3,10 +3,11 @@
 ## Unreleased
 
 - feat(workflow): 聊天里内联渲染 Workflow 工具的「工作流面板」——phases 左列 + 按阶段分组的 agents 行（label / model / 状态 / token / 工具数 / 耗时），数据源为落盘的 workflow run journal（`<sessionDir>/workflows/<runId>.json`）
-- feat(workflow): 实时跟随——服务端 server/lib/workflow-watcher.js 监视 workflows 目录（复用 log-watcher 的 dir fs.watch + 防抖 + 安全网慢轮询 + 测试缝），journal 覆写经 SSE `workflow_update` 推送，前端 src/utils/workflowStore.js 按 runId 分发，面板随工作流进度实时刷新
+- feat(workflow): 运行中逐帧动画——`<runId>.json` 仅完成时落盘，故运行中改从 `subagents/workflows/<runId>/` 实时推导（server/lib/workflow-live.js：agent-*.jsonl 累计 token/工具数/model/prompt→label + journal.jsonl 的 started/result 判 running·done + scripts/*.js 反推 workflowName，带每文件 mtime:size 解析缓存）；server/lib/workflow-watcher.js 新增 armWorkflowLiveWatch 监视该目录、签名去重后经 SSE `workflow_update` 逐帧广播；REST 路由完成快照缺失时回退逐帧推导并武装运行中监视；前端面板运行中走扁平 agent 列表 + 脉冲指示，完成时由权威快照接管 phase 分组
+- feat(workflow): 完成跟随——server/lib/workflow-watcher.js 监视 workflows 目录（复用 log-watcher 的 dir fs.watch + 防抖 + 安全网慢轮询 + 测试缝），journal 覆写经 SSE `workflow_update` 推送，前端 src/utils/workflowStore.js 按 runId 分发，面板随工作流进度实时刷新
 - feat(workflow): runId 出口补全——server/lib/enrich-workflow.js 仿 enrich-plan-input，在出 SSE/REST 前给 Workflow tool_result 注入 `_ccvWorkflow={runId,taskId,sessionId}`（runId 经 session-transcript-reader 新增的 lookupToolUseResult 按 tool_use.id 反查 CC transcript 顶层 toolUseResult）
 - feat(workflow): 新增只读路由 `GET /api/workflow-journal`（按 runId/taskId 定位、归一化面板模型、路径穿越守卫 + 惰性 arm watch）
-- test: 新增 server 单测覆盖 lookupToolUseResult / enrich-workflow / workflow-journal / workflow-watcher
+- test: 新增 server 单测覆盖 lookupToolUseResult / enrich-workflow / workflow-journal / workflow-watcher / workflow-live（逐帧推导 + 逐帧 watcher 广播）
 
 ## 1.6.302 (2026-06-07)
 

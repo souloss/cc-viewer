@@ -10,8 +10,9 @@
  * - getLatest(key): 取已缓存的最新 journal（panel 挂载时若已先到事件可即时用）。
  */
 
-const _subs = new Map();    // key(runId|taskId) → Set<cb>
-const _latest = new Map();  // key → normalized journal data
+const _subs = new Map();          // key(runId|taskId) → Set<cb>
+const _latest = new Map();        // key → normalized journal data
+const _authoritative = new Set(); // keys that已收到 live===false 的权威完成快照
 
 function _emit(key, data) {
   const set = _subs.get(key);
@@ -30,7 +31,12 @@ export function publish(payload) {
   if (data.runId && data.runId !== payload.runId) keys.push(data.runId);
   if (payload.taskId) keys.push(payload.taskId);
   if (data.taskId && data.taskId !== payload.taskId) keys.push(data.taskId);
+  // 权威完成快照（live!==true）一旦到达即锁定该 key：忽略其后乱序到达的运行中逐帧，
+  // 否则尾随的 live 帧会把面板从「已完成」回退成「运行中」。
+  const isLive = data.live === true;
   for (const k of keys) {
+    if (isLive && _authoritative.has(k)) continue;
+    if (!isLive) _authoritative.add(k);
     _latest.set(k, data);
     _emit(k, data);
   }

@@ -19,12 +19,14 @@ import { existsSync, watch, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { sendEventToClients } from './log-watcher.js';
 import { readNormalizedJournal } from './workflow-journal.js';
+import { deriveLiveJournal } from './workflow-live.js';
 
 const DEBOUNCE_MS = 120;
 const SAFETY_POLL_MS = 5000;
 const PRESENCE_POLL_MS = 1000;
 
-const _armed = new Map();  // workflowsDir → state
+const _armed = new Map();      // workflowsDir → state（完成快照）
+const _armedLive = new Map();  // runDir → state（运行中逐帧）
 
 let _watchImpl = watch;
 /** 测试用：替换 fs.watch 实现。生产恒为 node:fs watch。 */
@@ -153,8 +155,111 @@ export function unwatchWorkflowDir(workflowsDir) {
   _armed.delete(workflowsDir);
 }
 
+/** 解除单个完成快照目录的监视别名 + 运行中目录监视，详见各自实现。 */
+
+// --- 运行中逐帧（watch <sessionDir>/subagents/workflows/<runId>/）---
+
+function _liveSignature(data) {
+  if (!data) return 'none';
+  const states = data.agents.map(a => `${a.agentId}:${a.state}:${a.tokens}:${a.toolCalls}`).join('|');
+  return `${data.status}#${data.agentCount}#${data.totalTokens}#${data.totalToolCalls}#${states}`;
+}
+
+function _scanLive(state) {
+  const { runDir, runId, sessionId, project, clients } = state;
+  const data = deriveLiveJournal(runDir, runId);
+  if (!data) return;
+  const sig = _liveSignature(data);
+  if (sig === state.lastSig) return;  // 无实质变化，不广播
+  state.lastSig = sig;
+  sendEventToClients(clients, 'workflow_update', {
+    sessionId,
+    project: project || null,
+    runId: data.runId,
+    taskId: data.taskId || null,
+    data,
+  });
+}
+
+function _scheduleLiveScan(state) {
+  if (state.debounceTimer) return;
+  state.debounceTimer = setTimeout(() => {
+    state.debounceTimer = null;
+    _scanLive(state);
+  }, DEBOUNCE_MS);
+  state.debounceTimer.unref?.();
+}
+
+function _startLiveWatch(state) {
+  if (state.watcher || !existsSync(state.runDir)) return false;
+  try {
+    state.watcher = _watchImpl(state.runDir, () => _scheduleLiveScan(state));
+    state.watcher?.on?.('error', () => {
+      try { state.watcher?.close?.(); } catch {}
+      state.watcher = null;
+    });
+    return true;
+  } catch {
+    state.watcher = null;
+    return false;
+  }
+}
+
+/**
+ * 武装对某运行中 workflow 的逐帧监视（subagents/workflows/<runId> 目录）。
+ * 同 runDir 重复调用只刷新 clients。arm 时立即广播一次当前推导态（闭合 REST/arm 竞态）。
+ * @param {{ runDir: string, runId: string, sessionId?: string, project?: string, clients: Array }} opts
+ */
+export function armWorkflowLiveWatch({ runDir, runId, sessionId, project, clients } = {}) {
+  if (!runDir || !runId || !Array.isArray(clients)) return null;
+
+  const existing = _armedLive.get(runDir);
+  if (existing) { existing.clients = clients; return existing; }
+
+  const state = {
+    runDir, runId, sessionId, project, clients,
+    lastSig: null, watcher: null,
+    debounceTimer: null, safetyTimer: null, presenceTimer: null,
+  };
+  _armedLive.set(runDir, state);
+
+  if (!_startLiveWatch(state)) {
+    state.presenceTimer = setInterval(() => {
+      if (_startLiveWatch(state)) {
+        clearInterval(state.presenceTimer);
+        state.presenceTimer = null;
+        _scheduleLiveScan(state);
+      }
+    }, PRESENCE_POLL_MS);
+    state.presenceTimer.unref?.();
+  } else {
+    _scheduleLiveScan(state);
+  }
+
+  state.safetyTimer = setInterval(() => _scanLive(state), SAFETY_POLL_MS);
+  state.safetyTimer.unref?.();
+
+  return state;
+}
+
+/** 测试用：手动触发一次逐帧扫描。 */
+export function __triggerLiveScanForTests(runDir) {
+  const state = _armedLive.get(runDir);
+  if (state) _scanLive(state);
+}
+
+/** 解除单个运行中目录监视。 */
+export function unwatchWorkflowLive(runDir) {
+  const state = _armedLive.get(runDir);
+  if (!state) return;
+  _disposeState(state);
+  _armedLive.delete(runDir);
+}
+
 /** 解除所有 workflow 监视（workspace 切换/进程退出）。 */
 export function unwatchAllWorkflows() {
   for (const state of _armed.values()) _disposeState(state);
   _armed.clear();
+  for (const state of _armedLive.values()) _disposeState(state);
+  _armedLive.clear();
 }

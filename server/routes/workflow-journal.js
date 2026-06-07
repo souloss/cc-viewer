@@ -1,6 +1,9 @@
 // Workflow run journal route: serve normalized panel data + arm live watch.
+// 完成后读权威快照 <runId>.json；运行中（快照未落盘）回退到 subagents/workflows/<runId>
+// 的逐帧推导，并武装运行中目录监视，使面板逐帧实时刷新。
 import { resolveJournalPath, resolveWorkflowsDir, readNormalizedJournal } from '../lib/workflow-journal.js';
-import { armWorkflowWatch } from '../lib/workflow-watcher.js';
+import { resolveRunDir, deriveLiveJournal } from '../lib/workflow-live.js';
+import { armWorkflowWatch, armWorkflowLiveWatch } from '../lib/workflow-watcher.js';
 
 function workflowJournal(req, res, parsedUrl, isLocal, deps) {
   try {
@@ -28,22 +31,33 @@ function workflowJournal(req, res, parsedUrl, isLocal, deps) {
       } catch {}
     }
 
+    // 1) 完成快照优先（权威，含 phase 分组）
     const journalPath = resolveJournalPath({ sessionId: session, projectHint: project, runId, taskId });
-    if (!journalPath) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'not found' }));
-      return;
+    if (journalPath) {
+      const data = readNormalizedJournal(journalPath);
+      if (data) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, data }));
+        return;
+      }
     }
 
-    const data = readNormalizedJournal(journalPath);
-    if (!data) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'unreadable journal' }));
-      return;
+    // 2) 运行中逐帧推导（快照尚未落盘）+ 武装运行中目录监视
+    if (runId) {
+      const runDir = resolveRunDir(session, project, runId);
+      const live = runDir ? deriveLiveJournal(runDir, runId) : null;
+      if (live) {
+        if (deps && Array.isArray(deps.clients)) {
+          try { armWorkflowLiveWatch({ runDir, runId, sessionId: session, project, clients: deps.clients }); } catch {}
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, data: live }));
+        return;
+      }
     }
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, data }));
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'not found' }));
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
