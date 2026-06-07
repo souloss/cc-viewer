@@ -13,6 +13,7 @@ import { snapToPreset, stepPreset } from './utils/displayScaleHelper';
 import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
 import { isMainAgent, isPostClearCheckpoint } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
+import { publish as publishWorkflowUpdate } from './utils/workflowStore';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
@@ -1349,6 +1350,12 @@ class AppBase extends React.Component {
         } catch (err) {
           console.error('Failed to parse kv_cache_content:', err);
         }
+      });
+      this.eventSource.addEventListener('workflow_update', (event) => {
+        this._resetSSETimeout();
+        try {
+          publishWorkflowUpdate(JSON.parse(event.data));
+        } catch { }
       });
       this.eventSource.addEventListener('proxy_profile', (event) => {
         this._resetSSETimeout();

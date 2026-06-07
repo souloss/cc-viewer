@@ -1,0 +1,254 @@
+.panel {
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  background: var(--bg-container);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.headerMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wfName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary);
+  word-break: break-word;
+}
+
+.wfSummary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.headerMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.headerStat {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.toggle {
+  font-size: 12px;
+  color: var(--color-primary);
+}
+
+.notice {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-gray);
+}
+
+.body {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+}
+
+.colTitle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-gray);
+  padding: 6px 12px 4px;
+}
+
+.phasesCol {
+  flex: 0 0 auto;
+  min-width: 140px;
+  max-width: 200px;
+  border-right: 1px solid var(--border-secondary);
+  padding-bottom: 8px;
+}
+
+.phaseItem {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.phaseActive {
+  color: var(--color-primary);
+  font-weight: 600;
+  background: var(--color-primary-pale);
+}
+
+.phaseIdx {
+  color: var(--text-gray);
+  font-variant-numeric: tabular-nums;
+}
+
+.phaseTitle {
+  word-break: break-word;
+}
+
+.agentsCol {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-bottom: 8px;
+}
+
+.phaseGroup {
+  margin-top: 2px;
+}
+
+.phaseGroupTitle {
+  font-size: 11px;
+  color: var(--text-gray);
+  padding: 4px 12px 2px;
+}
+
+.agentRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stateDot {
+  flex: 0 0 auto;
+  width: 1em;
+  text-align: center;
+  font-size: 11px;
+}
+
+.stateDone { color: var(--color-success, #3fb950); }
+.stateFailed { color: var(--color-error, #f85149); }
+.stateRunning { color: var(--text-secondary); }
+.stateQueued { color: var(--text-gray); }
+
+.statePulse { animation: ccvWfPulse 1.1s ease-in-out infinite; }
+
+@keyframes ccvWfPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.liveDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-success, #3fb950);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .statePulse { animation: none; }
+}
+
+.agentLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-primary);
+}
+
+.agentDoing {
+  flex: 0 0 auto;
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--color-primary-pale);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--color-primary);
+}
+
+.agentModel {
+  flex: 0 0 auto;
+  color: var(--text-gray);
+  font-size: 11px;
+}
+
+/* 视图切换（列表 / 时间轴）—— 分段控件：统一轨道，选中段填实色反白 */
+.viewToggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 0;
+  padding: 2px;
+  background: var(--bg-sub-avatar, rgba(127, 127, 127, 0.12));
+  border-radius: 6px;
+}
+
+.viewBtn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.viewBtn:hover { color: var(--color-primary); }
+
+.viewBtnActive,
+.viewBtnActive:hover {
+  color: rgba(255, 255, 255, 0.96);
+  background: var(--color-primary);
+}
+
+.agentMeta {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.metaDur { color: var(--text-gray); }
+
+.fallback {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .body { flex-direction: column; }
+  .phasesCol {
+    max-width: none;
+    border-right: none;
+    border-bottom: 1px solid var(--border-secondary);
+  }
+  .agentMeta { gap: 8px; }
+  .agentModel { display: none; }
+  .agentDoing { display: none; }
+}

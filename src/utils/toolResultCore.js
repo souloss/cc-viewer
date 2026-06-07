@@ -68,7 +68,10 @@ export function buildSingleToolResultCore(block, matchedTool) {
   const isError = !!block.is_error;
   const { isPermissionDenied, isInputValidationError, isUltraplan } = classifyToolResultError(resultText, isError);
   const images = extractToolResultImages(block);
-  return { toolName, toolInput, resultText, isError, isPermissionDenied, isInputValidationError, isUltraplan, images };
+  // Workflow 工具：服务端 enrich-workflow 注入的 { runId, taskId, sessionId, project } 标记，
+  // 供前端定位并拉取 workflow run journal 渲染工作流面板。
+  const workflow = (block._ccvWorkflow && typeof block._ccvWorkflow === 'object') ? block._ccvWorkflow : null;
+  return { toolName, toolInput, resultText, isError, isPermissionDenied, isInputValidationError, isUltraplan, images, workflow };
 }
 
 const ANSI_ESCAPE = /\x1b\[[0-9;]*[A-Za-z]/g;

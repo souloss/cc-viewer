@@ -6,6 +6,7 @@ import { buildContextWindowEvent, getContextSizeForModel } from './context-watch
 import { reconstructEntries, createIncrementalReconstructor } from './delta-reconstructor.js';
 import { countLogEntries, streamReconstructedEntriesAsync } from './log-stream.js';
 import { enrichEntry } from './enrich-plan-input.js';
+import { enrichEntry as enrichWorkflowEntry } from './enrich-workflow.js';
 import { resolveJsonlPath } from './jsonl-archive.js';
 
 // 跟踪所有被 watch 的日志文件。value: fileState 对象（外部只用 .has()/.keys()）
@@ -179,6 +180,7 @@ async function _readDelta(state) {
           if (!parsed.pid) parsed.pid = getClaudePid();
           reconstructor.reconstruct(parsed);
           try { enrichEntry(parsed); } catch {}
+          try { enrichWorkflowEntry(parsed); } catch {}
           sendToClients(clients, parsed);
           runParallelHook('onNewEntry', parsed).catch(() => {});
           if (isMainAgentEntry(parsed) && !parsed.inProgress) {

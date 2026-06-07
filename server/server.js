@@ -24,6 +24,7 @@ import { voicePackRoutes } from './routes/voice-pack.js';
 import { skillsRoutes } from './routes/skills.js';
 import { ultraAgentsRoutes } from './routes/ultra-agents.js';
 import { filesContentRoutes } from './routes/files-content.js';
+import { workflowJournalRoutes } from './routes/workflow-journal.js';
 import { filesFsRoutes } from './routes/files-fs.js';
 import { workspacesRoutes } from './routes/workspaces.js';
 import { eventsRoutes } from './routes/events.js';
@@ -76,6 +77,7 @@ import { checkAndUpdate } from './lib/updater.js';
 import { loadPlugins, runWaterfallHook, runParallelHook } from './lib/plugin-loader.js';
 import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher.js';
 import { watchLogFile, startWatching, unwatchAll, sendEventToClients, sendToClients } from './lib/log-watcher.js';
+import { unwatchAllWorkflows } from './lib/workflow-watcher.js';
 import { cleanupExtractCache } from './lib/jsonl-archive.js';
 import { backupConfigs } from './lib/config-backup.js';
 import { normalizeBasePath, validateBasePath, stripBasePath } from './lib/base-path.js';
@@ -556,6 +558,7 @@ const _routes = [
   ...skillsRoutes,
   ...ultraAgentsRoutes,
   ...filesContentRoutes,
+  ...workflowJournalRoutes,
   ...filesFsRoutes,
   ...workspacesRoutes,
   ...eventsRoutes,
@@ -2053,6 +2056,7 @@ async function _doStop() {
     } catch { }
   }
   unwatchAll();
+  unwatchAllWorkflows();
   unwatchFile(CONTEXT_WINDOW_FILE);
   clients.forEach(client => client.end());
   // Truncate in place (not `clients = []`) so the array reference stays stable across

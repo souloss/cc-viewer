@@ -3,6 +3,7 @@ import { Typography } from 'antd';
 import { t } from '../../i18n';
 import { renderMarkdown } from '../../utils/markdown';
 import { escapeHtml } from '../../utils/helpers';
+import WorkflowPanel from './WorkflowPanel';
 import styles from './ToolResultView.module.css';
 
 const { Text } = Typography;
@@ -300,9 +301,16 @@ function highlight(text, lang) {
   return result;
 }
 
-function ToolResultView({ toolName, toolInput, resultText, images, defaultCollapsed }) {
+function ToolResultView({ toolName, toolInput, resultText, images, workflow, defaultCollapsed }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed ?? false);
   useEffect(() => { setCollapsed(defaultCollapsed ?? false); }, [defaultCollapsed]);
+
+  // Workflow 工具：渲染工作流面板（phases + agents，实时跟随）。
+  // 缺结构化 id（旧条目）时 WorkflowPanel 内部回退纯文本。
+  if (toolName === 'Workflow' && workflow && (workflow.runId || workflow.taskId)) {
+    return <WorkflowPanel workflow={workflow} resultText={resultText} defaultCollapsed={defaultCollapsed} />;
+  }
+
   const isCodeTool = CODE_TOOLS.includes(toolName);
   const lang = isCodeTool ? detectLang(toolName, toolInput, resultText) : null;
   const displayText = resultText.length > 5000 ? resultText.substring(0, 5000) + '\n... (truncated)' : resultText;

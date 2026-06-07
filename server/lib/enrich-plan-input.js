@@ -8,6 +8,7 @@
  */
 
 import { lookupToolUseInput } from './session-transcript-reader.js';
+import { enrichEntry as enrichWorkflowEntry, rawHasWorkflowToolResult } from './enrich-workflow.js';
 
 const EMPTY_INPUT_SUBSTR = '"name":"ExitPlanMode","input":{}';
 
@@ -92,6 +93,7 @@ export function enrichEntry(entry) {
 
 /**
  * 服务端三处接入点共用：raw 字符串预过滤 → 命中才 parse + enrich + stringify。
+ * 一次 parse 上同时跑 ExitPlanMode plan 补全与 Workflow _ccvWorkflow 注入两道 enricher。
  *
  * 设计原则：保持 server/lib/log-stream.js 的「原始字符串透传」哲学，只对真正需要补全的
  * 条目做 parse / stringify，其它一律按 raw 透传。
@@ -100,10 +102,14 @@ export function enrichEntry(entry) {
  * @returns {string} - enriched JSON 字符串，或原始 raw
  */
 export function enrichRawIfNeeded(raw) {
-  if (!rawHasEmptyExitPlanMode(raw)) return raw;
+  const needPlan = rawHasEmptyExitPlanMode(raw);
+  const needWorkflow = rawHasWorkflowToolResult(raw);
+  if (!needPlan && !needWorkflow) return raw;
   let entry;
   try { entry = JSON.parse(raw); } catch { return raw; }
-  const { enriched } = enrichEntry(entry);
-  if (enriched === 0) return raw;
+  let changed = 0;
+  if (needPlan) { try { changed += enrichEntry(entry).enriched; } catch {} }
+  if (needWorkflow) { try { changed += enrichWorkflowEntry(entry).enriched; } catch {} }
+  if (changed === 0) return raw;
   try { return JSON.stringify(entry); } catch { return raw; }
 }

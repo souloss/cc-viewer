@@ -35,6 +35,7 @@ const INPUT_CACHE_MAX = 5000;
 
 const transcriptPathCache = new Map();   // key → { path, mtimeMs } | { path: null, expireAt }
 const toolUseInputCache = new Map();     // `${path}:${tuId}` → { plan?, planFilePath? }（仅命中入缓存）
+const toolUseResultCache = new Map();    // `${path}:${tuId}` → { runId?, taskId? }（仅命中入缓存）
 
 function lruSet(map, key, value, max) {
   if (map.has(key)) map.delete(key);
@@ -154,14 +155,15 @@ function scanLineForToolUse(line, toolUseId) {
 }
 
 /**
- * 流式扫 transcript 文件，按 tool_use.id 找 ExitPlanMode 块的 input。
+ * 流式扫 transcript 文件，按 tool_use.id 用传入的 scanLine 抽取目标字段。
  * 命中即 break；半写入行 try/catch 跳过。最大文件大小由 MAX_TRANSCRIPT_BYTES 兜底。
  *
  * @param {string} filePath
  * @param {string} toolUseId
- * @returns {{ result: { plan?: string, planFilePath?: string } | null, unknownShape: boolean }}
+ * @param {(line: string, toolUseId: string) => { ok: 'hit', value: object } | { ok: 'unknown-shape' } | { ok: 'miss' }} scanLine
+ * @returns {{ result: object | null, unknownShape: boolean }}
  */
-function scanTranscriptFile(filePath, toolUseId) {
+function scanTranscriptFile(filePath, toolUseId, scanLine) {
   let unknownShape = false;
   try {
     const fileSize = statSync(filePath).size;
@@ -186,13 +188,13 @@ function scanTranscriptFile(filePath, toolUseId) {
         const lines = text.split('\n');
         pending = lines.pop() ?? '';
         for (const line of lines) {
-          const r = scanLineForToolUse(line, toolUseId);
+          const r = scanLine(line, toolUseId);
           if (r.ok === 'hit') return { result: r.value, unknownShape };
           if (r.ok === 'unknown-shape') unknownShape = true;
         }
       }
       if (pending) {
-        const r = scanLineForToolUse(pending, toolUseId);
+        const r = scanLine(pending, toolUseId);
         if (r.ok === 'hit') return { result: r.value, unknownShape };
         if (r.ok === 'unknown-shape') unknownShape = true;
       }
@@ -223,7 +225,7 @@ export function lookupToolUseInput(sessionId, toolUseId, projectHint) {
   const cached = lruGet(toolUseInputCache, cacheKey);
   if (cached) return cached;
 
-  const { result, unknownShape } = scanTranscriptFile(filePath, toolUseId);
+  const { result, unknownShape } = scanTranscriptFile(filePath, toolUseId, scanLineForToolUse);
 
   if (!result && unknownShape) {
     try {
@@ -235,8 +237,65 @@ export function lookupToolUseInput(sessionId, toolUseId, projectHint) {
   return result;
 }
 
-/** 测试用：清掉两个 LRU。 */
+/**
+ * 单行扫描：找 type:"user" 行里 tool_use_id 匹配的 tool_result 块，
+ * 取该行顶层 toolUseResult 的 { runId, taskId }（Workflow 工具的 async_launched 结果）。
+ *
+ * @param {string} line
+ * @param {string} toolUseId
+ * @returns {{ ok: 'hit', value: { runId?: string, taskId?: string } }
+ *         | { ok: 'unknown-shape' }
+ *         | { ok: 'miss' }}
+ */
+function scanLineForToolUseResult(line, toolUseId) {
+  if (!line) return { ok: 'miss' };
+  if (line.indexOf('"runId":') === -1) return { ok: 'miss' };
+  if (line.indexOf(toolUseId) === -1) return { ok: 'miss' };
+
+  let entry;
+  try { entry = JSON.parse(line); } catch { return { ok: 'miss' }; }
+  const content = entry?.message?.content;
+  if (!Array.isArray(content)) return { ok: 'miss' };
+
+  const matched = content.some(blk => blk?.type === 'tool_result' && blk?.tool_use_id === toolUseId);
+  if (!matched) return { ok: 'miss' };
+
+  const tur = entry.toolUseResult;
+  if (!tur || typeof tur !== 'object') return { ok: 'miss' };
+  const value = {};
+  if (typeof tur.runId === 'string') value.runId = tur.runId;
+  if (typeof tur.taskId === 'string') value.taskId = tur.taskId;
+  if (value.runId || value.taskId) return { ok: 'hit', value };
+  return { ok: 'unknown-shape' };
+}
+
+/**
+ * 按 sessionId + tool_use.id 查 Workflow 工具结果的 { runId, taskId }。
+ * runId 直接对应 journal 文件名 `<sessionDir>/workflows/<runId>.json`。
+ * 仅缓存命中；miss 路径靠 findTranscriptPath 的短 TTL miss 缓存兜底。
+ *
+ * @param {string} sessionId
+ * @param {string} toolUseId
+ * @param {string} [projectHint]
+ * @returns {{ runId?: string, taskId?: string } | null}
+ */
+export function lookupToolUseResult(sessionId, toolUseId, projectHint) {
+  if (!sessionId || !toolUseId) return null;
+  const filePath = findTranscriptPath(sessionId, projectHint);
+  if (!filePath || !existsSync(filePath)) return null;
+
+  const cacheKey = `${filePath}:${toolUseId}`;
+  const cached = lruGet(toolUseResultCache, cacheKey);
+  if (cached) return cached;
+
+  const { result } = scanTranscriptFile(filePath, toolUseId, scanLineForToolUseResult);
+  if (result) lruSet(toolUseResultCache, cacheKey, result, INPUT_CACHE_MAX);
+  return result;
+}
+
+/** 测试用：清掉三个 LRU。 */
 export function clearCache() {
   transcriptPathCache.clear();
   toolUseInputCache.clear();
+  toolUseResultCache.clear();
 }

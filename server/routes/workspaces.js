@@ -3,6 +3,7 @@ import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { LOG_FILE, initForWorkspace, resetWorkspace } from '../interceptor.js';
 import { watchLogFile, unwatchAll } from '../lib/log-watcher.js';
+import { unwatchAllWorkflows } from '../lib/workflow-watcher.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
 
@@ -139,6 +140,7 @@ function workspacesStop(req, res, parsedUrl, isLocal, deps) {
 
     // 停止日志监听
     unwatchAll();
+    unwatchAllWorkflows();
 
     // 重置 interceptor 状态
     resetWorkspace();
