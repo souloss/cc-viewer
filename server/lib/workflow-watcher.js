@@ -16,7 +16,7 @@
  */
 
 import { existsSync, watch, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { sendEventToClients } from './log-watcher.js';
 import { readNormalizedJournal } from './workflow-journal.js';
 import { deriveLiveJournal } from './workflow-live.js';
@@ -165,20 +165,35 @@ function _liveSignature(data) {
   return `${data.status}#${data.agentCount}#${data.totalTokens}#${data.totalToolCalls}#${states}`;
 }
 
+// runDir = <sessionDir>/subagents/workflows/<runId> → 上溯三级到 sessionDir，查权威快照是否已落盘
+function _authoritativeJournalExists(runDir, runId) {
+  try {
+    const sessionDir = dirname(dirname(dirname(runDir)));
+    return existsSync(join(sessionDir, 'workflows', `${runId}.json`));
+  } catch { return false; }
+}
+
 function _scanLive(state) {
   const { runDir, runId, sessionId, project, clients } = state;
   const data = deriveLiveJournal(runDir, runId);
-  if (!data) return;
-  const sig = _liveSignature(data);
-  if (sig === state.lastSig) return;  // 无实质变化，不广播
-  state.lastSig = sig;
-  sendEventToClients(clients, 'workflow_update', {
-    sessionId,
-    project: project || null,
-    runId: data.runId,
-    taskId: data.taskId || null,
-    data,
-  });
+  if (data) {
+    const sig = _liveSignature(data);
+    if (sig !== state.lastSig) {  // 有实质变化才广播
+      state.lastSig = sig;
+      sendEventToClients(clients, 'workflow_update', {
+        sessionId,
+        project: project || null,
+        runId: data.runId,
+        taskId: data.taskId || null,
+        data,
+      });
+    }
+  }
+  // 权威完成快照已落盘 → 逐帧使命结束，自我拆除（最终态由 workflows 目录 watch 接管广播，
+  // 且 workflowStore 权威锁会忽略其后乱序的 live 帧）。避免完成后 safetyTimer 永久空转重读。
+  if (_authoritativeJournalExists(runDir, runId)) {
+    unwatchWorkflowLive(runDir);
+  }
 }
 
 function _scheduleLiveScan(state) {

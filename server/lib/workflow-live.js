@@ -15,7 +15,7 @@
  * 权威值替换）。工具数与快照一致（统计 tool_use 块）。
  */
 
-import { existsSync, readFileSync, statSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, readdirSync, realpathSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { getClaudeConfigDir } from '../../findcc.js';
 import { findTranscriptPath } from './session-transcript-reader.js';
@@ -55,46 +55,99 @@ function deriveWorkflowName(sessionDir, runId) {
   return '';
 }
 
-// 每文件解析缓存：filePath → { sig, parsed }，sig=mtimeMs:size，避免每帧重解析未变 agent。
+// 每文件增量解析缓存：filePath → { mtimeMs, size, offset, partial(Buffer), acc }。
+// agent-*.jsonl 是 append-only：仅从上次 offset 续读新增字节、按行喂入累加器 acc，
+// 避免每帧对正在增长的活跃 agent 文件做 O(size) 全量重读（partial 以字节保留，
+// 跨读边界的不完整行/多字节 UTF-8 字符不被切坏，只在换行符处解码）。
 const _agentParseCache = new Map();
 
-function parseAgentFile(filePath) {
-  let sig;
-  try { const st = statSync(filePath); sig = `${st.mtimeMs}:${st.size}`; } catch { return null; }
-  const cached = _agentParseCache.get(filePath);
-  if (cached && cached.sig === sig) return cached.parsed;
+function _newAcc() {
+  return { tokens: 0, toolCalls: 0, lastToolName: '', model: '', prompt: '', startedAt: null, lastProgressAt: null };
+}
 
-  const parsed = { tokens: 0, toolCalls: 0, lastToolName: '', model: '', prompt: '', startedAt: null, lastProgressAt: null };
-  try {
-    if (statSync(filePath).size > MAX_AGENT_BYTES) return parsed;
-    const lines = readFileSync(filePath, 'utf-8').split('\n');
-    for (const line of lines) {
-      if (!line) continue;
-      let o;
-      try { o = JSON.parse(line); } catch { continue; }
-      const ts = Date.parse(o.timestamp || '');
-      if (!Number.isNaN(ts)) {
-        if (parsed.startedAt === null) parsed.startedAt = ts;
-        parsed.lastProgressAt = ts;
-      }
-      const msg = o.message;
-      if (!msg) continue;
-      if (o.type === 'user' && !parsed.prompt && typeof msg.content === 'string') {
-        parsed.prompt = msg.content;
-      }
-      if (typeof msg.model === 'string' && msg.model) parsed.model = msg.model;
-      const u = msg.usage;
-      if (u) parsed.tokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
-      if (Array.isArray(msg.content)) {
-        for (const b of msg.content) {
-          if (b && b.type === 'tool_use') { parsed.toolCalls++; if (b.name) parsed.lastToolName = b.name; }
-        }
-      }
+function _accSnapshot(acc) {
+  return {
+    tokens: acc.tokens, toolCalls: acc.toolCalls, lastToolName: acc.lastToolName,
+    model: acc.model, prompt: acc.prompt, startedAt: acc.startedAt, lastProgressAt: acc.lastProgressAt,
+  };
+}
+
+function _applyLine(acc, line) {
+  if (!line) return;
+  let o;
+  try { o = JSON.parse(line); } catch { return; }
+  const ts = Date.parse(o.timestamp || '');
+  if (!Number.isNaN(ts)) {
+    if (acc.startedAt === null) acc.startedAt = ts;
+    acc.lastProgressAt = ts;
+  }
+  const msg = o.message;
+  if (!msg) return;
+  if (o.type === 'user' && !acc.prompt && typeof msg.content === 'string') acc.prompt = msg.content;
+  if (typeof msg.model === 'string' && msg.model) acc.model = msg.model;
+  const u = msg.usage;
+  if (u) acc.tokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  if (Array.isArray(msg.content)) {
+    for (const b of msg.content) {
+      if (b && b.type === 'tool_use') { acc.toolCalls++; if (b.name) acc.lastToolName = b.name; }
     }
-  } catch { /* 半写入/读错 → 返回已累计部分 */ }
+  }
+}
 
-  _agentParseCache.set(filePath, { sig, parsed });
-  return parsed;
+function parseAgentFile(filePath) {
+  let st;
+  try { st = statSync(filePath); } catch { return null; }
+  const { mtimeMs, size } = st;
+
+  const cached = _agentParseCache.get(filePath);
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    return _accSnapshot(cached.acc);   // 未变 → 直接返回快照，不读盘
+  }
+  if (size > MAX_AGENT_BYTES) return _newAcc();
+
+  // 可续读：缓存存在且文件未被截断/轮转（size 未回退到 offset 之前）→ 从 offset 增量读；否则从头读。
+  let acc, offset, partial;
+  if (cached && cached.acc && size >= cached.offset) {
+    acc = cached.acc; offset = cached.offset; partial = cached.partial || Buffer.alloc(0);
+  } else {
+    acc = _newAcc(); offset = 0; partial = Buffer.alloc(0);
+  }
+
+  let chunk = Buffer.alloc(0);
+  try {
+    if (size > offset) {
+      const fd = openSync(filePath, 'r');
+      try {
+        const len = size - offset;
+        const buf = Buffer.allocUnsafe(len);
+        let read = 0;
+        while (read < len) {
+          const n = readSync(fd, buf, read, len - read, offset + read);
+          if (n <= 0) break;
+          read += n;
+        }
+        chunk = buf.subarray(0, read);
+        offset += read;
+      } finally { closeSync(fd); }
+    }
+  } catch {
+    return _accSnapshot(acc);   // 读失败 → 返回已累计，不更新缓存（下次重试）
+  }
+
+  // 只解码到「最后一个换行符」为止；其后不完整行以字节留到下次（避免切坏多字节字符）。
+  const combined = chunk.length ? Buffer.concat([partial, chunk]) : partial;
+  const lastNL = combined.lastIndexOf(0x0A);
+  let newPartial;
+  if (lastNL === -1) {
+    newPartial = combined;
+  } else {
+    const complete = combined.subarray(0, lastNL).toString('utf-8');
+    for (const line of complete.split('\n')) _applyLine(acc, line);
+    newPartial = combined.subarray(lastNL + 1);
+  }
+
+  _agentParseCache.set(filePath, { mtimeMs, size, offset, partial: newPartial, acc });
+  return _accSnapshot(acc);
 }
 
 function readResumeJournal(runDir) {

@@ -17,6 +17,15 @@ process.env.CCV_PROJECTS_DIR = TMP;
 const { normalizeWorkflowJournal, resolveJournalPath, readNormalizedJournal, resolveWorkflowsDir } =
   await import('../server/lib/workflow-journal.js');
 const { clearCache } = await import('../server/lib/session-transcript-reader.js');
+const { workflowJournalRoutes } = await import('../server/routes/workflow-journal.js');
+
+function fakeRes() {
+  return {
+    statusCode: 0, body: '',
+    writeHead(c) { this.statusCode = c; },
+    end(s) { this.body = s || ''; },
+  };
+}
 
 const RAW_JOURNAL = {
   runId: 'wf_run-1',
@@ -118,5 +127,33 @@ describe('resolveJournalPath / readNormalizedJournal', () => {
     setupSession('-proj-e', 'sid-e');
     const dir = resolveWorkflowsDir('sid-e', 'e');
     assert.ok(dir && dir.endsWith(join('sid-e', 'workflows')));
+  });
+});
+
+describe('GET /api/workflow-journal session 校验', () => {
+  const handler = workflowJournalRoutes[0].handler;
+  const call = (qs) => {
+    const res = fakeRes();
+    handler({}, res, new URL('http://x/api/workflow-journal?' + qs), true, { clients: [] });
+    return res;
+  };
+
+  it('缺 session → 400 missing session', () => {
+    const res = call('runId=wf_x');
+    assert.equal(res.statusCode, 400);
+    assert.match(res.body, /missing session/);
+  });
+
+  it('非法 session（含 ../ 等路径字符）→ 400 invalid session（不进 findTranscriptPath 拼路径）', () => {
+    for (const s of ['../evil', 'a/b', 'a.b', 'sid space']) {
+      const res = call('session=' + encodeURIComponent(s) + '&runId=wf_x');
+      assert.equal(res.statusCode, 400, `session=${s} 应 400`);
+      assert.match(res.body, /invalid session/);
+    }
+  });
+
+  it('合法 session 但无数据 → 404（通过校验，进入定位逻辑）', () => {
+    const res = call('session=sid-nope-xyz&runId=wf_none');
+    assert.equal(res.statusCode, 404);
   });
 });

@@ -7,7 +7,7 @@
  */
 import { describe, it, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -108,6 +108,34 @@ describe('deriveLiveJournal', () => {
     mkdirSync(empty, { recursive: true });
     assert.equal(deriveLiveJournal(empty, 'wf_x'), null);
   });
+
+  it('增量续读：append 新行只读增量并累加 token/工具/lastTool', () => {
+    const rd = join(TMP, ENC, 'sid-inc', 'subagents', 'workflows', 'wf_inc');
+    mkdirSync(rd, { recursive: true });
+    writeFileSync(join(rd, 'agent-X.jsonl'), agentLines({
+      prompt: 'p', model: 'm', tools: ['Read'],
+      usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 5 },
+    }));
+    writeFileSync(join(rd, 'agent-X.meta.json'), JSON.stringify({ agentType: 'Explore' }));
+    writeFileSync(join(rd, 'journal.jsonl'), JSON.stringify({ type: 'started', agentId: 'X' }) + '\n');
+
+    let d = deriveLiveJournal(rd, 'wf_inc');
+    let X = d.agents.find(a => a.agentId === 'X');
+    assert.equal(X.tokens, 35);
+    assert.equal(X.toolCalls, 1);
+
+    // append 一条 assistant 行（新增 6 token + Edit 工具）→ 仅增量读新增字节
+    appendFileSync(join(rd, 'agent-X.jsonl'), JSON.stringify({
+      type: 'assistant', timestamp: '2026-06-07T09:00:10.000Z',
+      message: { role: 'assistant', model: 'm', content: [{ type: 'tool_use', name: 'Edit' }], usage: { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3 } },
+    }) + '\n');
+
+    d = deriveLiveJournal(rd, 'wf_inc');
+    X = d.agents.find(a => a.agentId === 'X');
+    assert.equal(X.tokens, 41);          // 35 + 6
+    assert.equal(X.toolCalls, 2);        // 1 + 1
+    assert.equal(X.lastToolName, 'Edit');
+  });
 });
 
 describe('resolveRunDir 路径穿越防御', () => {
@@ -150,5 +178,29 @@ describe('armWorkflowLiveWatch', () => {
     assert.ok(writes.length > before);
     const last = JSON.parse(writes[writes.length - 1].match(/data: (.*)\n\n$/s)[1]);
     assert.equal(last.data.agents.find(a => a.agentId === 'A').state, 'done');
+  });
+
+  it('权威完成快照落盘后逐帧 watch 自我拆除（safetyTimer 不再空转）', () => {
+    const rd = setup({ doneA: false });
+    __setWatchImplForTests(() => ({ close() {}, on() {} }));
+    const writes = [];
+    const clients = [{ write: (p) => { writes.push(p); return true; } }];
+
+    armWorkflowLiveWatch({ runDir: rd, runId: RUN, sessionId: SID, clients });
+    __triggerLiveScanForTests(rd);
+    assert.ok(writes.length >= 1);  // 首帧
+
+    // 写入权威 <runId>.json → 下次逐帧扫描应检测到并自我拆除
+    writeFileSync(join(sessionDir(), 'workflows', `${RUN}.json`),
+      JSON.stringify({ runId: RUN, status: 'completed', workflowProgress: [] }));
+    __triggerLiveScanForTests(rd);
+    const afterTeardown = writes.length;
+
+    // watch 已拆：再改 + 触发不再广播（且 __trigger 对已移除的 runDir 是 no-op）
+    writeFileSync(join(rd, 'journal.jsonl'),
+      [JSON.stringify({ type: 'started', agentId: 'A' }), JSON.stringify({ type: 'result', agentId: 'A' }),
+       JSON.stringify({ type: 'result', agentId: 'B' })].join('\n') + '\n');
+    __triggerLiveScanForTests(rd);
+    assert.equal(writes.length, afterTeardown);
   });
 });

@@ -5,6 +5,10 @@ import { resolveJournalPath, resolveWorkflowsDir, readNormalizedJournal } from '
 import { resolveRunDir, deriveLiveJournal } from '../lib/workflow-live.js';
 import { armWorkflowWatch, armWorkflowLiveWatch } from '../lib/workflow-watcher.js';
 
+// session 会进入 findTranscriptPath 的路径拼接（<root>/<dir>/<session>.jsonl），
+// 限制为无路径分隔符/`..` 的安全字符集，纵深防御穿越（底层 realpath 容器校验之外的早拒）。
+const SESSION_RE = /^[A-Za-z0-9_-]+$/;
+
 function workflowJournal(req, res, parsedUrl, isLocal, deps) {
   try {
     const session = parsedUrl.searchParams.get('session') || '';
@@ -15,6 +19,11 @@ function workflowJournal(req, res, parsedUrl, isLocal, deps) {
     if (!session) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'missing session' }));
+      return;
+    }
+    if (!SESSION_RE.test(session)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'invalid session' }));
       return;
     }
     if (!runId && !taskId) {
