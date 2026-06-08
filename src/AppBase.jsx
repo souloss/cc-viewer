@@ -122,6 +122,7 @@ class AppBase extends React.Component {
       serverCachedContent: null,
       updateInfo: null,
       pendingUploadPaths: [],
+      uploadingDrop: [], // [{id,name}] — 拖拽上传在途占位(spinner-only),供 ChatView 调谐 uploadingItems 实现「上传未完成时按发送→缓发不漏图」
       contextWindow: null,
       contextBarOptimistic: false, // /clear 后的乐观水位重置，下一次 context_window SSE 自动清除
       contextBarLocked: false, // /clear 触发后强制血条 0K (0%)，到用户发出非 /clear 消息时解锁
@@ -2387,12 +2388,23 @@ class AppBase extends React.Component {
     if (!files.length) return;
     // drop 时刻同步捕获分发上下文（Mobile 需要 mobileTerminalVisible 的当时值，非上传完成后的值）
     const ctx = this._captureDropContext();
+    // 拖拽上传在途占位:每文件登记 {id,name}(spinner-only,不建 objectURL 以免跨组件 revoke 竞态)。
+    // ChatView 据 uploadingDrop 调谐占位 + 缓发,使图不漏发。
+    const items = files.map(file => ({ id: `drop-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: file.name }));
+    this.setState(prev => ({ uploadingDrop: [...(prev.uploadingDrop || []), ...items] }));
     Promise.all(
       files.map(file =>
         uploadFileAndGetPath(file).then(path => ({ name: file.name, path }))
           .catch(err => { message.error(`${file.name}: ${err.message}`); return null; })
       )
-    ).then(results => this._dispatchUploadedFiles(results, ctx));
+    ).then(results => {
+      // 关键顺序:先派发已 resolve 路径(落 pendingUploadPaths→pendingImages),再在同一 .then(同 tick,
+      // React 批处理合并)清掉本批占位 —— 保证 ChatView 的 drain 重发在同一次渲染里读到已就绪的 pendingImages,
+      // 不会出现「占位先清空、路径还没到 → drain 发出纯文字」的拖拽路径丢图竞态。
+      this._dispatchUploadedFiles(results, ctx);
+      const ids = new Set(items.map(i => i.id));
+      this.setState(prev => ({ uploadingDrop: (prev.uploadingDrop || []).filter(d => !ids.has(d.id)) }));
+    });
   };
 
   // 子类可 override（prototype 方法）。默认＝桌面行为：全落入 pendingUploadPaths。

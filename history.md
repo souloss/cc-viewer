@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.306 (2026-06-08)
+
+- fix(chat): 修复图片上传未完成时按 Enter 导致图片漏发(纯文字发出、缩略图孤儿式留在预览)——新增 in-flight 上传守卫:发送时若有上传在途则自动缓发,显示「上传中」占位 + 发送按钮 spinner,待上传 resolve 后自动带图重发,10s 超时只提示重试不静默发纯文字;覆盖粘贴/选图/拖拽与 SDK/PTY 两种模式,守卫逻辑抽纯函数(uploadDeferLogic)并补单测
+
 ## 1.6.305 (2026-06-08)
 
 - fix(usage): 左下角套餐用量 pill 开关改以「响应是否解析出 `anthropic-ratelimit-unified-*`」为准，不再用首请求的 authType 卡死——首请求走 x-api-key/Unknown 时不再永久压住 pill；componentDidUpdate 无条件扫描，footer 渲染条件加 `planUsage` 兜底

@@ -928,6 +928,7 @@ class Mobile extends AppBase {
                     suppressInlineApprovalPanels={true}
                     pendingUploadPaths={this.state.pendingUploadPaths}
                     onUploadPathsConsumed={this.handleUploadPathsConsumed}
+                    uploadingDrop={this.state.uploadingDrop}
                     onMobileOpenFile={this._handleMobileOpenFile}
                     onClearContextOptimistic={this.handleClearContextOptimistic}
                     onUserMessageSent={this.handleUserMessageSent}

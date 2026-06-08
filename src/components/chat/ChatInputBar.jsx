@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { Spin } from 'antd';
 import { uploadFileAndGetPath } from '../terminal/TerminalPanel';
 import { apiUrl } from '../../utils/apiUrl';
 import { isMobile, isPad } from '../../env';
@@ -19,7 +20,7 @@ const SPEECH_LANG_MAP = {
   tr: 'tr-TR', uk: 'uk-UA',
 };
 
-function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, pendingImages, onRemovePendingImage, setContextBarSlot }) {
+function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, pendingImages, onRemovePendingImage, uploadingItems, sendDeferred, onUploadStart, onUploadEnd, setContextBarSlot }) {
   const [plusOpen, setPlusOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [interimText, setInterimText] = useState('');
@@ -196,20 +197,32 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
     onChange?.(e);
   };
 
+  // 统一上传:上传一开始就登记在途占位(onUploadStart),resolve/reject 都结束占位(onUploadEnd)。
+  // 这样「上传未完成时按发送」能被 ChatView 的守卫感知并缓发,图绝不漏发。objectURL 所有权移交 ChatView。
+  const runUpload = async (file) => {
+    const id = `up-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    let previewUrl = null;
+    try { if (file.type?.startsWith('image/')) previewUrl = URL.createObjectURL(file); } catch {}
+    onUploadStart?.(id, file.name, previewUrl);
+    try {
+      const path = await uploadFileAndGetPath(file);
+      onUploadPath?.(path);
+      onUploadEnd?.(id, path);
+    } catch (err) {
+      console.error('[CC Viewer] Upload failed:', err);
+      onUploadEnd?.(id, null);
+    }
+  };
+
   const handlePaste = async (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
-        try {
-          const file = item.getAsFile();
-          if (!file) return;
-          const path = await uploadFileAndGetPath(file);
-          onUploadPath?.(path);
-        } catch (err) {
-          console.error('[CC Viewer] Paste image upload failed:', err);
-        }
+        const file = item.getAsFile();
+        if (!file) return;
+        await runUpload(file);
         return;
       }
     }
@@ -229,7 +242,7 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
     <div className={styles.chatInputBar} ref={rootRef}>
       <div className={styles.chatInputWrapper}>
         <div className={styles.chatTextareaWrap}>
-          {pendingImages && pendingImages.length > 0 && (
+          {((pendingImages && pendingImages.length > 0) || (uploadingItems && uploadingItems.length > 0)) && (
             <div className={styles.imagePreviewStrip}>
               {pendingImages.map((img, i) => {
                 const fileName = img.path.split('/').pop() || img.path;
@@ -269,6 +282,19 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
                   </div>
                 );
               })}
+              {uploadingItems && uploadingItems.map(item => (
+                <div
+                  key={item.id}
+                  className={`${styles.imagePreviewItem} ${styles.imagePreviewUploading}`}
+                  title={t('ui.chatInput.uploading')}
+                  aria-label={t('ui.chatInput.uploading')}
+                >
+                  {item.previewUrl && (
+                    <img src={item.previewUrl} className={styles.imagePreviewThumb} alt="" aria-hidden="true" />
+                  )}
+                  <div className={styles.imagePreviewSpinner}><Spin size="small" /></div>
+                </div>
+              ))}
             </div>
           )}
           <div className={styles.textareaWithGhost}>
@@ -352,12 +378,7 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
                   input.onchange = async (e) => {
                     const file = e.target.files?.[0];
                     if (!file) return;
-                    try {
-                      const path = await uploadFileAndGetPath(file);
-                      onUploadPath(path);
-                    } catch (err) {
-                      console.error('[CC Viewer] Upload failed:', err);
-                    }
+                    await runUpload(file);
                   };
                   input.click();
                 }}>
@@ -413,6 +434,16 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
                   <rect x="1.5" y="1.5" width="9" height="9" rx="1.5" />
                 </svg>
+              </button>
+            ) : sendDeferred ? (
+              <button
+                type="button"
+                className={`${styles.sendBtn} ${styles.sendBtnDisabled}`}
+                disabled
+                title={t('ui.chatInput.uploading')}
+                aria-label={t('ui.chatInput.uploading')}
+              >
+                <Spin size="small" />
               </button>
             ) : (
               <button

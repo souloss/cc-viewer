@@ -342,6 +342,20 @@
   cursor: pointer;
 }
 
+/* 上传在途占位:复用 .imagePreviewItem 尺寸盒,spinner 蒙层盖在乐观底图上,resolve 后被真实缩略图替换 */
+.imagePreviewUploading {
+  cursor: default;
+}
+
+.imagePreviewSpinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
 .imagePreviewRemove {
   position: absolute;
   top: 2px;

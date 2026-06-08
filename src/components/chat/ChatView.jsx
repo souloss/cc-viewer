@@ -38,6 +38,7 @@ import { Virtuoso } from 'react-virtuoso';
 import { StickyBottomController } from '../../utils/stickyBottomController';
 import { AskFlowController, ASK_KIND, LEGACY_ASK_PLACEHOLDER_ID } from './controllers/askFlowController';
 import { UltraplanController } from '../../utils/ultraplanController';
+import { shouldDeferSend, reduceUploading } from './uploadDeferLogic';
 import { ScrollHighlightController } from './controllers/scrollHighlightController';
 import { PermissionController } from './controllers/permissionController';
 import { ToolFileChangeController } from './controllers/toolFileChangeController';
@@ -66,6 +67,9 @@ const STOP_OPTIMISTIC_FALLBACK_MS = 4000;
 // CLI/PTY 停止：focus-in(\x1b[I) 与 ESC(\x1b) 之间的间隔——给 Claude 一次独立 PTY read 先更新聚焦态
 // 再判定 ESC。对齐 _sendUserMessageImmediate 里 input→\r 的既有 50ms 约定（避免引入新魔数）。
 const STOP_FOCUS_IN_ESC_DELAY_MS = 50;
+// 图片上传在途时按发送 → 缓发(defer)等待上传 resolve 后自动带图发送的超时兜底:
+// 到点仍未完成则提示重试,绝不静默发纯文字。
+const UPLOAD_DEFER_TIMEOUT_MS = 10000;
 
 // 免审批下 PTY 子代理 prompt 去重时窗：同一 prompt 在该窗口内被反复检测时只放行一次，
 // 挡住 PTY 慢回显/重绘导致的二次自动放行（_promptSubmitting 仅 500ms，不足以覆盖）。
@@ -244,6 +248,8 @@ class ChatView extends React.Component {
       pendingPtyPlan: null, // { id, prompt } — active plan approval. id 与 ExitPlanMode tool_use id (lastPendingPlanId) 同源，由 componentDidUpdate 从 _currentLastPendingPlanId 派生（cliMode 守卫 + _resolvedPlanIds 短暂窗口守卫）。
       planAutoApproveCountdown: null, // number|null — 「Plan 自动审批」开启时当前 pendingPtyPlan 的剩余秒数；null=未在倒计时。下发给 inline 卡片显示「{n}s 后自动批准 · 取消」。
       pendingImages: [], // [{ path, source }] — images uploaded/pasted, shown as previews in chat input
+      uploadingItems: [], // [{ id, name, previewUrl }] — 上传在途的占位项(路径还没 resolve);预览条只从 pendingImages 渲染缩略图,故占位需独立 state
+      sendDeferred: false, // 仅渲染用:有上传在途时按了发送 → 缓发态(发送按钮 spinner)。权威双发标志是实例字段 _sendDeferred
       agentTeamEnabled: false,
       ultraplanModalOpen: false,
       ultraplanVariant: 'codeExpert',
@@ -723,6 +729,33 @@ class ChatView extends React.Component {
       }
       if (this.props.onUploadPathsConsumed) this.props.onUploadPathsConsumed();
     }
+    // 拖拽上传在途占位:AppBase 在 _onDrop 里维护 uploadingDrop([{id,name,url}]),与 pendingUploadPaths
+    // 同款 prop-diff 调谐进本端 uploadingItems(按 id 增删,移除时撤销 objectURL)。
+    if (this.props.uploadingDrop !== prevProps.uploadingDrop) {
+      const cur = this.props.uploadingDrop || [];
+      const prevDrop = prevProps.uploadingDrop || [];
+      const curIds = new Set(cur.map(d => d.id));
+      for (const d of cur) {
+        if (!this.state.uploadingItems.some(u => u.id === d.id)) {
+          this._applyUploading({ type: 'add', item: { id: d.id, name: d.name, previewUrl: d.url } });
+        }
+      }
+      for (const d of prevDrop) {
+        if (!curIds.has(d.id)) this._applyUploading({ type: 'remove', id: d.id });
+      }
+    }
+    // 缓发 drain:在途上传清零(且确为「从有到无」的下降沿)→ 自动重跑 handleInputSend(此时 pendingImages 已含路径)。
+    // 超时已先把 _sendDeferred 置 false,故超时后才 resolve 不会触发偷偷重发。
+    if (this._sendDeferred
+      && this.state.uploadingItems.length === 0
+      && prevState.uploadingItems.length > 0) {
+      this._sendDeferred = false;
+      clearTimeout(this._sendDeferTimer);
+      this.setState({ sendDeferred: false }, () => {
+        if (this._unmounted) return;
+        this.handleInputSend();
+      });
+    }
     if (prevProps.mainAgentSessions !== this.props.mainAgentSessions) {
       // sessions 引用变化 → 仅在 session 对象真正变化时重置增量状态
       // Plan 1 的 push 模式下，外层数组是浅拷贝（新引用），但 session 对象不变 → 保留增量状态
@@ -823,6 +856,9 @@ class ChatView extends React.Component {
   componentWillUnmount() {
     this._unmounted = true;
     if (this._planAutoTimer) { clearInterval(this._planAutoTimer); this._planAutoTimer = null; }
+    // 缓发超时 timer + 残留上传占位的 objectURL 清扫(卸载中 drain/超时回调已各自 _unmounted 守卫)。
+    clearTimeout(this._sendDeferTimer);
+    for (const u of (this.state.uploadingItems || [])) { if (u.previewUrl) { try { URL.revokeObjectURL(u.previewUrl); } catch {} } }
     // 清理全局审批/通知 — 切 session/关 tab 时让 modal 同步消失，main 进程 badge 归零
     if (this.props.onPendingPermission) this.props.onPendingPermission(null);
     if (this.props.onPendingPlanApproval) this.props.onPendingPlanApproval(null);
@@ -1014,6 +1050,44 @@ class ChatView extends React.Component {
     if (this.state.pendingImages.length > 0) {
       this.setState({ pendingImages: [] });
     }
+  };
+
+  // ===== 上传在途占位 + 缓发(defer) =====
+  // 上传一开始(ChatInputBar 粘贴/选图、AppBase 拖拽)就登记占位,resolve/reject 时撤销;
+  // 撤销 objectURL 的副作用由本方法执行(reduceUploading 只计算需 revoke 的 url 列表)。
+  _applyUploading = (action) => {
+    this.setState(prev => {
+      const { next, revoke } = reduceUploading(prev.uploadingItems, action);
+      if (next === prev.uploadingItems) return null;
+      for (const url of revoke) { try { URL.revokeObjectURL(url); } catch {} }
+      return { uploadingItems: next };
+    });
+  };
+
+  // ChatInputBar 上传开始/结束回调(选图 + 粘贴)。onUploadEnd 的 path 仅用于配对结束,
+  // 真正落 pendingImages 仍走既有 onUploadPath→handleUploadPath(保持广播 image-upload-notify)。
+  handleUploadStart = (id, name, previewUrl) => this._applyUploading({ type: 'add', item: { id, name, previewUrl } });
+  handleUploadEnd = (id) => this._applyUploading({ type: 'remove', id });
+
+  // 缓发:有上传在途时被调用。幂等(挡双 Enter / IME 合成结束双触发);10s 超时兜底只提示、不发纯文字。
+  _deferSend = () => {
+    if (this._sendDeferred) return;
+    this._sendDeferred = true;
+    this.setState({ sendDeferred: true });
+    clearTimeout(this._sendDeferTimer);
+    this._sendDeferTimer = setTimeout(() => {
+      if (this._unmounted || !this._sendDeferred) return;
+      this._sendDeferred = false;
+      this.setState({ sendDeferred: false });
+      message.error(t('ui.chatInput.uploadTimeout'));
+    }, UPLOAD_DEFER_TIMEOUT_MS);
+  };
+
+  _clearDeferSend = () => {
+    if (!this._sendDeferred && !this.state.sendDeferred) return;
+    this._sendDeferred = false;
+    clearTimeout(this._sendDeferTimer);
+    this.setState({ sendDeferred: false });
   };
 
   // logfile 只读模式（非虚拟化平台：桌面/iOS/iPad）自动渐进扩窗——替代手工点击「加载更多」。
@@ -2706,6 +2780,9 @@ class ChatView extends React.Component {
   };
 
   handleInputStop = () => {
+    // Stop 取消「等上传完成的缓发」必须在 ws 早返之前——否则 ws 不 OPEN 时点停止,缓发不会被撤销。
+    // 上传本身(HTTP)继续 resolve 进 pendingImages,无害,用户可稍后再发。
+    this._clearDeferSend();
     if (!this._inputWs || this._inputWs.readyState !== WebSocket.OPEN) return;
     // Stop 应 halt 所有待发：清掉 typed-interrupt 武装的 pending-flush 队列（含 500ms 兜底 timer）。
     // 否则随后到达的 ask-hook-cancelled ack（本端 handleAskCancel 或服务端 interruptTurn 广播）会
@@ -2742,6 +2819,12 @@ class ChatView extends React.Component {
   handleInputSend = () => {
     const textarea = this._inputRef.current;
     if (!textarea) return;
+    // 图片上传仍在途 → 不丢图:进入缓发态,等 uploadingItems 清零后由 componentDidUpdate 自动重跑本方法。
+    // _deferSend 自身幂等(已 deferred 不重复武装),故第二次 Enter 也走这里 return,不会落到立即发送丢图。
+    if (shouldDeferSend({ uploadingCount: this.state.uploadingItems.length })) {
+      this._deferSend();
+      return;
+    }
     const userText = textarea.value.trim();
     // 拼接 pendingImages 路径到消息前面（发送时才注入，支持用户删除后不发）
     const imagePaths = this.state.pendingImages.map(img => `"${img.path.replace(/"/g, '')}"`).join(' ');
@@ -3804,7 +3887,11 @@ class ChatView extends React.Component {
                     const textarea = this._inputRef.current;
                     if (textarea) {
                       textarea.value = '/clear';
-                      this.setState({ inputEmpty: false, pendingImages: [] }, () => this.handleInputSend());
+                      // /clear 不应被「上传缓发」卡住:先撤销缓发 + 清空上传占位(并 revoke url),
+                      // setState 提交后再发 → handleInputSend 守卫看到 uploadingItems 为空,不会 defer。
+                      this._clearDeferSend();
+                      for (const u of this.state.uploadingItems) { if (u.previewUrl) { try { URL.revokeObjectURL(u.previewUrl); } catch {} } }
+                      this.setState({ inputEmpty: false, pendingImages: [], uploadingItems: [] }, () => this.handleInputSend());
                       this.props.onClearContextOptimistic?.();
                     }
                   },
@@ -3813,6 +3900,10 @@ class ChatView extends React.Component {
               isStreaming={uiStreaming}
               pendingImages={this.state.pendingImages}
               onRemovePendingImage={this._removePendingImage}
+              uploadingItems={this.state.uploadingItems}
+              sendDeferred={this.state.sendDeferred}
+              onUploadStart={this.handleUploadStart}
+              onUploadEnd={this.handleUploadEnd}
               setContextBarSlot={this.props.setContextBarSlot}
             />
             </div>

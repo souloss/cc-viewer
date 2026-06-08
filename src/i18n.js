@@ -5991,6 +5991,22 @@ const i18nData = {
     "ar": "إزالة الصورة", "no": "Fjern bilde", "pt-BR": "Remover imagem",
     "th": "ลบรูปภาพ", "tr": "Resmi kaldır", "uk": "Видалити зображення"
   },
+  "ui.chatInput.uploading": {
+    "zh": "上传中…", "en": "Uploading…", "zh-TW": "上傳中…",
+    "ko": "업로드 중…", "ja": "アップロード中…", "de": "Wird hochgeladen…",
+    "es": "Subiendo…", "fr": "Téléversement…", "it": "Caricamento…",
+    "da": "Uploader…", "pl": "Przesyłanie…", "ru": "Загрузка…",
+    "ar": "جارٍ الرفع…", "no": "Laster opp…", "pt-BR": "Enviando…",
+    "th": "กำลังอัปโหลด…", "tr": "Yükleniyor…", "uk": "Завантаження…"
+  },
+  "ui.chatInput.uploadTimeout": {
+    "zh": "图片上传超时，请重试", "en": "Image upload timed out, please retry", "zh-TW": "圖片上傳逾時，請重試",
+    "ko": "이미지 업로드 시간 초과, 다시 시도하세요", "ja": "画像のアップロードがタイムアウトしました。再試行してください", "de": "Bild-Upload zeitüberschreitung, bitte erneut versuchen",
+    "es": "Tiempo de subida de imagen agotado, reinténtalo", "fr": "Délai de téléversement de l'image dépassé, réessayez", "it": "Timeout caricamento immagine, riprova",
+    "da": "Billedupload fik timeout, prøv igen", "pl": "Przekroczono czas przesyłania obrazu, spróbuj ponownie", "ru": "Тайм-аут загрузки изображения, повторите попытку",
+    "ar": "انتهت مهلة رفع الصورة، يرجى إعادة المحاولة", "no": "Tidsavbrudd ved bildeopplasting, prøv igjen", "pt-BR": "Tempo de envio da imagem esgotado, tente novamente",
+    "th": "อัปโหลดรูปภาพหมดเวลา โปรดลองใหม่", "tr": "Resim yükleme zaman aşımına uğradı, lütfen yeniden deneyin", "uk": "Час очікування завантаження зображення вичерпано, повторіть спробу"
+  },
   "ui.chatInput.confirmRemoveImage": {
     "zh": "确定移除此图片？", "en": "Remove this image?", "zh-TW": "確定移除此圖片？",
     "ko": "이 이미지를 제거하시겠습니까?", "ja": "この画像を削除しますか？", "de": "Dieses Bild entfernen?",
