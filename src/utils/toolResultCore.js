@@ -56,6 +56,30 @@ export function extractToolResultImages(toolResult) {
   return out;
 }
 
+// Workflow tool_result 文本固定以此句开头（后台启动即时返回，完成走单独的 task-notification）。
+const WF_LAUNCH_MARKER = 'Workflow launched in background';
+const WF_TASK_ID_RE = /Task ID:\s*([A-Za-z0-9_-]+)/;
+const WF_RUN_ID_RE = /Run ID:\s*(wf_[A-Za-z0-9_-]+)/;
+// Transcript dir / Script file 路径段：…/projects/<cwd 编码>/<sessionId(UUID)>/…
+const WF_SESSION_RE = /\/projects\/[^/\s]+\/([0-9a-fA-F-]{36})\//;
+
+/**
+ * 从 Workflow tool_result 原始文本解析定位线索。命中返回 { runId, taskId, sessionId }，
+ * 否则返回 null。sessionId 为全局唯一 UUID，足以让服务端 /api/workflow-journal 定位 journal
+ * 目录，无需 project hint。
+ *
+ * @param {string} txt - tool_result resultText 原文
+ * @returns {{ runId: string|null, taskId: string|null, sessionId: string|null } | null}
+ */
+export function parseWorkflowFromText(txt) {
+  if (typeof txt !== 'string' || txt.indexOf(WF_LAUNCH_MARKER) === -1) return null;
+  const taskId = (txt.match(WF_TASK_ID_RE) || [])[1] || null;
+  const runId = (txt.match(WF_RUN_ID_RE) || [])[1] || null;
+  const sessionId = (txt.match(WF_SESSION_RE) || [])[1] || null;
+  if (!runId && !taskId) return null;
+  return { runId, taskId, sessionId };
+}
+
 export function buildSingleToolResultCore(block, matchedTool) {
   let toolName = null;
   let toolInput = null;
@@ -68,9 +92,17 @@ export function buildSingleToolResultCore(block, matchedTool) {
   const isError = !!block.is_error;
   const { isPermissionDenied, isInputValidationError, isUltraplan } = classifyToolResultError(resultText, isError);
   const images = extractToolResultImages(block);
-  // Workflow 工具：服务端 enrich-workflow 注入的 { runId, taskId, sessionId, project } 标记，
-  // 供前端定位并拉取 workflow run journal 渲染工作流面板。
-  const workflow = (block._ccvWorkflow && typeof block._ccvWorkflow === 'object') ? block._ccvWorkflow : null;
+  // Workflow 工具：直接从原始 tool_result 文本解析 { runId, taskId, sessionId } 线索定位
+  // 并拉取 workflow run journal 渲染面板。线索原生存在于 wire 文本（"Workflow launched in
+  // background. Task ID: … / Run ID: wf_… / Transcript dir: …/projects/<cwd>/<sessionId>/…"），
+  // 不依赖服务端注入——历史日志（含未经 enrich 的旧日志）同样可识别。
+  // 回退：兼容旧路径已注入的 block._ccvWorkflow（服务端 enrich-workflow，仍用于 live）。
+  // 文本解析命中时补回 _ccvWorkflow 携带的 project（解析线索里没有），用于 journal 定位的精确消歧。
+  const parsedWf = parseWorkflowFromText(resultText);
+  const ccvWf = (block._ccvWorkflow && typeof block._ccvWorkflow === 'object') ? block._ccvWorkflow : null;
+  const workflow = parsedWf
+    ? { ...parsedWf, project: ccvWf?.project || null }
+    : ccvWf;
   return { toolName, toolInput, resultText, isError, isPermissionDenied, isInputValidationError, isUltraplan, images, workflow };
 }
 

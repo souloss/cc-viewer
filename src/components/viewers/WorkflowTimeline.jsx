@@ -37,6 +37,13 @@ export default function WorkflowTimeline({ data, now, compact }) {
         const d = fmtDuration(a.durationMs ?? Math.max(0, now - a.startedAt));
         const barStyle = { left: `${left}%`, width: `${width}%` };
         if (done) barStyle.background = phaseColor(a.phaseIndex);
+        const tailLeft = Math.min(100, left + width);
+        // 菱形参照 AgentTeam 时间轴：◆ 字形 + 投影 + hover 放大；颜色沿用本条着色（按阶段/语义）
+        const barColor = done
+          ? phaseColor(a.phaseIndex)
+          : (a.state === 'failed' || a.state === 'error') ? 'var(--color-error, #f85149)'
+          : a.state === 'queued' ? 'var(--text-gray)'
+          : 'var(--color-primary)';
         return (
           <div key={a.agentId || i} className={styles.ganttRow}>
             <span className={styles.ganttLabel} title={a.label}>{a.label || a.agentType || a.agentId}</span>
@@ -48,6 +55,16 @@ export default function WorkflowTimeline({ data, now, compact }) {
               >
                 <span className={styles.ganttDur}>{d}</span>
               </div>
+              {/* 头部菱形 → prompt 预览；尾部菱形 → result 预览。用原生 title 而非 antd Tooltip：
+                  与 TeamSessionPanel 甘特一致——一条时间轴可渲大量菱形、且 live 模式每秒重渲，
+                  每个 Tooltip wrapper 的 token/style/zIndex hook 开销过大。
+                  注：resultPreview 仅完成快照(journal)有值，live 推导恒为空 → 运行中只显示头部菱形。 */}
+              {a.promptPreview && (
+                <span className={styles.marker} style={{ left: `${left}%`, color: barColor }} title={a.promptPreview}>◆</span>
+              )}
+              {a.resultPreview && (
+                <span className={styles.marker} style={{ left: `${tailLeft}%`, color: barColor }} title={a.resultPreview}>◆</span>
+              )}
             </div>
           </div>
         );

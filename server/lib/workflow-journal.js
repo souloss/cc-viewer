@@ -110,6 +110,8 @@ export function normalizeWorkflowJournal(j) {
           durationMs: typeof a.durationMs === 'number' ? a.durationMs : null,
           lastToolName: typeof a.lastToolName === 'string' ? a.lastToolName : '',
           lastToolSummary: typeof a.lastToolSummary === 'string' ? a.lastToolSummary : '',
+          promptPreview: typeof a.promptPreview === 'string' ? a.promptPreview : '',
+          resultPreview: typeof a.resultPreview === 'string' ? a.resultPreview : '',
           startedAt: typeof a.startedAt === 'number' ? a.startedAt : null,
           lastProgressAt: typeof a.lastProgressAt === 'number' ? a.lastProgressAt : null,
         }))

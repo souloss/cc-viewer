@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Segmented } from 'antd';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { getModelShort, getModelMaxTokens } from '../../utils/helpers';
@@ -26,16 +27,29 @@ function AgentRow({ agent }) {
       <span className={`${styles.stateDot} ${stateClass(agent.state)} ${running ? styles.statePulse : ''}`} title={agent.state}>
         {stateGlyph(agent.state)}
       </span>
-      <span className={styles.agentLabel} title={agent.label}>{agent.label || agent.agentType || agent.agentId}</span>
-      {doing && <span className={styles.agentDoing} title={agent.lastToolSummary || doing}>{doing}</span>}
-      {model && (
-        <span className={styles.agentModel}>{model}{is1M ? ' · 1M' : ''}</span>
-      )}
-      <span className={styles.agentMeta}>
-        <span className={styles.metaTok}>{fmtTokens(agent.tokens)} {t('ui.workflow.tok')}</span>
-        <span className={styles.metaTool}>{agent.toolCalls} {t('ui.workflow.tools')}</span>
-        {dur && <span className={styles.metaDur}>{dur}</span>}
+      <span className={styles.labelCell}>
+        <span className={styles.agentLabel} title={agent.label}>{agent.label || agent.agentType || agent.agentId}</span>
+        {doing && <span className={styles.agentDoing} title={agent.lastToolSummary || doing}>{doing}</span>}
       </span>
+      <span className={styles.agentModel} title={model ? `${model}${is1M ? ' · 1M' : ''}` : ''}>
+        {model ? `${model}${is1M ? ' · 1M' : ''}` : ''}
+      </span>
+      <span className={styles.metaTok}>{fmtTokens(agent.tokens)}</span>
+      <span className={styles.metaTool}>{agent.toolCalls}</span>
+      <span className={styles.metaDur}>{dur || ''}</span>
+    </div>
+  );
+}
+
+function AgentHead({ title }) {
+  return (
+    <div className={`${styles.agentRow} ${styles.agentHead}`}>
+      <span className={styles.stateDot} />
+      <span className={styles.labelCell}>{title}</span>
+      <span className={styles.agentModel}>{t('ui.workflow.colModel')}</span>
+      <span className={styles.metaTok}>{t('ui.workflow.colTokens')}</span>
+      <span className={styles.metaTool}>{t('ui.workflow.tools')}</span>
+      <span className={styles.metaDur}>{t('ui.workflow.colDur')}</span>
     </div>
   );
 }
@@ -84,14 +98,15 @@ function WorkflowList({ data }) {
         </div>
       )}
       <div className={styles.agentsCol}>
-        <div className={styles.colTitle}>{t('ui.workflow.agents', { count: agents.length })}</div>
+        <AgentHead title={t('ui.workflow.agents', { count: agents.length })} />
         {phases.length > 0
           ? phases.map(p => {
               const list = byPhase.get(p.index) || [];
               if (!list.length) return null;
+              const groupTitle = p.detail ? `${p.title}: ${p.detail}` : p.title;
               return (
                 <div key={p.index} className={styles.phaseGroup}>
-                  <div className={styles.phaseGroupTitle}>{p.title}</div>
+                  <div className={styles.phaseGroupTitle} title={groupTitle}>{groupTitle}</div>
                   {list.map((a, i) => <AgentRow key={a.agentId || i} agent={a} />)}
                 </div>
               );
@@ -102,7 +117,7 @@ function WorkflowList({ data }) {
   );
 }
 
-export default function WorkflowPanel({ workflow, resultText, defaultCollapsed }) {
+export default function WorkflowPanel({ workflow, resultText, defaultCollapsed, collapsible = true }) {
   const runId = workflow?.runId || null;
   const taskId = workflow?.taskId || null;
   const session = workflow?.sessionId || null;
@@ -165,7 +180,11 @@ export default function WorkflowPanel({ workflow, resultText, defaultCollapsed }
 
   return (
     <div className={styles.panel}>
-      <div className={styles.header} onClick={() => setCollapsed(c => !c)}>
+      <div
+        className={styles.header}
+        onClick={collapsible ? () => setCollapsed(c => !c) : undefined}
+        style={collapsible ? undefined : { cursor: 'default' }}
+      >
         <div className={styles.headerMain}>
           <span className={styles.wfName}>{title}</span>
           {data?.summary && <span className={styles.wfSummary}>{data.summary}</span>}
@@ -181,19 +200,20 @@ export default function WorkflowPanel({ workflow, resultText, defaultCollapsed }
           )}
           {data && !collapsed && (
             <span className={styles.viewToggle} onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className={`${styles.viewBtn} ${view === 'list' ? styles.viewBtnActive : ''}`}
-                onClick={() => setView('list')}
-              >{t('ui.workflow.viewList')}</button>
-              <button
-                type="button"
-                className={`${styles.viewBtn} ${view === 'timeline' ? styles.viewBtnActive : ''}`}
-                onClick={() => { setNow(Date.now()); setView('timeline'); }}
-              >{t('ui.workflow.viewTimeline')}</button>
+              <Segmented
+                size="small"
+                value={view}
+                onChange={(val) => { if (val === 'timeline') setNow(Date.now()); setView(val); }}
+                options={[
+                  { label: t('ui.workflow.viewList'), value: 'list' },
+                  { label: t('ui.workflow.viewTimeline'), value: 'timeline' },
+                ]}
+              />
             </span>
           )}
-          <span className={styles.toggle}>{collapsed ? t('ui.expand') : t('ui.collapse')}</span>
+          {collapsible && (
+            <span className={styles.toggle}>{collapsed ? t('ui.expand') : t('ui.collapse')}</span>
+          )}
         </div>
       </div>
       {!collapsed && (

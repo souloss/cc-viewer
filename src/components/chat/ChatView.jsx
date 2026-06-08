@@ -24,6 +24,7 @@ import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, ge
 import { refreshCachedItemProp } from '../../utils/refreshCachedItemProp';
 import { resolveBubbleProducerTs } from '../../utils/sessionManager';
 import { TeamButton, TeamModal } from '../dashboard/TeamSessionPanel';
+import { WorkflowButton, WorkflowRunsModal } from '../dashboard/WorkflowRunsPanel';
 import SnapLineOverlay from '../common/SnapLineOverlay';
 import RoleFilterBar from './RoleFilterBar';
 import ChatInputBar from './ChatInputBar';
@@ -226,6 +227,7 @@ class ChatView extends React.Component {
       roleFilterOpen: false,
       roleFilterSelected: new Set(),
       teamModalSession: null,
+      workflowModalRun: null,
       mdLightboxSrc: null,
       streamingFading: false,
       stopOptimistic: false, // 点「停止」后乐观置 true：按钮/指示器立即切非运行态，真实 isStreaming 翻 false 或兜底超时后清除
@@ -281,6 +283,8 @@ class ChatView extends React.Component {
     this._mobileExtraItems = 0;
     this._mobileSliceOffset = 0;
     this._totalItemCount = 0;
+    this._autoFillRafId = null; // logfile 只读模式自动渐进扩窗的 rAF 句柄（_maybeScheduleLocalLogAutoFill）
+
     // PTY plan modal 触发：用 lastPendingPlanId（ExitPlanMode tool_use id）作权威信号源（与 inline 卡片同源）。
     // _currentLastPendingPlanId 由 buildAllItems 末尾镜像；componentDidUpdate 派生 pendingPtyPlan。
     // _resolvedPlanIds 守卫用户已操作但 JSONL 还没回写 planApprovalMap 的短暂窗口（防 modal 闪回）。
@@ -456,6 +460,7 @@ class ChatView extends React.Component {
       nextProps.expandThinking !== this.props.expandThinking ||
       nextProps.showFullToolContent !== this.props.showFullToolContent ||
       nextProps.onlyCurrentSession !== this.props.onlyCurrentSession ||
+      nextProps.isLocalLog !== this.props.isLocalLog ||
       nextProps.scrollToTimestamp !== this.props.scrollToTimestamp ||
       nextProps.cliMode !== this.props.cliMode ||
       nextProps.terminalVisible !== this.props.terminalVisible ||
@@ -810,6 +815,9 @@ class ChatView extends React.Component {
     }
     // 不再在此建立 ws — Provider 通过 props.open 派生(cliMode || terminalVisible)集中管理
     if (!useVirtuoso) this._stickyController.bind(this.containerRef.current);
+    // logfile 只读模式：非虚拟化平台自动渐进扩窗（替代手工「加载更多」），每步 setState 后
+    // 经本钩子接力调度下一步，直到 _mobileSliceOffset 归零。
+    this._maybeScheduleLocalLogAutoFill();
   }
 
   componentWillUnmount() {
@@ -841,6 +849,7 @@ class ChatView extends React.Component {
       }
     } catch {}
     if (this._queueTimer) clearTimeout(this._queueTimer);
+    if (this._autoFillRafId) { cancelAnimationFrame(this._autoFillRafId); this._autoFillRafId = null; }
     if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
     this._toolFileMonitor.dispose();
     if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
@@ -1006,6 +1015,19 @@ class ChatView extends React.Component {
       this.setState({ pendingImages: [] });
     }
   };
+
+  // logfile 只读模式（非虚拟化平台：桌面/iOS/iPad）自动渐进扩窗——替代手工点击「加载更多」。
+  // 每个 rAF 帧执行一步 handleLoadMore（帧间让出主线程给绘制/输入，避免单次全量挂 DOM 的长任务卡死，
+  // 见 DESKTOP_ITEM_LIMIT 注释），沿用其滚动补偿保持视口稳定；componentDidUpdate 接力续步直到全量渲染完成。
+  _maybeScheduleLocalLogAutoFill() {
+    if (!this.props.isLocalLog || useVirtuoso) return;
+    if (this._mobileSliceOffset <= 0 || this._autoFillRafId || this._unmounted) return;
+    this._autoFillRafId = requestAnimationFrame(() => {
+      this._autoFillRafId = null;
+      if (this._unmounted || this._mobileSliceOffset <= 0) return;
+      this.handleLoadMore();
+    });
+  }
 
   handleLoadMore = () => {
     this._mobileExtraItems += MOBILE_LOAD_MORE_STEP;
@@ -1932,6 +1954,13 @@ class ChatView extends React.Component {
   // （桌面端启用裁剪以避免长任务全量渲染卡死，见 DESKTOP_ITEM_LIMIT 注释）。
   _applyMobileSlice(allItems) {
     this._totalItemCount = allItems.length;
+    // logfile 只读模式：虚拟化平台（Android，渲染 O(1)）直接一次性全量渲染；
+    // 桌面/iOS/iPad 不走虚拟化，单次全量挂 DOM 会重现 DESKTOP_ITEM_LIMIT 注释里点名的长任务卡死，
+    // 故保留 ITEM_LIMIT 窗口裁剪，由 _maybeScheduleLocalLogAutoFill 逐帧自动扩窗至全量（无需手工点击）。
+    if (this.props.isLocalLog && useVirtuoso) {
+      this._mobileSliceOffset = 0;
+      return allItems;
+    }
     const limit = ITEM_LIMIT + this._mobileExtraItems;
     if (allItems.length <= limit) {
       this._mobileSliceOffset = 0;
@@ -3167,6 +3196,7 @@ class ChatView extends React.Component {
           </button>
         </Popover>
         <TeamButton requests={this.props.requests} onOpenSession={(session) => this.setState({ teamModalSession: session })} navBtnClass={styles.navBtn} />
+        <WorkflowButton requests={this.props.requests} onOpenRun={(run) => this.setState({ workflowModalRun: run })} navBtnClass={styles.navBtn} />
         <Popover
           content={this._buildUserPromptNav()}
           trigger="hover"
@@ -3447,9 +3477,17 @@ class ChatView extends React.Component {
 
     const loadMoreBtn = this._mobileSliceOffset > 0 ? (
       <div className={styles.loadMoreWrap}>
-        <button className={styles.loadMoreBtn} onClick={this.handleLoadMore}>
-          {t('ui.loadMoreHistory', { count: this._mobileSliceOffset })}
-        </button>
+        {this.props.isLocalLog ? (
+          // logfile 只读模式自动渐进扩窗中：展示加载态而非可点按钮（_maybeScheduleLocalLogAutoFill 驱动）
+          <div className={`${styles.loadMoreBtn} ${styles.loadMoreBtnLoading}`}>
+            <span className={styles.loadMoreSpinner} />
+            {t('ui.loadingMoreHistory')}
+          </div>
+        ) : (
+          <button className={styles.loadMoreBtn} onClick={this.handleLoadMore}>
+            {t('ui.loadMoreHistory', { count: this._mobileSliceOffset })}
+          </button>
+        )}
       </div>
     ) : null;
 
@@ -3564,6 +3602,7 @@ class ChatView extends React.Component {
           </div>
         </div>
         <TeamModal session={this.state.teamModalSession} requests={this.props.requests} mainAgentSessions={this.props.mainAgentSessions} collapseToolResults={this.props.collapseToolResults} expandThinking={this.props.expandThinking} showFullToolContent={this.props.showFullToolContent} userProfile={this.props.userProfile} onViewRequest={this.props.onViewRequest} isHistoryLog={this._getIsHistoryLog()} lang={this.props.lang} onClose={() => this.setState({ teamModalSession: null })} />
+        <WorkflowRunsModal run={this.state.workflowModalRun} onClose={() => this.setState({ workflowModalRun: null })} />
       </>);
     }
 
@@ -3849,6 +3888,7 @@ class ChatView extends React.Component {
         </div>
       </div>
       <TeamModal session={this.state.teamModalSession} requests={this.props.requests} mainAgentSessions={this.props.mainAgentSessions} collapseToolResults={this.props.collapseToolResults} expandThinking={this.props.expandThinking} showFullToolContent={this.props.showFullToolContent} userProfile={this.props.userProfile} onViewRequest={this.props.onViewRequest} isHistoryLog={this._getIsHistoryLog()} lang={this.props.lang} onClose={() => this.setState({ teamModalSession: null })} />
+      <WorkflowRunsModal run={this.state.workflowModalRun} onClose={() => this.setState({ workflowModalRun: null })} />
       <PresetModal open={this.state.mobilePresetModalVisible} onClose={() => this.setState({ mobilePresetModalVisible: false })} items={this.state.presetItems} onItemsChange={(items) => this.setState({ presetItems: items })} onSavePresets={(payload) => { if (this.props.onUpdatePreferences) this.props.onUpdatePreferences(payload); }} />
     </>);
   }

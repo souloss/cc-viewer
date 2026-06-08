@@ -2004,18 +2004,21 @@ class AppHeader extends React.Component {
                 />
               </div>
             )}
-            <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>
-                {t('ui.onlyCurrentSession')}
-                <Tooltip title={t('ui.onlyCurrentSession.help')}>
-                  <QuestionCircleOutlined className={styles.settingsHelpIcon} />
-                </Tooltip>
-              </span>
-              <Switch
-                checked={!!onlyCurrentSession}
-                onChange={(checked) => this.context.updatePreferences({ onlyCurrentSession: checked })}
-              />
-            </div>
+            {/* logfile 只读模式强制全量展示所有 session，隐藏该开关 */}
+            {!this.props.isLocalLog && (
+              <div className={styles.settingsItem}>
+                <span className={styles.settingsLabel}>
+                  {t('ui.onlyCurrentSession')}
+                  <Tooltip title={t('ui.onlyCurrentSession.help')}>
+                    <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                  </Tooltip>
+                </span>
+                <Switch
+                  checked={!!onlyCurrentSession}
+                  onChange={(checked) => this.context.updatePreferences({ onlyCurrentSession: checked })}
+                />
+              </div>
+            )}
           </div>
           <div className={styles.settingsGroupBox}>
             <div className={styles.settingsGroupTitle}>{t('ui.logSettings')}</div>

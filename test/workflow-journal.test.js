@@ -49,7 +49,7 @@ const RAW_JOURNAL = {
   ],
   workflowProgress: [
     { type: 'workflow_phase', index: 1, title: 'Scan' },
-    { type: 'workflow_agent', index: 1, label: 'scan:a', phaseIndex: 1, phaseTitle: 'Scan', agentId: 'a1', agentType: 'Explore', model: 'claude-haiku-4-5', state: 'done', tokens: 100, toolCalls: 3, durationMs: 500, lastToolName: 'Grep', startedAt: 1, lastProgressAt: 2 },
+    { type: 'workflow_agent', index: 1, label: 'scan:a', phaseIndex: 1, phaseTitle: 'Scan', agentId: 'a1', agentType: 'Explore', model: 'claude-haiku-4-5', state: 'done', tokens: 100, toolCalls: 3, durationMs: 500, lastToolName: 'Grep', startedAt: 1, lastProgressAt: 2, promptPreview: 'find the bug', resultPreview: 'fixed in foo.js' },
     { type: 'workflow_agent', index: 2, label: 'fix:b', phaseIndex: 2, phaseTitle: 'Fix', agentId: 'a2', agentType: 'general', model: 'claude-opus-4-8', state: 'running', tokens: 200, toolCalls: 4 },
   ],
 };
@@ -72,7 +72,13 @@ after(() => {
 
 beforeEach(() => clearCache());
 
+// 单进程多文件跑(mocha)时各测试文件共享 process.env。根级 beforeEach 是进程全局的(会在姊妹
+// 文件的用例前也触发，后注册者胜出 → 互相顶替 CCV_PROJECTS_DIR 致 404)，故改用 describe 作用域
+// 的 setEnv()：顶层 describe 顺序执行，作用域 beforeEach 只在本文件用例前跑。server 即时读 env。
+const setEnv = () => beforeEach(() => { process.env.CCV_PROJECTS_DIR = TMP; });
+
 describe('normalizeWorkflowJournal', () => {
+  setEnv();
   it('映射顶层 + phases + agents（仅 workflow_agent）', () => {
     const n = normalizeWorkflowJournal(RAW_JOURNAL);
     assert.equal(n.workflowName, 'demo-flow');
@@ -85,6 +91,11 @@ describe('normalizeWorkflowJournal', () => {
     assert.equal(n.agents[0].state, 'done');
     assert.equal(n.agents[1].state, 'running');
     assert.equal(n.agents[1].durationMs, null);
+    // 头/尾菱形 hover 预览：原样透传；缺字段 → 空串
+    assert.equal(n.agents[0].promptPreview, 'find the bug');
+    assert.equal(n.agents[0].resultPreview, 'fixed in foo.js');
+    assert.equal(n.agents[1].promptPreview, '');
+    assert.equal(n.agents[1].resultPreview, '');
     assert.equal(n.live, false);   // 权威完成快照显式标记，供前端防 live 帧回退
   });
 
@@ -102,6 +113,7 @@ describe('normalizeWorkflowJournal', () => {
 });
 
 describe('resolveJournalPath / readNormalizedJournal', () => {
+  setEnv();
   it('按 runId 定位并读取', () => {
     const wfDir = setupSession('-proj-a', 'sid-a');
     writeFileSync(join(wfDir, 'wf_run-1.json'), JSON.stringify(RAW_JOURNAL));
@@ -137,6 +149,7 @@ describe('resolveJournalPath / readNormalizedJournal', () => {
 });
 
 describe('GET /api/workflow-journal session 校验', () => {
+  setEnv();
   const handler = workflowJournalRoutes[0].handler;
   const call = (qs) => {
     const res = fakeRes();
@@ -165,6 +178,7 @@ describe('GET /api/workflow-journal session 校验', () => {
 });
 
 describe('GET /api/workflow-journal 数据路径', () => {
+  setEnv();
   const handler = workflowJournalRoutes[0].handler;
   const call = (qs) => {
     const res = fakeRes();

@@ -551,6 +551,21 @@ html, body, #root {
   border-bottom-color: var(--border-primary);
 }
 
+/* antd Segmented：选中段改用主色(蓝)实填 + 白字，替代默认浅色滑块(对比太弱)。
+   全局生效——所有用到 Segmented 的地方统一。滑块动画元素 .ant-segmented-thumb 同步着色，
+   切换过渡动画保留。antd v5 选择器用 :where()(0 特异度)，此处普通类即可覆盖，无需 !important。 */
+.ant-segmented .ant-segmented-item-selected,
+.ant-segmented .ant-segmented-thumb {
+  background-color: var(--color-primary);
+}
+.ant-segmented .ant-segmented-item-selected,
+.ant-segmented .ant-segmented-item-selected:hover,
+.ant-segmented .ant-segmented-item-selected .ant-segmented-item-label,
+.ant-segmented .ant-segmented-item-selected:hover .ant-segmented-item-label,
+.ant-segmented .ant-segmented-item-selected .ant-segmented-item-icon {
+  color: #fff;  /* 蓝底固定白字（两套主题一致）；勿用 --text-white，浅色主题下它是深色 */
+}
+
 /* highlight.js light theme overrides */
 [data-theme="light"] .hljs {
   background: var(--bg-code);

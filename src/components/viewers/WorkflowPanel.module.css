@@ -122,6 +122,9 @@
   font-size: 11px;
   color: var(--text-gray);
   padding: 4px 12px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .agentRow {
@@ -131,6 +134,32 @@
   padding: 3px 12px;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 阶段分组内的 agent 行相对组标题缩进 ~10px，体现层级（表头/无阶段扁平列表不缩进） */
+.phaseGroup .agentRow {
+  padding-left: 22px;
+}
+
+/* 列标题行：与数据行同列宽，整列对齐 */
+.agentHead {
+  color: var(--text-gray);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--border-secondary);
+  padding-top: 6px;
+  padding-bottom: 5px;
+  margin-bottom: 2px;
+}
+
+.labelCell {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
 }
 
 .stateDot {
@@ -174,6 +203,8 @@
   color: var(--color-primary);
 }
 
+.agentHead .labelCell { color: var(--text-gray); }
+
 .agentDoing {
   flex: 0 0 auto;
   max-width: 160px;
@@ -188,52 +219,31 @@
 }
 
 .agentModel {
-  flex: 0 0 auto;
+  flex: 0 0 104px;
   color: var(--text-gray);
   font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* 视图切换（列表 / 时间轴）—— 分段控件：统一轨道，选中段填实色反白 */
+/* 视图切换（列表 / 时间轴）—— 用 antd Segmented，自带滑块切换动画 */
 .viewToggle {
   flex: 0 0 auto;
   display: inline-flex;
-  gap: 0;
-  padding: 2px;
-  background: var(--bg-sub-avatar, rgba(127, 127, 127, 0.12));
-  border-radius: 6px;
 }
 
-.viewBtn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-  padding: 1px 10px;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: color 0.12s ease, background 0.12s ease;
-}
-
-.viewBtn:hover { color: var(--color-primary); }
-
-.viewBtnActive,
-.viewBtnActive:hover {
-  color: rgba(255, 255, 255, 0.96);
-  background: var(--color-primary);
-}
-
-.agentMeta {
+/* 数值列：固定宽 + 右对齐 + 等宽数字，逐列对齐成表格 */
+.metaTok, .metaTool, .metaDur {
   flex: 0 0 auto;
-  display: flex;
-  gap: 10px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+  text-align: right;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
-.metaTok, .metaTool { color: var(--text-secondary); }
-.metaDur { color: var(--text-gray); }
+.metaTok { flex-basis: 64px; color: var(--text-secondary); }
+.metaTool { flex-basis: 48px; color: var(--text-secondary); }
+.metaDur { flex-basis: 56px; color: var(--text-gray); }
 
 .fallback {
   margin: 0;
@@ -249,7 +259,7 @@
     border-right: none;
     border-bottom: 1px solid var(--border-secondary);
   }
-  .agentMeta { gap: 8px; }
+  .agentRow { gap: 6px; }
   .agentModel { display: none; }
   .agentDoing { display: none; }
 }

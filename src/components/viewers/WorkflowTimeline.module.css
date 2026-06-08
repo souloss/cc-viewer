@@ -45,10 +45,28 @@
 .ganttDur {
   font-size: 10px;
   color: rgba(255, 255, 255, 0.95);
-  padding: 0 4px;
+  padding: 0 4px 0 11px;  /* 左侧留白避开头部菱形遮挡 */
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+
+/* 头/尾菱形标记：参照 AgentTeam 时间轴的 ◆ 字形 + 投影 + hover 放大。
+   定位在 track 端点上（track 无 overflow:hidden，端点处不被裁切）；颜色由 JS 内联沿用本条着色。 */
+.marker {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+  filter: drop-shadow(0 0 2px var(--overlay-dark-strong));
+  transition: transform 0.15s;
+}
+
+.marker:hover { transform: translate(-50%, -50%) scale(1.4); }
+
+.compact .marker { font-size: 10px; }
 
 /* 完成条由 JS 内联 background（phaseColor）着色；以下为非完成态语义色 */
 .barFailed { background: var(--color-error, #f85149); }

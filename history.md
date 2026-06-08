@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.6.304 (2026-06-08)
 
+- feat(workflow): 时间轴横条头/尾各加一个菱形——hover 显示该 agent 的 prompt / result 预览（原生 title，菱形 ◆ 字形 + 投影，参照 Agent Team 甘特）；server 归一化与 live 推导透传 promptPreview/resultPreview
+- refine(workflow): agent 列表表格化——模型 / Tokens / 工具 / 耗时 定宽右对齐成列 + 顶部表头（「代理 (N)」占首列标题）+ 阶段行追加 `阶段:描述`，组内 agent 行缩进
+- refine(workflow): 「列表 / 时间轴」切换改用 antd Segmented（自带滑块切换动画）；全局调整 antd Segmented 选中态为主色蓝填充 + 白字（替换默认浅色滑块）
+- refine(workflow): 左侧弹窗打开的工作流面板去掉展开/收起（WorkflowPanel 新增 collapsible 开关，内联面板不变）
+- fix(workflow): 文本解析命中时补回 _ccvWorkflow 携带的 project（用于 journal 定位消歧）；历史 run 无 live 快照时列表状态字形改用完成态，不再误显「运行中」
+- test: workflow-journal/live 单测改用 describe 作用域 setEnv，修复单进程多文件跑时 CCV_PROJECTS_DIR 互相顶替致路由 404
+- feat(workflow): 左侧工具栏新增「UltraCode / Workflow」专区（对齐 Agent Team）——导航图标 → popover 列出本会话所有 workflow run（从 requests 解析、taskId 去重、最新在前）→ 点击弹大 Modal 复用 WorkflowPanel 展示完整过程（阶段/agent/甘特）；历史日志模式同样可用，对话内联面板保持不变
+- fix(ui): logfile 历史日志只读模式强制忽略「仅展示当前会话」（全 session 完整展示，隐藏该开关）+ 一次性全量加载（去掉移动端 limit=300 与「加载更早」分页），渲染层自动渐进扩窗至全量，无需手工点击「加载更多」
 - feat(render): macOS 桌面终端恢复 WebGL 渲染器（Chromium 系，Retina 下滚动/大流量更流畅）——以 longtask 守卫可用为准入能力门，Safari 无该 API 自动留 DOM；沿用 longtask 降级 + 7 天 sticky + onContextLoss 兜底；`_disposeWebgl` 补清恢复 timer 防降级/重试交错；mac 120s 定时刷新补 atlas 清理（DOM 下 no-op）
 - feat(workflow): 聊天内联渲染 Workflow 工作流面板——phases 左列 + 按阶段分组的 agent 行（label / model / 状态 / token / 工具数 / 耗时），完成态读 workflow run journal，运行中从 `subagents/workflows/<runId>/` 实时推导逐帧动画，目录变化经 SSE `workflow_update` 实时推送，完成后权威快照接管
 - feat(workflow): 「列表 / 时间轴」切换——时间轴为甘特图（横条按 startedAt 错峰、宽度=耗时、运行中延伸到 now 每秒走），完成条按阶段着色、失败/运行中/排队走语义色；甘特抽成共享组件 WorkflowTimeline（含 compact 版）
@@ -9,6 +17,7 @@
 - feat(workflow): 新增只读路由 `GET /api/workflow-journal`（按 runId/taskId 定位、归一化面板模型、路径穿越防御、惰性 arm watch）；出口为 Workflow tool_result 注入 `_ccvWorkflow={runId,taskId,sessionId,project}`
 - fix(workflow): Workflow 加入完整渲染白名单，简化工具模式下面板正常渲染
 - fix(workflow): WorkflowPanel 补 `.metaTok`/`.metaTool` 样式定义；路由补 200 快照 / live 回退 / runId 优先用例
+- fix(workflow): 工作流面板定位线索改由前端直接解析 tool_result 原始文本（`Task ID` / `Run ID` / `Transcript dir` 路径段的 sessionId），不再依赖服务端 `_ccvWorkflow` 注入——历史日志（含未 enrich 的旧日志）也能渲染面板；`_ccvWorkflow` 保留为回退兼容 live
 - test: 新增 server 单测覆盖 lookupToolUseResult / enrich-workflow / workflow-journal / workflow-watcher / workflow-live / workflowStore
 
 ## 1.6.303 (2026-06-07)

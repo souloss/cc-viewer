@@ -901,7 +901,8 @@ class Mobile extends AppBase {
                     collapseToolResults={prefs.collapseToolResults}
                     expandThinking={prefs.expandThinking}
                     showFullToolContent={prefs.showFullToolContent}
-                    onlyCurrentSession={prefs.onlyCurrentSession}
+                    onlyCurrentSession={mobileIsLocalLog ? false : prefs.onlyCurrentSession}
+                    isLocalLog={mobileIsLocalLog}
                     showThinkingSummaries={prefs.showThinkingSummaries}
                     onViewRequest={null}
                     scrollToTimestamp={null}
@@ -1227,18 +1228,21 @@ class Mobile extends AppBase {
                     />
                   </div>
                 )}
-                <div className={styles.mobileSettingsRow}>
-                  <span className={styles.mobileSettingsLabel}>
-                    {t('ui.onlyCurrentSession')}
-                    <Tooltip title={t('ui.onlyCurrentSession.help')} trigger="click">
-                      <QuestionCircleOutlined className={styles.mobileSettingsHelpIcon} />
-                    </Tooltip>
-                  </span>
-                  <Switch
-                    checked={prefs.onlyCurrentSession}
-                    onChange={this.handleOnlyCurrentSessionChange}
-                  />
-                </div>
+                {/* logfile 只读模式强制全量展示所有 session，隐藏该开关 */}
+                {!mobileIsLocalLog && (
+                  <div className={styles.mobileSettingsRow}>
+                    <span className={styles.mobileSettingsLabel}>
+                      {t('ui.onlyCurrentSession')}
+                      <Tooltip title={t('ui.onlyCurrentSession.help')} trigger="click">
+                        <QuestionCircleOutlined className={styles.mobileSettingsHelpIcon} />
+                      </Tooltip>
+                    </span>
+                    <Switch
+                      checked={prefs.onlyCurrentSession}
+                      onChange={this.handleOnlyCurrentSessionChange}
+                    />
+                  </div>
+                )}
               </div>
               <div className={styles.mobileSettingsGroup}>
                 <div className={styles.mobileSettingsSectionTitle}>{t('ui.logSettings')}</div>

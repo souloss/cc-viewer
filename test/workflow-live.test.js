@@ -5,7 +5,7 @@
  * 验证 deriveLiveJournal 推导（token/工具/running·done/workflowName/status）与
  * armWorkflowLiveWatch 经 SSE 广播 workflow_update + 去重。
  */
-import { describe, it, after, afterEach } from 'node:test';
+import { describe, it, after, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -72,7 +72,13 @@ after(() => {
 
 afterEach(() => unwatchAllWorkflows());
 
+// 单进程多文件跑(mocha)时各测试文件共享 process.env。根级 beforeEach 是进程全局的(会在姊妹
+// 文件用例前也触发 → 互相顶替 CCV_PROJECTS_DIR)，故改用 describe 作用域的 setEnv()：顶层
+// describe 顺序执行，作用域 beforeEach 只在本文件用例前跑。server 在调用时即时读 env。
+const setEnv = () => beforeEach(() => { process.env.CCV_PROJECTS_DIR = TMP; });
+
 describe('deriveLiveJournal', () => {
+  setEnv();
   it('推导 token(in+out+cc，排除 cache_read)/工具/状态/workflowName', () => {
     const rd = setup({ doneA: true });
     const d = deriveLiveJournal(rd, RUN);
@@ -90,6 +96,8 @@ describe('deriveLiveJournal', () => {
     assert.equal(A.toolCalls, 2);
     assert.equal(A.agentType, 'Explore');
     assert.equal(A.label, 'Read server/foo.js and summarize its purpose');
+    assert.equal(A.promptPreview, 'Read server/foo.js and summarize its purpose');  // 头部菱形 hover 预览
+    assert.equal(A.resultPreview, '');  // 实时态尾部预览待完成快照补
     assert.equal(d.totalTokens, 35 + 300);
     assert.equal(d.totalToolCalls, 3);
   });
@@ -139,6 +147,7 @@ describe('deriveLiveJournal', () => {
 });
 
 describe('resolveRunDir 路径穿越防御', () => {
+  setEnv();
   it('合法 wf_ runId 拼出 run 目录；穿越/非法 runId 一律 null', () => {
     const SID2 = 'sid-guard';
     writeFileSync(join(TMP, ENC, `${SID2}.jsonl`), '{}\n');  // 让 findTranscriptPath 命中
@@ -153,6 +162,7 @@ describe('resolveRunDir 路径穿越防御', () => {
 });
 
 describe('armWorkflowLiveWatch', () => {
+  setEnv();
   it('arm 即广播一帧；变更后再广播；无变化不广播', () => {
     const rd = setup({ doneA: false });
     __setWatchImplForTests(() => ({ close() {}, on() {} }));

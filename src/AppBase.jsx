@@ -585,7 +585,8 @@ class AppBase extends React.Component {
       fileLoading: false,
       fileLoadingCount: 0,
       serverCachedContent: null,
-      hasMoreHistory: !!this._hasMoreHistory && !!this._oldestTs,
+      // logfile 只读模式恒为全量，无「加载更早」分页
+      hasMoreHistory: this._isLocalLog ? false : (!!this._hasMoreHistory && !!this._oldestTs),
     });
   }
 
@@ -973,9 +974,8 @@ class AppBase extends React.Component {
     this._loadingMore = true;
     this.setState({ loadingMore: true });
     try {
-      const pageUrl = this._isLocalLog
-        ? `/api/entries/page?file=${encodeURIComponent(this._localLogFile)}&before=${encodeURIComponent(this._oldestTs)}&limit=100`
-        : `/api/entries/page?before=${encodeURIComponent(this._oldestTs)}&limit=100`;
+      // logfile 只读模式已全量加载（hasMoreHistory 恒 false），不会触发本函数；此分页逻辑仅供 live 模式使用。
+      const pageUrl = `/api/entries/page?before=${encodeURIComponent(this._oldestTs)}&limit=100`;
       const res = await fetch(apiUrl(pageUrl));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -1443,15 +1443,18 @@ class AppBase extends React.Component {
     // 与 /events (CLI 模式) 完全隔离，不会触发 terminal/workspace 等 CLI 行为
     this._isLocalLog = true;
     this._localLogFile = file;
+    // 全量加载，无分页：防御上一次状态残留
+    this._hasMoreHistory = false;
+    this._oldestTs = null;
     this.setState({ fileLoading: true, fileLoadingCount: 0, serverCachedContent: null });
 
     // 关闭上一次的加载连接（防止快速切换时资源泄漏）
     if (this._localLogES) { this._localLogES.close(); this._localLogES = null; }
 
     const entries = [];
-    // 移动端尾部加载：只请求最新 300 条，其余按需分页
-    const limitParam = isMobile ? '&limit=300' : '';
-    const es = new EventSource(apiUrl(`/api/local-log?file=${encodeURIComponent(file)}${limitParam}`));
+    // logfile 只读模式一次性全量加载（含移动端）：走服务端全量流式分支，
+    // 由分帧管线 _runLocalLogIngest 消化大文件，避免「加载更早」手工分页。
+    const es = new EventSource(apiUrl(`/api/local-log?file=${encodeURIComponent(file)}`));
     this._localLogES = es;
 
     es.addEventListener('load_start', (event) => {

@@ -23,6 +23,7 @@ import { _RUN_ID_RE as RUN_ID_RE } from './workflow-journal.js';
 
 const MAX_AGENT_BYTES = 64 * 1024 * 1024;
 const LABEL_MAX = 80;
+const PROMPT_PREVIEW_MAX = 600;  // 头部菱形 hover 预览的 prompt 截断长度（与 journal promptPreview 量级一致）
 
 function projectsDir() {
   return process.env.CCV_PROJECTS_DIR || join(getClaudeConfigDir(), 'projects');
@@ -221,6 +222,11 @@ export function deriveLiveJournal(runDir, runId) {
       durationMs: (parsed.startedAt && parsed.lastProgressAt) ? (parsed.lastProgressAt - parsed.startedAt) : null,
       lastToolName: parsed.lastToolName,
       lastToolSummary: '',
+      // 头部菱形 hover 用：实时态取首条 user prompt 截断；尾部 resultPreview 待完成快照(journal)补。
+      promptPreview: parsed.prompt
+        ? (parsed.prompt.length > PROMPT_PREVIEW_MAX ? parsed.prompt.slice(0, PROMPT_PREVIEW_MAX) + '…' : parsed.prompt)
+        : '',
+      resultPreview: '',
       startedAt: parsed.startedAt,
       lastProgressAt: parsed.lastProgressAt,
     });
