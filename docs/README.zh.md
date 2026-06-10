@@ -150,35 +150,6 @@ ccv -h
 * 每个请求内联显示 Token 用量统计（输入/输出 Token、缓存创建/读取、命中率）
 * 兼容 Claude Code Router（CCR）及其他代理场景 — 通过 API 路径模式兜底匹配请求
 
-### 对话模式
-
-点击右上角「对话模式」按钮，将 Main Agent 的完整对话历史解析为聊天界面：
-
-<img height="764" width="1500" alt="image" src="https://github.com/user-attachments/assets/725b57c8-6128-4225-b157-7dba2738b1c6" />
-
-* 暂不支持Agent Team的展示
-* 用户消息右对齐（蓝色气泡），Main Agent 回复左对齐（深色气泡）
-* `thinking` 块默认折叠，以 Markdown 渲染，点击展开查看思考过程；支持一键翻译（功能还不稳定）
-* 用户选择型消息（AskUserQuestion）以问答形式展示
-* 双向模式同步：切换到对话模式时自动定位到选中请求对应的对话；切回原文模式时自动定位到选中的请求
-* 设置面板：可切换工具结果和思考块的默认折叠状态
-* 手机端对话浏览：在手机端 CLI 模式下，点击顶部栏的「对话浏览」按钮，即可滑出只读对话视图，在手机上浏览完整对话历史
-
-### 日志管理
-
-通过左上角 CC-Viewer 下拉菜单：
-
-<img height="760" width="1500" alt="image" src="https://github.com/user-attachments/assets/33295e2b-f2e0-4968-a6f1-6f3d1404454e" />
-
-**日志的压缩**
-关于日志这个部分，作者需要声明，作者保证没有修改anthropic的官方定义，以确保日志的完整性。
-但是由于1M的opus后期长生的单条日志过于庞大，得益于作者采取了对MainAgent的一些日志优化，在没有gzip的情况下，可以降低至少66%的体积。
-这个压缩日志的解析方法，可以从当前仓库中抽取。
-
-<img height="746" width="1500" alt="image" src="https://github.com/user-attachments/assets/b1f60c7c-1438-4ecc-8c64-193d21ee3445" />
-
-更多功能等你发现...比如：本系统支持Agent Team，以及内置了Code Reviewer。马上就要适配Codex 的Code Reviewer引入（作者很推崇使用Codex 给Claude Code Reivew 代码）
-
 ## License
 
 MIT
