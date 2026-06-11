@@ -169,6 +169,10 @@ describe('context-watcher: getContextSizeForModel', () => {
   // 用 haiku(base 'haiku-4-5')而非 sonnet-4-6:后者的 base 会撞上启动缓存命中分支、
   // 绕过本用例要验的 /opus|mythons/ miss→200K 兜底,使断言失去意义。
   it('non-opus/non-mythons → 200K', () => { assert.equal(getContextSizeForModel('claude-haiku-4-5'), 200000); });
+  // 共享规则表(context-rules.js)接入后的回归:以下 base 均不与启动缓存撞车
+  it('deepseek-v4 → 1M(此前服务端漂移误判 200K 的修复)', () => { assert.equal(getContextSizeForModel('deepseek-v4'), 1000000); });
+  it('旧 opus(4-1 含日期后缀)→ 200K(规则表修正)', () => { assert.equal(getContextSizeForModel('claude-opus-4-1-20250805'), 200000); });
+  it('gpt-4o → 128K(三方档位与前端同源)', () => { assert.equal(getContextSizeForModel('gpt-4o'), 128000); });
 });
 
 describe('context-watcher: readClaudeProjectModel', () => {
@@ -320,6 +324,20 @@ describe('context-watcher: buildContextWindowEvent', () => {
   it('自适应纠偏:1M 判定 + 高用量 → 原样 1M(单向,不降级)', () => {
     const usage = { input_tokens: 300000, output_tokens: 10000 };
     const result = buildContextWindowEvent(usage, 1000000);
+    assert.equal(result.context_window_size, 1000000);
+  });
+
+  it('嵌套 cache_creation(flat 缺失)计入 total_input_tokens', () => {
+    const usage = { input_tokens: 5000, cache_creation: { ephemeral_5m_input_tokens: 200, ephemeral_1h_input_tokens: 100 }, cache_read_input_tokens: 3000, output_tokens: 1000 };
+    const result = buildContextWindowEvent(usage, 200000);
+    assert.equal(result.total_input_tokens, 8300); // 5000 + (200+100) + 3000
+    assert.equal(result.used_percentage, 5); // (9300 / 200000) * 100 ≈ 5
+  });
+
+  it('嵌套 cache_creation 用量推过 200K → 触发纠偏升 1M(组合场景)', () => {
+    const usage = { input_tokens: 100000, cache_creation: { ephemeral_5m_input_tokens: 150000 }, output_tokens: 5000 };
+    const result = buildContextWindowEvent(usage, 200000);
+    assert.equal(result.total_input_tokens, 250000);
     assert.equal(result.context_window_size, 1000000);
   });
 });

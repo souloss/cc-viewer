@@ -5,7 +5,7 @@ import AppBase, { styles, OPTIMISTIC_CLEAR_PERCENT } from './AppBase';
 import { isIOS, isPad, setViewMode } from './env';
 import { isMainAgent, isSystemText, classifyUserContent } from './utils/contentFilter';
 import { parseImOrigin } from './utils/imOrigin';
-import { getModelMaxTokens, getEffectiveModel, adaptContextWindow, AUTO_COMPACT_USABLE_RATIO, AUTO_APPROVE_INSTANT } from './utils/helpers';
+import { getModelMaxTokens, getEffectiveModel, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens, AUTO_APPROVE_INSTANT } from './utils/helpers';
 import ChatView from './components/chat/ChatView';
 import TerminalPanel from './components/terminal/TerminalPanel';
 import { TerminalWsProvider } from './components/terminal/TerminalWsContext';
@@ -610,26 +610,29 @@ class Mobile extends AppBase {
     if (!mobileIsLocalLog) {
       const contextWindow = this.state.contextWindow;
       let lastMainAgent = null;
+      let mobileInputTokens = 0; // 输入侧(不含 output),仅供自适应纠偏判定
       if (filteredRequests.length > 0) {
         for (let i = filteredRequests.length - 1; i >= 0; i--) {
           if (isMainAgent(filteredRequests[i]) && filteredRequests[i].response?.body?.usage) {
             lastMainAgent = filteredRequests[i];
             const u = lastMainAgent.response.body.usage;
-            mobileContextTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            // 原始占用比口径(对齐 /context):分子含末轮 output,与桌面端 AppHeader 同源
+            mobileContextTokens = sumUsageContextTokens(u);
+            mobileInputTokens = sumUsageInputTokens(u);
             break;
           }
         }
       }
       if (contextWindow?.used_percentage != null) {
-        mobileContextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage / AUTO_COMPACT_USABLE_RATIO)));
+        // 服务端 used_percentage 本就是原始占用比(含 output、已纠偏),直接用
+        mobileContextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage)));
       } else if (lastMainAgent) {
-        // 自适应纠偏:判成 200K 但真实输入用量已越过整窗 → 升 1M(详见 helpers.adaptContextWindow)。
+        // 自适应纠偏:判成 200K 但真实输入用量已越过整窗 → 升 1M(详见 context-rules.adaptContextWindow)。
         const maxTokens = adaptContextWindow(
           contextWindow?.context_window_size || getModelMaxTokens(getEffectiveModel(lastMainAgent) || this.state.settingsModel),
-          mobileContextTokens,
+          mobileInputTokens,
         );
-        const usable = maxTokens * AUTO_COMPACT_USABLE_RATIO;
-        if (usable > 0 && mobileContextTokens > 0) mobileContextPercent = Math.min(100, Math.max(0, Math.round(mobileContextTokens / usable * 100)));
+        if (maxTokens > 0 && mobileContextTokens > 0) mobileContextPercent = Math.min(100, Math.max(0, Math.round(mobileContextTokens / maxTokens * 100)));
       }
       // /clear 后 contextBarLocked 强制血条 0K (0%)，直到用户发出非 /clear 消息（详见 AppBase）。
       if (this.state.contextBarLocked) {
@@ -687,7 +690,8 @@ class Mobile extends AppBase {
             {!mobileIsLocalLog ? (() => {
               // 移动端（含 iPad）：渲染与 PC 一致的上下文血条。contextPercent 已在 render 顶部计算。
               const contextPercent = mobileContextPercent;
-              const ctxColor = contextPercent >= 80 ? 'var(--color-error-light)' : contextPercent >= 60 ? 'var(--color-warning-light)' : 'var(--color-success)';
+              // 阈值 75/55:原始占用比口径下保留与 auto-compact 触发点(~83.5%)的体感缓冲
+              const ctxColor = contextPercent >= 75 ? 'var(--color-error-light)' : contextPercent >= 55 ? 'var(--color-warning-light)' : 'var(--color-success)';
               const ctxLabel = `${t('ui.liveMonitoring')}${this.state.projectName ? `: ${this.state.projectName}` : ''}`;
               // ctxLabel is also used in `title` (PC hover tooltip). Alias is
               // only rendered in the VISIBLE content via MobileCtxLabelText

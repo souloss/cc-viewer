@@ -11,33 +11,17 @@ import modelMinimaxUrl from '../img/model-minimax.svg';
 import modelDeepseekUrl from '../img/model-deepseek.svg';
 import modelClaudeAnimatedSvg from '../img/claude/writing.svg?raw';
 
-const MODEL_CONTEXT_SIZES = [
-  // Explicit 1M context annotation: [1m] suffix in model descriptor
-  { match: /\[1m\]/i, tokens: 1000000 },
-  // Opus defaults to 1M context (no 200K variant exists)
-  { match: /opus/i, tokens: 1000000 },
-  // mythons 同样默认 1M(opus 之后、claude 之前,避免被 /claude/ 抢成 200K)
-  { match: /mythons/i, tokens: 1000000 },
-  // fable-5 家族(fable-5 / fable-5.x / fable-5-x)默认 1M,同样须排在 /claude/ 之前
-  // (model id 形如 claude-fable-5);带 [1m] 后缀的由首条规则先命中,此处兜底无后缀形态
-  { match: /fable[ -]5/i, tokens: 1000000 },
-  { match: /claude/i, tokens: 200000 },
-  { match: /gpt-4o|o1|o3|o4/i, tokens: 128000 },
-  { match: /gpt-4/i, tokens: 128000 },
-  { match: /gpt-3/i, tokens: 16000 },
-  // deepseek-v4 defaults to 1M; placed before generic /deepseek/ so the
-  // first-match-wins loop picks it up before falling through to 128K.
-  { match: /deepseek-v4/i, tokens: 1000000 },
-  { match: /deepseek/i, tokens: 128000 },
-];
-
-export function getModelMaxTokens(modelName) {
-  if (!modelName) return 200000;
-  for (const entry of MODEL_CONTEXT_SIZES) {
-    if (entry.match.test(modelName)) return entry.tokens;
-  }
-  return 200000;
-}
+// 上下文窗口规则唯一事实源在 server/lib/context-rules.js(CLIENT-SAFE,无 node 依赖,
+// Vite 跨目录打包,先例见 toolsXmlFormatter.js)。前端一律经此处 re-export 取用,
+// 保证血条档位/纠偏/usage 分子与服务端 SSE 路径同源,杜绝三份规则表漂移的旧病。
+export {
+  getModelMaxTokens,
+  adaptContextWindow,
+  sumCacheCreationTokens,
+  sumUsageInputTokens,
+  sumUsageContextTokens,
+} from '../../server/lib/context-rules.js';
+import { classifyContextWindow } from '../../server/lib/context-rules.js';
 
 /**
  * Resolve the effective model name for a log request entry, preferring the
@@ -49,9 +33,6 @@ export function getEffectiveModel(request) {
   return request?.response?.body?.model || request?.body?.model || null;
 }
 
-// auto-compact 在 ~83.5% 触发，扣 16.5% buffer；usable = max * 0.835，display % = used / 83.5 * 100
-export const AUTO_COMPACT_USABLE_RATIO = 0.835;
-
 // 校准尺寸 → token 数集中映射。
 // 注意：扩档（如加 500K）必须同步改 src/config.json 的 calibrationModels（label/value）
 // 与 i18n 文案；只改这里 UI 不会出现新选项。
@@ -59,18 +40,6 @@ const CALIBRATION_TOKEN_MAP = {
   '1m': 1000000,
   '200k': 200000,
 };
-
-// 名字 → 1M/200K 分类。集中此处避免 auto 路径多分支重复写规则。
-function _classifyContextSize(modelName) {
-  const m = modelName.toLowerCase();
-  // Opus 4 家族(opus-4-7 / opus-4-8 / opus-4-9 / opus-4.x,连字符·点·空格分隔均可)
-  // 默认 1M;mythons 同样 1M。用正则覆盖整个 4.x 系列,版本号 bump 时无需再改这里。
-  // 注意只匹配 "opus-4-N",不匹配裸 opus(claude-3-opus 仍是 200K)。
-  // fable-5 家族(claude-fable-5 / fable-5.x)默认 1M,正则覆盖整个 5.x 系列。
-  if (/opus[ -]4[-.]\d/.test(m) || m.includes('mythons') || /fable[ -]5/.test(m)) return 1000000;
-  if (m.includes('1m')) return 1000000;
-  return 200000;
-}
 
 /**
  * 把用户在 popover 里选的"上下文窗口尺寸"换算成 token 数。
@@ -81,12 +50,10 @@ function _classifyContextSize(modelName) {
  *         由 /api/claude-settings 与 workspace_started SSE 携带；反映用户在
  *         claude 里实际偏好的 model）
  *      3) 冷启动兜底 → 1M（用户规约）
- *  分类规则（_classifyContextSize）：
- *      · model 命中 opus-4-N 家族（opus-4-7/4-8/4-9/4.x，大小写不敏感）→ 1M
- *      · model 含 mythons → 1M
- *      · model 命中 fable-5 家族（fable-5/5.x，大小写不敏感）→ 1M
- *      · model 含 1m 子串（如 deepseek-v3-1m）→ 1M
- *      · 否则 → 200K
+ *  分类规则（context-rules.classifyContextWindow，前后端同源）：
+ *      · model 含 1m 子串（含 [1m] 后缀与裸 1m,如 deepseek-v3-1m）→ 1M
+ *      · 其余按统一档位表归并:opus-4-6+/mythons/fable-5/deepseek-v4 → 1M;
+ *        haiku/旧 opus(4-0/4-1/4-5)/3-opus/裸 claude/gpt/deepseek 等 → 200K 桶
  *  haiku 跳过的代价：纯 haiku 子任务期会落到 projectModelHint；该路径下 hint
  *  缺失时仍按冷启动 1M 处理，不会突然变 200K。
  *
@@ -98,30 +65,14 @@ export function resolveCalibrationTokens(calibrationModel, lastMainAgent, projec
   const lastModel = lastMainAgent ? getEffectiveModel(lastMainAgent) : null;
   // 优先用真实 mainAgent 信号；haiku 一律视为 init ping 噪声，跳过
   if (typeof lastModel === 'string' && lastModel && !/haiku/i.test(lastModel)) {
-    return _classifyContextSize(lastModel);
+    return classifyContextWindow(lastModel);
   }
   // 回落 1：claude 自己存的项目偏好 model
   if (typeof projectModelHint === 'string' && projectModelHint) {
-    return _classifyContextSize(projectModelHint);
+    return classifyContextWindow(projectModelHint);
   }
   // 回落 2：冷启动 1M
   return 1000000;
-}
-
-/**
- * 血条自适应纠偏:把"分类器判出的上下文窗口"按真实用量修正。
- * 一个真正的 200K 模型,其输入上下文(input + cache_creation + cache_read)物理上不可能
- * 超过 200K —— 超了 API 直接拒收。所以一旦真实输入用量越过 200K 还被判成 200K,必然是
- * model 名识别错了(误判),此时自动升到 1M,免得血条卡死在 100%、百分比与真实进度脱节。
- * 仅做 200K→1M 这一个方向的纠偏;其余判定(1M、各家 200K 真值等)一律原样返回。
- * 注意:usedContextTokens 必须是"输入侧"用量(不含 output_tokens),否则大输出会误触发。
- * @param {number} classifiedTokens resolveCalibrationTokens / getModelMaxTokens 的结果
- * @param {number} usedContextTokens 当前输入上下文实际用量(input + cache_creation + cache_read)
- * @returns {number} 修正后的上下文窗口 token 数(1000000 或原值)
- */
-export function adaptContextWindow(classifiedTokens, usedContextTokens) {
-  if (classifiedTokens === 200000 && usedContextTokens > 200000) return 1000000;
-  return classifiedTokens;
 }
 
 /**

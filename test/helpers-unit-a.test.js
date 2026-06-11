@@ -2,7 +2,7 @@
  * Unit tests for src/utils/helpers.js — 前半部分导出（源文件 31~394 行）。
  *
  * 覆盖目标导出：
- *   getModelMaxTokens, getEffectiveModel, AUTO_COMPACT_USABLE_RATIO,
+ *   getModelMaxTokens, getEffectiveModel,
  *   resolveCalibrationTokens, adaptContextWindow, resolveProducerModelInfo,
  *   appendCacheLossMap, buildCacheLossMap, escapeHtml, truncateText,
  *   getModelInfo, AUTO_APPROVE_INSTANT, getSvgAvatar, formatTokenCount。
@@ -58,9 +58,12 @@ describe('getModelMaxTokens', () => {
     assert.equal(H.getModelMaxTokens('something-[1M]'), 1000000);
   });
 
-  it('opus / mythons 默认 1M', () => {
-    assert.equal(H.getModelMaxTokens('claude-3-opus-20240229'), 1000000);
+  it('opus-4-6+ / mythons 默认 1M;3-opus 与旧 opus 修正为 200K', () => {
+    assert.equal(H.getModelMaxTokens('claude-opus-4-6'), 1000000);
     assert.equal(H.getModelMaxTokens('mythons-pro'), 1000000);
+    // claude-3-opus 真实窗口 200K(规则表统一后取事实值,此前 /opus/→1M 是误判)
+    assert.equal(H.getModelMaxTokens('claude-3-opus-20240229'), 200000);
+    assert.equal(H.getModelMaxTokens('claude-opus-4-1-20250805'), 200000);
   });
 
   it('fable-5 家族默认 1M', () => {
@@ -114,10 +117,7 @@ describe('getEffectiveModel', () => {
   });
 });
 
-describe('AUTO_COMPACT_USABLE_RATIO / AUTO_APPROVE_INSTANT 常量', () => {
-  it('AUTO_COMPACT_USABLE_RATIO === 0.835', () => {
-    assert.equal(H.AUTO_COMPACT_USABLE_RATIO, 0.835);
-  });
+describe('AUTO_APPROVE_INSTANT 常量', () => {
   it('AUTO_APPROVE_INSTANT === -1', () => {
     assert.equal(H.AUTO_APPROVE_INSTANT, -1);
   });

@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getClaudeConfigDir } from '../../findcc.js';
+import { getModelMaxTokens, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens } from './context-rules.js';
 
 export const CONTEXT_WINDOW_FILE = join(getClaudeConfigDir(), 'context-window.json');
 export const CLAUDE_SETTINGS_FILE = join(getClaudeConfigDir(), 'settings.json');
@@ -26,17 +27,10 @@ export function readModelContextSize() {
     const modelId = data?.model?.id || null;
     let contextSize = 200000;
     if (modelId) {
-      const lower = modelId.toLowerCase();
-      const sizeMatch = lower.match(/\[(\d+)([km])\]/);
-      if (sizeMatch) {
-        const num = parseInt(sizeMatch[1], 10);
-        contextSize = sizeMatch[2] === 'm' ? num * 1000000 : num * 1000;
-      } else if (/opus|mythons|fable[ -]5/i.test(lower)) {
-        // Opus / mythons / fable-5 family models default to 1M context
-        contextSize = 1000000;
-      }
+      // [Nk]/[Nm] 后缀与家族档位统一走共享规则表(server/lib/context-rules.js)
+      contextSize = getModelMaxTokens(modelId);
       // Cache the base name → size mapping
-      const base = lower.replace(/^claude-/i, '').replace(/\[.*\]/, '').trim();
+      const base = modelId.toLowerCase().replace(/^claude-/i, '').replace(/\[.*\]/, '').trim();
       _startupModelBase = base;
       _startupContextSize = contextSize;
     }
@@ -61,9 +55,9 @@ export function getContextSizeForModel(apiModelName) {
   if (_startupModelBase && base === _startupModelBase) {
     return _startupContextSize;
   }
-  // Opus / mythons / fable-5 family always have 1M context; other unknown models default to 200K
-  if (/opus|mythons|fable[ -]5/i.test(lower)) return 1000000;
-  return 200000;
+  // 完整档位表见 server/lib/context-rules.js(与前端同源;含 haiku/旧 opus/3-opus 200K、
+  // deepseek-v4 1M、gpt/deepseek 等三方档位,默认 200K)
+  return getModelMaxTokens(apiModelName);
 }
 
 /**
@@ -110,13 +104,12 @@ export function readClaudeProjectModel(cwd, filePath = CLAUDE_USER_CONFIG_FILE) 
  */
 export function buildContextWindowEvent(usage, contextSize) {
   if (!usage) return null;
-  const inputTokens = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+  // 分子口径与前端血条同源(context-rules):输入侧含嵌套 cache_creation 容错,total 含末轮 output
+  const inputTokens = sumUsageInputTokens(usage);
   const outputTokens = usage.output_tokens || 0;
-  const totalTokens = inputTokens + outputTokens;
-  // 自适应纠偏:真正的 200K 模型输入上下文(input+cache)不可能 > 200K(超了 API 拒收),
-  // 一旦越过整窗还判成 200K,必是 model 名识别错 → 升 1M,使 used_percentage / size 不再失真。
-  // 与 src/utils/helpers.js 的 adaptContextWindow 同一规则(此处服务端无法 import 前端模块,内联)。
-  const effectiveSize = (contextSize === 200000 && inputTokens > 200000) ? 1000000 : contextSize;
+  const totalTokens = sumUsageContextTokens(usage);
+  // 自适应纠偏(共享规则,纠偏判定只用输入侧用量,详见 context-rules.adaptContextWindow)
+  const effectiveSize = adaptContextWindow(contextSize, inputTokens);
   const usedPct = Math.round((totalTokens / effectiveSize) * 100);
   return {
     total_input_tokens: inputTokens,

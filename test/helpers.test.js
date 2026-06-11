@@ -690,3 +690,15 @@ describe('helpers', () => {
     });
   });
 });
+
+// 前后端一致性冒烟:helpers 的窗口规则导出必须是 server/lib/context-rules.js 的同一函数引用
+// (thin re-export = 单一事实源的最强证明;若有人在 helpers 里重新实现,这里立即爆)。
+describe('context-rules 单一事实源冒烟', () => {
+  it('helpers re-export 与 context-rules 为同一函数引用', async () => {
+    const R = await import('../server/lib/context-rules.js');
+    assert.equal(H.getModelMaxTokens, R.getModelMaxTokens);
+    assert.equal(H.adaptContextWindow, R.adaptContextWindow);
+    assert.equal(H.sumUsageInputTokens, R.sumUsageInputTokens);
+    assert.equal(H.sumUsageContextTokens, R.sumUsageContextTokens);
+  });
+});

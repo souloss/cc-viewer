@@ -5,7 +5,7 @@ import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
 import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
-import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, resolveCalibrationTokens, adaptContextWindow, AUTO_COMPACT_USABLE_RATIO, AUTO_APPROVE_INSTANT } from '../../utils/helpers';
+import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, resolveCalibrationTokens, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens, AUTO_APPROVE_INSTANT } from '../../utils/helpers';
 import { isSystemText, classifyUserContent, isMainAgent } from '../../utils/contentFilter';
 import { parseImOrigin } from '../../utils/imOrigin';
 import { PINNED_KEY, parsePinned, serializePinned, togglePinned } from '../../utils/pinnedMenu';
@@ -1444,20 +1444,22 @@ class AppHeader extends React.Component {
 
     const { requests = [], isLocalLog, localLogFile, projectName, contextWindow, contextBarOptimistic, contextBarLocked, serverCachedContent, claudeProjectModel } = this.props;
 
-    // 计算上下文使用率：距离 auto-compact 触发点的进度
-    // auto-compact 在 ~83.5% 时触发（扣除 16.5% buffer）
-    // 将 used_percentage 映射到 0~83.5% → 0~100%
+    // 计算上下文使用率:原始占用比(used / 窗口全量),与 Claude Code /context 口径一致。
+    // 分子 sumUsageContextTokens = input + cache_creation(嵌套容错) + cache_read + output
+    // ——含末轮 output 是因为它已进入下一轮上下文;百分比与 popover 显示的 token 数同源。
     let contextPercent = 0;
     // 反向找最后一条带 usage 的 MainAgent 一次，contextPercent 与 contextTokens 共用
     // AUTO 校准也依赖它的 model 名，所以必须在 calibrationTokens 求值之前完成
     let lastMainAgent = null;
     let lastTotalTokens = 0;
+    let lastInputTokens = 0; // 输入侧(不含 output),仅供自适应纠偏判定
     if (!isLocalLog && requests.length > 0) {
       for (let i = requests.length - 1; i >= 0; i--) {
         if (isMainAgent(requests[i]) && requests[i].response?.body?.usage) {
           lastMainAgent = requests[i];
           const u = lastMainAgent.response.body.usage;
-          lastTotalTokens = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+          lastTotalTokens = sumUsageContextTokens(u);
+          lastInputTokens = sumUsageInputTokens(u);
           break;
         }
       }
@@ -1470,21 +1472,21 @@ class AppHeader extends React.Component {
     // 真实输入上下文用量优先取 requests[] 直算的 lastTotalTokens,无则用 SSE 事件携带的
     // total_input_tokens(同为 input+cache,不含 output);越过 200K 整窗即判误判 → 升 1M。
     if (this.state.calibrationModel !== '200k') {
-      const usedContextTokens = lastTotalTokens > 0 ? lastTotalTokens : (contextWindow?.total_input_tokens || 0);
+      const usedContextTokens = lastInputTokens > 0 ? lastInputTokens : (contextWindow?.total_input_tokens || 0);
       calibrationTokens = adaptContextWindow(calibrationTokens, usedContextTokens);
     }
     if (!isLocalLog) {
       if (contextWindow?.used_percentage != null) {
         if (lastTotalTokens > 0) {
-          const usable = calibrationTokens * AUTO_COMPACT_USABLE_RATIO;
-          contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / usable * 100)));
+          contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / calibrationTokens * 100)));
         } else {
+          // 兜底重标定:used_percentage × origMax = totalTokens 的近似,再除前端校准窗口。
+          // 服务端已纠偏的 origMax(1M)与前端 adapt(经 total_input_tokens)会同步升窗,组合自洽。
           const origMax = contextWindow.context_window_size || 200000;
-          contextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage * origMax / calibrationTokens / AUTO_COMPACT_USABLE_RATIO)));
+          contextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage * origMax / calibrationTokens)));
         }
       } else if (lastMainAgent && lastTotalTokens > 0) {
-        const usable = calibrationTokens * AUTO_COMPACT_USABLE_RATIO;
-        contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / usable * 100)));
+        contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / calibrationTokens * 100)));
       }
     }
     // contextBarLocked：/clear 触发后强制血条 0K (0%)，忽略 SSE 与 requests[] 残留的 pre-clear 数据，
@@ -1501,7 +1503,8 @@ class AppHeader extends React.Component {
       // /clear 后立即把血条压到乐观水位；下一次 SSE context_window 推送会取消这个覆盖
       if (contextBarOptimistic) contextPercent = OPTIMISTIC_CLEAR_PERCENT;
     }
-    const ctxColor = contextPercent >= 80 ? 'var(--color-error-light)' : contextPercent >= 60 ? 'var(--color-warning-light)' : 'var(--color-success)';
+    // 阈值 75/55:原始占用比口径下保留与 auto-compact 触发点(~83.5%)的体感缓冲
+    const ctxColor = contextPercent >= 75 ? 'var(--color-error-light)' : contextPercent >= 55 ? 'var(--color-warning-light)' : 'var(--color-success)';
     const contextTokens = contextBarLocked ? 0 : lastTotalTokens;
 
     return createPortal(

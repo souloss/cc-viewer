@@ -24,6 +24,7 @@ const CLIENT_SAFE_ALLOWLIST = new Set([
   'server/lib/approval-modal-prefs.js',
   'server/lib/delta-reconstructor.js',
   'server/lib/tools-xml-formatter.js',
+  'server/lib/context-rules.js',
 ]);
 
 function listFiles(dir, exts) {
@@ -85,7 +86,7 @@ describe('client-safe-imports: src/ → server/** 边界', () => {
   });
 });
 
-describe('client-safe-imports: 白名单 4 文件零 node deps', () => {
+describe('client-safe-imports: 白名单文件零 node deps', () => {
   // 任何 node builtin 都不可 import；含 `node:*` scheme 和裸 module 名（fs/path/os/...）
   // 与 process/child_process 等运行时 API
   const NODE_BUILTINS = new Set([
