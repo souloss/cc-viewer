@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.310 (2026-06-11)
+
+- feat(context): 上下文血条口径对齐 Claude Code `/context`——去掉 ÷0.835 的「auto-compact 进度」旧映射改为原始占用比(百分比整体下降约 16.5%),分子统一为 input+cache_creation+cache_read+末轮 output 且与 popover 显示同源,桌面三路径/移动端两分支/服务端 SSE 全部同口径,色变阈值 80/60→75/55;窗口规则表收编 `server/lib/context-rules.js` 前后端同源(haiku/旧 opus 4-0/4-1/4-5/3-opus 修正 200K、opus-4-6+ 1M、服务端 deepseek-v4 误判 200K 修复、裸 sonnet-4-6 有意维持 200K 由 [1m] 后缀与用量纠偏兜底),容错新版嵌套 `cache_creation` 分桶对象
+- fix(ci): release Windows 构建根治——Windows 镜像全面滚到 VS2026 后 @electron/rebuild 自带的 node-gyp ^11.2 找不到任何 VS 致 node-pty 编译失败,overrides 强制 node-gyp ^12.1.0(12.1 起支持 VS2026)
+- docs(readme): 17 个语言版 README 与 zh 基准同步(移除三个过期小节),新增 cc-viewer-share.svg 动画示意图(一台设备部署、多端异步共享)并全量嵌入
+
 ## 1.6.309 (2026-06-10)
 
 - fix(chat): 根治流式期间无法脱离吸底——SSE 高频重启缓动链使锁常驻、用户滚动信号被吃掉；新增用户滚动意图暂停窗口：直接监听 wheel/touch/pointer 拖动（纯点击/tap 不开窗），窗口内暂停一切自动追底、sticky 实时翻转，停手 300ms（可调 `userScrollIdleMs`）终判并恢复追底；desktop 与安卓 Virtuoso 双路径覆盖，「回到底部」等显式动作不受抑制；容器外触摸（横滑代码块等）不误暂停追底；顺带修 unbind/换绑不释放缓动锁的孤儿锁（决策入口被堵死至下个缓动周期）
