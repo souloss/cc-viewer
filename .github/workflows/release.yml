@@ -17,9 +17,11 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-          # windows-latest 已滚动到 windows-2025-vs2026,自带 VS2026 而 node-gyp 识别不了
-          # (node-pty 原生编译报 "Could not find any Visual Studio installation")。
-          # 钉住 windows-2025(VS2022)直到 node-gyp 支持 VS2026。
+          # Windows 镜像已全面滚到 VS2026(windows-2025 也不再带 VS2022),旧 node-gyp 11.x
+          # 识别不了 VS2026 → "Could not find any Visual Studio installation"。
+          # 根治在 package.json overrides 强制 node-gyp ^12.1.0(12.1 起支持 VS2026,
+          # @electron/rebuild 自带的 ^11.2 够不到,必须 override)。镜像继续钉 windows-2025
+          # 避免 windows-latest 滚动引入新变量。
           - os: windows-2025
             platform: win
           - os: ubuntu-latest
