@@ -1905,6 +1905,12 @@ class AppBase extends React.Component {
     this.context.updatePreferences({ autoApproveSeconds: seconds });
   };
 
+  // 终端工具栏快捷设置菜单的 Plan 档位回调。稳定引用（类属性而非调用处内联箭头），
+  // 避免 App/Mobile 每次 render 生成新闭包穿透 ChatView.shouldComponentUpdate。
+  handlePlanAutoApproveChange = (seconds) => {
+    this.handleApprovalPrefsChange({ planAutoApproveSeconds: seconds });
+  };
+
   // ─── Approval modal: ChatView -> AppBase bubbling handlers ───────────────────────
   // Inject projectName from AppBase state so the modal chip / Notification body have
   // human-readable session context. ChatView itself doesn't track project name.

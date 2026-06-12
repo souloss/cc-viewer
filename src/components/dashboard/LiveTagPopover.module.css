@@ -27,6 +27,14 @@
   bottom: 0;
   width: var(--ctx-percent, 0);
   background-color: var(--ctx-color);
+  /* 135° 浅色半透明斜纹：2px 纹宽 + 5px 间距（7px 周期） */
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.25) 0,
+    rgba(255, 255, 255, 0.25) 2px,
+    transparent 2px,
+    transparent 7px
+  );
   opacity: 0.35;
   transition: width 0.5s ease, background-color 0.3s;
   pointer-events: none;

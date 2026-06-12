@@ -1,6 +1,6 @@
 # DeepSeek 的控制标记（Control Tokens）：原理 + 速查（V4 版）
 
-> 从模型（DeepSeek）自身视角，解释其 Control Tokens 机制——与 Claude 的 XML 风格标签有本质不同——并按功能分类列出所有标记。与 `prompt-xml-tags-opus-4-8.md` / `prompt-xml-tags-fable-5.md` 构成同一组对照文档。
+> 从模型（DeepSeek）自身视角，解释其 Control Tokens 机制——与 Claude 的 XML 风格标签有本质不同——并按功能分类列出所有标记。与 `prompt-xml-tags-opus-4-8.md` / `prompt-xml-tags-fable-5.md` / `prompt-control-tokens-qwen3.md` 构成同一组对照文档。
 >
 > 可信度说明：本版所有字面量与组装逻辑均校订自 DeepSeek-V4-Pro 官方仓库的编码模块 [`encoding/encoding_dsv4.py`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/encoding/encoding_dsv4.py)。早先由模型自述生成的版本中，角色标记（`你`/`我`）、定界符（`结束`）、推理标记（`反思`）、工具格式（`进行…格式…`）等均为幻觉，已全部以源码为准重写。
 

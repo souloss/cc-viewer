@@ -193,6 +193,13 @@
   color: var(--text-primary);
 }
 
+/* 共享图标组件（quickMenuIcons）不自带宽高，这里统一约束（旧内联 svg 也是 16px） */
+.plusMenuItem svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .plusMenuItemMuted svg {
   stroke: var(--text-tertiary);
   transition: stroke 0.15s;
@@ -206,6 +213,26 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ===== 桌面四芒星快捷菜单（结构与终端工具栏一致，级联样式在 sharedChrome.module.css） ===== */
+/* 菜单宽度对齐终端弹层 */
+.plusMenuQuick {
+  min-width: 200px;
+}
+
+/* 独立圆钮内共享图标统一尺寸（UploadIcon 等不自带宽高；
+   移动端 23px / pad 16px 的媒体查询按既有选择器继续覆盖） */
+.plusBtn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* AgentTeam 子菜单内预设项：限宽防长描述撑宽悬浮面板（对齐终端 presetMenuItem 的 260px） */
+.quickMenuPresetItem {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chatInputHint {

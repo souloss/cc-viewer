@@ -21,10 +21,9 @@ import { BUILTIN_PRESETS } from '../../utils/builtinPresets.js';
 import { buildLocalUltraplan } from '../../utils/ultraplanTemplates';
 import { UltraplanController } from '../../utils/ultraplanController';
 import { buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS, sanitizeBracketPasteText } from '../../utils/ptyChunkBuilder';
-import ConceptHelp from '../common/ConceptHelp';
 import CustomUltraplanEditModal from './CustomUltraplanEditModal';
 import UltraplanExpertManagerModal from './UltraplanExpertManagerModal';
-import { buildExpertList, visibleExpertKeys } from '../../utils/ultraplanExperts';
+import { visibleExpertKeys } from '../../utils/ultraplanExperts';
 import { TerminalWriteQueue } from '../../utils/terminalWriteQueue';
 import { installTermDiag, diagCount } from '../../utils/termDiag';
 import { downscaleForRetina } from '../../utils/imageDownscale';
@@ -34,7 +33,11 @@ import ConfirmRemoveButton from '../common/ConfirmRemoveButton';
 import ScratchTerminal from './ScratchTerminal';
 import { darkTerminalTheme, lightTerminalTheme, terminalFontFamily } from './terminalThemes';
 import { resizeImageIfNeeded } from '../../utils/imageResize';
-import { calcResizedSize } from '../../utils/resizeCalc';
+import UltraplanPanel, { readUltraplanPopoverSize, ultraplanOverlayInnerStyle } from './UltraplanPanel';
+import { SparkleIcon, AgentTeamIcon, UltraplanIcon, UploadIcon, TrashIcon } from '../common/quickMenuIcons';
+import QuickAutoApproveRows from '../common/QuickAutoApproveRows';
+import { createQuickMenuHoverIntent } from '../../utils/quickMenuHoverIntent';
+import chrome from '../common/sharedChrome.module.css';
 
 // WebGL longtask 自动降级常量
 const WEBGL_STALL_MS = 200;          // 单次 longtask 阈值 (ms)
@@ -52,27 +55,6 @@ const WEBGL_STICKY_TTL_MS = 7 * 24 * 3600 * 1000; // 7 天后自动重试
 const WEBGL_RENDERER = isAndroid || (isMac && !isIOS
   && typeof PerformanceObserver !== 'undefined'
   && !!PerformanceObserver.supportedEntryTypes?.includes('longtask'));
-
-// UltraPlan popover 拖拽尺寸持久化:与 UltraPlanModal 共享语义但 key 分开,因为
-// popover 几何/位置约束不同(浮锚 trigger 按钮、最大约 70vh,modal 居中可到 90vh)。
-const _ULTRAPLAN_POPOVER_W_KEY = 'cc-viewer-ultraplan-popover-width';
-const _ULTRAPLAN_POPOVER_H_KEY = 'cc-viewer-ultraplan-popover-height';
-function _readUltraplanPopoverSize() {
-  try {
-    const w = parseFloat(localStorage.getItem(_ULTRAPLAN_POPOVER_W_KEY));
-    const h = parseFloat(localStorage.getItem(_ULTRAPLAN_POPOVER_H_KEY));
-    if (Number.isFinite(w) || Number.isFinite(h)) {
-      return { w: Number.isFinite(w) ? w : null, h: Number.isFinite(h) ? h : null };
-    }
-  } catch {}
-  return null;
-}
-function _writeUltraplanPopoverSize(size) {
-  try {
-    if (size?.w) localStorage.setItem(_ULTRAPLAN_POPOVER_W_KEY, String(size.w));
-    if (size?.h) localStorage.setItem(_ULTRAPLAN_POPOVER_H_KEY, String(size.h));
-  } catch {}
-}
 
 const SCRATCH_OPEN_KEY = 'cc-viewer-scratch-open';
 const SCRATCH_HEIGHT_KEY = 'cc-viewer-scratch-height';
@@ -149,6 +131,9 @@ function PlusIcon() {
   );
 }
 
+// SparkleIcon / ShieldCheckIcon / PlanClipboardIcon / AgentTeamIcon / UltraplanIcon /
+// UploadIcon / TrashIcon 已迁至 ../common/quickMenuIcons.jsx（与 ChatInputBar 四芒星菜单共用）
+
 function CloseIcon() {
   return (
     <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -190,50 +175,6 @@ const VIRTUAL_KEYS = [
   { label: 'Ctrl+C', seq: '\x03' },
 ];
 
-function UploadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-      <polyline points="17 8 12 3 7 8" />
-      <line x1="12" y1="3" x2="12" y2="15" />
-    </svg>
-  );
-}
-
-function UltraplanIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="2.5"/>
-      <ellipse cx="12" cy="12" rx="10" ry="4"/>
-      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/>
-      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>
-    </svg>
-  );
-}
-
-function TrashIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="M5 6v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6" />
-      <line x1="10" y1="11" x2="10" y2="17" />
-      <line x1="14" y1="11" x2="14" y2="17" />
-    </svg>
-  );
-}
-
-function AgentTeamIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  );
-}
-
 export async function uploadFileAndGetPath(file) {
   const MAX_SIZE = 100 * 1024 * 1024; // 100MB
   let upload = file;
@@ -271,8 +212,6 @@ class TerminalPanel extends React.Component {
     super(props);
     this.containerRef = React.createRef();
     this.fileInputRef = React.createRef();
-    this._ultraplanPanelRef = React.createRef();
-    this._ultraplanDragRef = null;
     // UltraPlan 文件 / 自定义专家纯逻辑（与 ChatView 共享，见 ../utils/ultraplanController）。
     // host 适配器桥接 state / 上传 / 提示 / 偏好 / 关闭编辑器；下方 6 个方法退化为委托。
     this._ultraplan = new UltraplanController({
@@ -292,14 +231,17 @@ class TerminalPanel extends React.Component {
     this.state = {
       terminalFocused: false,
       agentTeamEnabled: false,
-      agentTeamPopoverOpen: false,
+      agentTeamEnabling: false, // AgentTeam 启用请求在途（快捷菜单 loading + hover-intent holdOpen 依赖）
+      quickSettingsOpen: false,
+      quickSettingsExpanded: null, // null | 'agentteam' | 'perm' | 'plan' —— 同时只展开一个子菜单
+
       ultraplanOpen: false,
       ultraplanVariant: 'codeExpert',
       ultraplanPrompt: '',
       ultraplanFiles: [],
       // PC UltraPlan popover 拖拽尺寸,持久化到 localStorage 两 key;手机/iPad 不走这条路径
       // (那边用 UltraPlanModal),所以无 gate,但 popover 入口本身 isMobile 不显示终端工具栏。
-      ultraplanPopoverSize: _readUltraplanPopoverSize(),
+      ultraplanPopoverSize: readUltraplanPopoverSize(),
       customUltraplanExperts: [],
       // 专家显隐 / 排序(管理弹窗)。键 = 'codeExpert' / 'researchExpert' / 'custom:'+id;
       // 落服务端 preferences(ultraplanExpertOrder / ultraplanExpertHidden),缺省=自然序、全可见。
@@ -610,6 +552,7 @@ class TerminalPanel extends React.Component {
   }
 
   componentWillUnmount() {
+    this._qmHover.cancel();
     // mid-drag 卸载兜底：恢复 body 样式，标记终止
     if (this._scratchDragging) {
       document.body.style.cursor = '';
@@ -1484,9 +1427,19 @@ class TerminalPanel extends React.Component {
     this.handleDragEnd();
   };
 
+  // 级联子菜单 hover-intent 共享实现见 utils/quickMenuHoverIntent。
+  // iPad 无 hover 不参与（tap 的 synthetic mouseEnter 会与 click 切换互抵），由点击行切换兜底；
+  // AgentTeam 启用请求进行中不收起，保住子菜单内 loading 按钮的进度反馈。
+  _qmHover = createQuickMenuHoverIntent({
+    getExpanded: () => this.state.quickSettingsExpanded,
+    setExpanded: (k) => this.setState({ quickSettingsExpanded: k }),
+    skip: () => isPad,
+    holdOpen: (key) => key === 'agentteam' && this.state.agentTeamEnabling,
+  });
+
   handlePresetSend = (description) => {
     if (!description) return;
-    this.setState({ agentTeamPopoverOpen: false });
+    this.setState({ quickSettingsOpen: false, quickSettingsExpanded: null });
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'input-sequential',
@@ -1560,95 +1513,11 @@ class TerminalPanel extends React.Component {
   deleteCustomUltraplanExpert = (...a) => this._ultraplan.deleteExpert(...a);
 
   // tab 条上每个专家的图标：内置 code=<> / research=放大镜，自定义=星形。
-  _ultraplanExpertIcon = (d) => {
-    if (d.kind === 'custom') {
-      return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>;
-    }
-    if (d.key === 'codeExpert') {
-      return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>;
-    }
-    return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
-  };
-
   handleUltraplanUpload = (...a) => this._ultraplan.handleUpload(...a);
 
   handleUltraplanPaste = (...a) => this._ultraplan.handlePaste(...a);
 
   handleUltraplanRemoveFile = (...a) => this._ultraplan.handleRemoveFile(...a);
-
-  // UltraPlan popover resize:左上 handle → 拖拽改 popover overlay 的 width/height。
-  // 拖拽期直接改 .ant-popover-inner 的 inline style 不走 setState(避免高频 re-render);
-  // pointerup 调 setState + 落 localStorage。AbortController 一刀清 listener,防中途关
-  // popover 留残;setPointerCapture 保所有 pointer 事件落 handle 元素。
-  _handleUltraplanResizePointerDown = (e) => {
-    const panel = this._ultraplanPanelRef?.current;
-    if (!panel) return;
-    const inner = panel.closest('.ant-popover-inner');
-    if (!inner || this._ultraplanDragRef) return;
-    e.preventDefault();
-    e.stopPropagation();
-    try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch {}
-    const controller = new AbortController();
-    const clamp = {
-      minW: 360,
-      minH: 280,
-      maxW: Math.round(window.innerWidth * 0.9),
-      maxH: Math.round(window.innerHeight * 0.7),
-    };
-    this._ultraplanDragRef = {
-      startX: e.clientX, startY: e.clientY,
-      startW: inner.offsetWidth, startH: inner.offsetHeight,
-      clamp,
-      pointerId: e.pointerId,
-      handle: e.currentTarget,
-      controller,
-      inner,
-    };
-
-    let pendingXY = null;
-    let rafScheduled = false;
-    const onMove = (ev) => {
-      const d = this._ultraplanDragRef;
-      if (!d) return;
-      pendingXY = { x: ev.clientX, y: ev.clientY };
-      if (rafScheduled) return;
-      rafScheduled = true;
-      requestAnimationFrame(() => {
-        rafScheduled = false;
-        const p = pendingXY;
-        pendingXY = null;
-        const dd = this._ultraplanDragRef;
-        if (!dd || !p) return;
-        const { w, h } = calcResizedSize({
-          startX: dd.startX, startY: dd.startY,
-          curX: p.x, curY: p.y,
-          startW: dd.startW, startH: dd.startH,
-          dirX: -1, dirY: -1,
-          clamp: dd.clamp,
-        });
-        dd.inner.style.width = `${w}px`;
-        dd.inner.style.height = `${h}px`;
-      });
-    };
-
-    const onEnd = () => {
-      const d = this._ultraplanDragRef;
-      if (!d) return;
-      const finalW = d.inner.offsetWidth;
-      const finalH = d.inner.offsetHeight;
-      try { d.handle?.releasePointerCapture?.(d.pointerId); } catch {}
-      d.controller.abort();
-      this._ultraplanDragRef = null;
-      const size = { w: finalW, h: finalH };
-      this.setState({ ultraplanPopoverSize: size });
-      _writeUltraplanPopoverSize(size);
-    };
-
-    const signal = controller.signal;
-    document.addEventListener('pointermove', onMove, { signal });
-    document.addEventListener('pointerup', onEnd, { signal });
-    document.addEventListener('pointercancel', onEnd, { signal });
-  };
 
   handleEnableAgentTeam = () => {
     if (this.state.agentTeamEnabling) return;
@@ -1729,58 +1598,85 @@ class TerminalPanel extends React.Component {
         {(!isMobile || isPad) && (
           <div className={styles.terminalToolbar}>
             <div className={styles.toolbarLeft}>
-            {this.state.agentTeamEnabled ? (
-              <Popover
-                trigger="hover"
-                placement="top"
-                open={this.state.agentTeamPopoverOpen}
-                onOpenChange={(v) => this.setState({ agentTeamPopoverOpen: v })}
-                overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: 4, minWidth: 140 }}
-                content={
-                  <div className={styles.presetMenu}>
-                    <button className={`${styles.presetMenuItem} ${styles.presetMenuItemMuted}`} onClick={() => { this.setState({ agentTeamPopoverOpen: false, presetModalVisible: true }); }}>
-                      {t('ui.terminal.customShortcuts')}
+            <Popover
+              trigger="click"
+              placement="top"
+              open={this.state.quickSettingsOpen}
+              onOpenChange={(v) => {
+                if (!v) this._qmHover.cancel();
+                this.setState(v ? { quickSettingsOpen: true } : { quickSettingsOpen: false, quickSettingsExpanded: null });
+              }}
+              overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: 4, minWidth: 200 }}
+              content={
+                <div className={styles.presetMenu}>
+                  <QuickAutoApproveRows
+                    autoApproveSeconds={this.props.autoApproveSeconds}
+                    planAutoApproveSeconds={this.props.planAutoApproveSeconds}
+                    onAutoApproveChange={this.props.onAutoApproveChange}
+                    onPlanAutoApproveChange={this.props.onPlanAutoApproveChange}
+                    expandedKey={this.state.quickSettingsExpanded}
+                    onToggle={(k) => this.setState({ quickSettingsExpanded: k })}
+                    onHoverEnter={this._qmHover.enter}
+                    onHoverLeave={this._qmHover.leave}
+                  />
+                  {/* AgentTeam 快捷指令（自工具栏独立按钮迁入，置于菜单底部）：已启用展示
+                      指令列表，未启用展示启用引导；启用成功后子菜单原地刷新为列表。
+                      启用引导是终端版独有（依赖 this.ws / this.terminal），ChatInputBar
+                      的同款菜单有意不做该分支 */}
+                  <div
+                    className={`${chrome.quickMenuGroup} ${this.state.quickSettingsExpanded === 'agentteam' ? chrome.quickMenuGroupOpen : ''}`}
+                    onMouseEnter={() => this._qmHover.enter('agentteam')}
+                    onMouseLeave={() => this._qmHover.leave('agentteam')}
+                  >
+                    <button
+                      className={chrome.quickMenuRow}
+                      onClick={() => this.setState(s => ({ quickSettingsExpanded: s.quickSettingsExpanded === 'agentteam' ? null : 'agentteam' }))}
+                    >
+                      <span className={chrome.quickMenuRowIcon}><AgentTeamIcon /></span>
+                      <span className={chrome.quickMenuLabel}>{t('ui.terminal.agentTeam')}</span>
+                      <span className={chrome.quickMenuCaret}>▸</span>
                     </button>
-                    {this.state.presetItems.length === 0 ? (
-                      <div className={styles.popoverEmptyHint}>—</div>
-                    ) : (
-                      this.state.presetItems.map(item => {
-                        const isBuiltinRaw = item.builtinId && !item.modified;
-                        const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
-                        const desc = isBuiltinRaw ? t(item.description) : item.description;
-                        return (
-                          <button key={item.id} className={styles.presetMenuItem} onClick={() => this.handlePresetSend(desc)} title={desc}>
-                            {name || desc}
-                          </button>
-                        );
-                      })
-                    )}
+                    <div className={chrome.quickMenuSubWrap}>
+                      <div className={chrome.quickMenuSub}>
+                        {this.state.agentTeamEnabled ? (
+                          <>
+                            <button className={`${styles.presetMenuItem} ${styles.presetMenuItemMuted}`} onClick={() => this.setState({ quickSettingsOpen: false, quickSettingsExpanded: null, presetModalVisible: true })}>
+                              {t('ui.terminal.customShortcuts')}
+                            </button>
+                            {this.state.presetItems.length === 0 ? (
+                              <div className={styles.popoverEmptyHint}>—</div>
+                            ) : (
+                              this.state.presetItems.map(item => {
+                                const isBuiltinRaw = item.builtinId && !item.modified;
+                                const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
+                                const desc = isBuiltinRaw ? t(item.description) : item.description;
+                                return (
+                                  <button key={item.id} className={styles.presetMenuItem} onClick={() => this.handlePresetSend(desc)} title={desc}>
+                                    {name || desc}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </>
+                        ) : (
+                          <div className={chrome.quickMenuSubTipBox}>
+                            <div className={styles.agentTeamDisabledTip}>{tc('ui.terminal.agentTeamDisabledTip')}</div>
+                            <Button type="primary" size="small" loading={this.state.agentTeamEnabling} disabled={this.state.agentTeamEnabling} onClick={this.handleEnableAgentTeam}>{this.state.agentTeamEnabling ? t('ui.terminal.agentTeamEnabling') : t('ui.terminal.agentTeamEnable')}</Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                }
+                </div>
+              }
+            >
+              <button
+                className={`${styles.toolbarBtn} ${styles.quickSettingsBtn} ${this.state.quickSettingsOpen ? styles.quickSettingsBtnOpen : ''}`}
+                title={t('ui.terminal.quickSettings')}
               >
-                <button className={styles.toolbarBtn} title={t('ui.terminal.agentTeam')}>
-                  <AgentTeamIcon />
-                  <span>{t('ui.terminal.agentTeam')}</span>
-                </button>
-              </Popover>
-            ) : (
-              <Popover
-                trigger="click"
-                placement="top"
-                overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: '12px 16px', maxWidth: 360 }}
-                content={
-                  <div>
-                    <div className={styles.agentTeamDisabledTip}>{tc('ui.terminal.agentTeamDisabledTip')}</div>
-                    <Button type="primary" size="small" loading={this.state.agentTeamEnabling} disabled={this.state.agentTeamEnabling} onClick={this.handleEnableAgentTeam}>{this.state.agentTeamEnabling ? t('ui.terminal.agentTeamEnabling') : t('ui.terminal.agentTeamEnable')}</Button>
-                  </div>
-                }
-              >
-                <button className={`${styles.toolbarBtn} ${styles.toolbarBtnDisabled}`} title={t('ui.terminal.agentTeam')}>
-                  <AgentTeamIcon />
-                  <span>{t('ui.terminal.agentTeam')}</span>
-                </button>
-              </Popover>
-            )}
+                <span className={styles.quickSettingsIcon}><SparkleIcon /></span>
+              </button>
+            </Popover>
             {this.state.agentTeamEnabled ? (
               <Popover
                 trigger="click"
@@ -1798,163 +1694,28 @@ class TerminalPanel extends React.Component {
                   if (!v) this.setState({ ultraplanOpen: false });
                 }}
                 overlayClassName="ccv-ultraplan-popover"
-                overlayInnerStyle={{
-                  background: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-hover)',
-                  borderRadius: 8,
-                  padding: 0,
-                  // popover 宽高由 state 驱动;拖拽期 _handleUltraplanResizePointerDown 会
-                  // 直接改 .ant-popover-inner inline style(避免高频 setState),pointerup 落 state。
-                  width: this.state.ultraplanPopoverSize?.w || 560,
-                  height: this.state.ultraplanPopoverSize?.h || 480,
-                }}
+                overlayInnerStyle={ultraplanOverlayInnerStyle(this.state.ultraplanPopoverSize)}
                 content={
-                  <div className={styles.ultraplanPanel} ref={this._ultraplanPanelRef}>
-                    <div
-                      className={styles.ultraplanResizeHandle}
-                      onPointerDown={this._handleUltraplanResizePointerDown}
-                      aria-label={t('ui.ultraplan.resizeHandle')}
-                      role="separator"
-                      tabIndex={-1}
-                    >
-                      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                        <path
-                          d="M 4 0 L 16 0 L 0 16 L 0 4 A 4 4 0 0 1 4 0 Z"
-                          fill="currentColor"
-                        />
-                      </svg>
-                    </div>
-                    <div className={styles.ultraplanContent}>
-                    <div className={styles.ultraplanHeader}>
-                      <span className={styles.ultraplanHeaderTitle}>
-                        {t('ui.ultraplan.title')}
-                        <ConceptHelp doc="UltraPlan" zIndex={1100} />
-                        <button
-                          type="button"
-                          className={styles.ultraplanManageBtn}
-                          title={t('ui.ultraplan.manageExperts')}
-                          aria-label={t('ui.ultraplan.manageExperts')}
-                          onClick={() => this.setState({ ultraplanManagerOpen: true })}
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
-                        </button>
-                      </span>
-                      <button
-                        type="button"
-                        className={styles.ultraplanCloseBtn}
-                        onClick={() => this.setState({ ultraplanOpen: false })}
-                      >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                          <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                        </svg>
-                      </button>
-                    </div>
-                    <div className={styles.ultraplanVariantRow}>
-                      {buildExpertList(this.state.customUltraplanExperts, this.state.ultraplanExpertOrder, this.state.ultraplanExpertHidden)
-                        .filter(d => !d.hidden)
-                        .map(d => {
-                          const active = this.state.ultraplanVariant === d.key;
-                          if (d.kind === 'builtin') {
-                            return (
-                              <button
-                                key={d.key}
-                                className={`${styles.ultraplanRoleBtn} ${active ? styles.ultraplanRoleBtnActive : ''}`}
-                                onClick={() => this.setState({ ultraplanVariant: d.key })}
-                              >{this._ultraplanExpertIcon(d)}{t(d.key === 'codeExpert' ? 'ui.ultraplan.roleCodeExpert' : 'ui.ultraplan.roleResearchExpert')}</button>
-                            );
-                          }
-                          const item = d.item;
-                          return (
-                            <span key={d.key} className={styles.ultraplanCustomWrap}>
-                              <button
-                                className={`${styles.ultraplanRoleBtn} ${active ? styles.ultraplanRoleBtnActive : ''}`}
-                                onClick={() => this.setState({ ultraplanVariant: d.key })}
-                                title={item.title}
-                              >
-                                {this._ultraplanExpertIcon(d)}
-                                <span className={styles.ultraplanCustomTitle}>{item.title}</span>
-                              </button>
-                              <span
-                                className={styles.ultraplanEditPencil}
-                                onClick={(e) => { e.stopPropagation(); this.openCustomUltraplanEditor(item); }}
-                                title={t('ui.ultraplan.customEditTitle')}
-                              >
-                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
-                              </span>
-                            </span>
-                          );
-                        })}
-                      <button
-                        type="button"
-                        className={styles.ultraplanAddExpertBtn}
-                        onClick={() => this.openCustomUltraplanEditor(null)}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M12 5v14M5 12h14" />
-                        </svg>
-                        {t('ui.ultraplan.customExpert')}
-                      </button>
-                    </div>
-                    <div className={styles.ultraplanInputBox}>
-                      <textarea
-                        className={styles.ultraplanTextarea}
-                        value={this.state.ultraplanPrompt}
-                        onChange={(e) => this.setState({ ultraplanPrompt: e.target.value })}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && (this.state.ultraplanPrompt.trim() || this.state.ultraplanFiles.length > 0)) { e.preventDefault(); this.handleUltraplanSend(); } }}
-                        onPaste={this.handleUltraplanPaste}
-                        placeholder={t('ui.ultraplan.placeholder')}
-                        /* rows={1} 让 CSS flex 完全控制高度,避免 rows*line-height 作 intrinsic baseline 干扰 grow */
-                        rows={1}
-                        autoFocus
-                      />
-                      {this.state.ultraplanFiles.length > 0 && (
-                        <div className={styles.ultraplanFileList}>
-                          {this.state.ultraplanFiles.map((f, i) => {
-                            const isImage = /\.(png|jpe?g|gif|svg|bmp|webp|avif|ico|icns)$/i.test(f.name);
-                            const src = apiUrl(`/api/file-raw?path=${encodeURIComponent(f.path)}`);
-                            return isImage ? (
-                              <div key={i} className={styles.ultraplanImageItem} title={f.name}>
-                                <img
-                                  src={src}
-                                  className={styles.ultraplanImageThumb}
-                                  alt={f.name}
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={(e) => { e.stopPropagation(); this.setState({ ultraplanLightbox: { src, alt: f.name } }); }}
-                                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.setState({ ultraplanLightbox: { src, alt: f.name } }); } }}
-                                />
-                                <ConfirmRemoveButton
-                                  title={t('ui.chatInput.confirmRemoveImage')}
-                                  onConfirm={() => this.handleUltraplanRemoveFile(i)}
-                                  onPopupOpenChange={(open) => this.setState({ ultraplanConfirming: open })}
-                                  className={styles.ultraplanImageRemove}
-                                  ariaLabel={t('ui.chatInput.removeImage')}
-                                >&times;</ConfirmRemoveButton>
-                              </div>
-                            ) : (
-                              <span key={i} className={styles.ultraplanFileChip} title={f.name}>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                                <span className={styles.ultraplanFileName}>{f.name}</span>
-                                <ConfirmRemoveButton
-                                  tag="span"
-                                  title={t('ui.chatInput.confirmRemoveFile')}
-                                  onConfirm={() => this.handleUltraplanRemoveFile(i)}
-                                  onPopupOpenChange={(open) => this.setState({ ultraplanConfirming: open })}
-                                  className={styles.ultraplanFileRemove}
-                                  ariaLabel={t('ui.chatInput.removeImage')}
-                                >&times;</ConfirmRemoveButton>
-                              </span>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                    <div className={styles.ultraplanFooter}>
-                      <button className={styles.ultraplanSendBtn} disabled={!this.state.ultraplanPrompt.trim() && this.state.ultraplanFiles.length === 0} onClick={this.handleUltraplanSend}>{t('ui.ultraplan.send')}</button>
-                      <button className={styles.ultraplanUploadBtn} onClick={this.handleUltraplanUpload}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>{t('ui.ultraplan.upload')}</button>
-                    </div>
-                    </div>
-                  </div>
+                  <UltraplanPanel
+                    variant={this.state.ultraplanVariant}
+                    prompt={this.state.ultraplanPrompt}
+                    files={this.state.ultraplanFiles}
+                    customExperts={this.state.customUltraplanExperts}
+                    expertOrder={this.state.ultraplanExpertOrder}
+                    expertHidden={this.state.ultraplanExpertHidden}
+                    onVariantChange={(v) => this.setState({ ultraplanVariant: v })}
+                    onPromptChange={(p) => this.setState({ ultraplanPrompt: p })}
+                    onSend={this.handleUltraplanSend}
+                    onUpload={this.handleUltraplanUpload}
+                    onPaste={this.handleUltraplanPaste}
+                    onRemoveFile={this.handleUltraplanRemoveFile}
+                    onClose={() => this.setState({ ultraplanOpen: false })}
+                    onOpenManager={() => this.setState({ ultraplanManagerOpen: true })}
+                    onOpenCustomEditor={this.openCustomUltraplanEditor}
+                    onPreviewImage={(lb) => this.setState({ ultraplanLightbox: lb })}
+                    onConfirmingChange={(open) => this.setState({ ultraplanConfirming: open })}
+                    onSizeChange={(size) => this.setState({ ultraplanPopoverSize: size })}
+                  />
                 }
               >
                 <button className={styles.toolbarBtn} onClick={() => this.setState({ ultraplanOpen: true })} title={t('ui.ultraplan')}>

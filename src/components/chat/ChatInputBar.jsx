@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import { Spin } from 'antd';
+import { Spin, Popconfirm, Popover } from 'antd';
 import { uploadFileAndGetPath } from '../terminal/TerminalPanel';
 import { apiUrl } from '../../utils/apiUrl';
 import { isMobile, isPad } from '../../env';
@@ -7,6 +7,10 @@ import { t, getLang } from '../../i18n';
 import ImageLightbox from '../common/ImageLightbox';
 import ConfirmRemoveButton from '../common/ConfirmRemoveButton';
 import styles from './ChatInputBar.module.css';
+import chrome from '../common/sharedChrome.module.css';
+import { SparkleIcon, AgentTeamIcon, UltraplanIcon, UploadIcon, TrashIcon } from '../common/quickMenuIcons';
+import QuickAutoApproveRows from '../common/QuickAutoApproveRows';
+import { createQuickMenuHoverIntent } from '../../utils/quickMenuHoverIntent';
 
 const SpeechRec = typeof window !== 'undefined' && window.isSecureContext
   ? (window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -20,8 +24,22 @@ const SPEECH_LANG_MAP = {
   tr: 'tr-TR', uk: 'uk-UA',
 };
 
-function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, pendingImages, onRemovePendingImage, uploadingItems, sendDeferred, onUploadStart, onUploadEnd, setContextBarSlot }) {
+function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, onKeyDown, onChange, onSend, onStop, onSuggestionClick, onUploadPath, presetItems, onPresetSend, onOpenPresetModal, onOpenUltraPlan, onClearContext, isStreaming, pendingImages, onRemovePendingImage, uploadingItems, sendDeferred, onUploadStart, onUploadEnd, setContextBarSlot, autoApproveSeconds, onAutoApproveChange, planAutoApproveSeconds, onPlanAutoApproveChange, onClearContextNow, ultraplanPopover, agentTeamEnabled }) {
   const [plusOpen, setPlusOpen] = useState(false);
+  // 桌面四芒星菜单的级联展开行（与终端工具栏同款交互）：null | 'perm' | 'plan' | 'agentteam'
+  const [quickExpanded, setQuickExpanded] = useState(null);
+  // latest-value ref：hover-intent 的延迟提交需要现场读最新展开行（见 utils/quickMenuHoverIntent）
+  const quickExpandedRef = useRef(quickExpanded);
+  quickExpandedRef.current = quickExpanded;
+  const qmHoverRef = useRef(null);
+  if (!qmHoverRef.current) {
+    qmHoverRef.current = createQuickMenuHoverIntent({
+      getExpanded: () => quickExpandedRef.current,
+      setExpanded: setQuickExpanded,
+    });
+  }
+  const qmHover = qmHoverRef.current;
+  useEffect(() => () => qmHover.cancel(), [qmHover]);
   const [recording, setRecording] = useState(false);
   const [interimText, setInterimText] = useState('');
   const [lightbox, setLightbox] = useState(null);
@@ -228,6 +246,26 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
     }
   };
 
+  // 关闭 [+] 菜单的统一出口：清 hover-intent 定时器 + 收起级联展开行
+  const closePlusMenu = () => {
+    qmHover.cancel();
+    setQuickExpanded(null);
+    setPlusOpen(false);
+  };
+
+  // 「上传文件」菜单项：桌面/移动两个菜单分支共用
+  const handleUploadPick = () => {
+    closePlusMenu();
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      await runUpload(file);
+    };
+    input.click();
+  };
+
   if (terminalVisible) {
     if (!inputSuggestion) return null;
     return (
@@ -318,81 +356,163 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
         <div className={styles.chatInputBottom}>
           <div className={styles.chatInputBottomLeft}>
           <div className={styles.plusArea}>
-            <button className={`${styles.plusBtn}${plusOpen ? ` ${styles.plusBtnOpen}` : ''}`} onClick={() => setPlusOpen(p => !p)} title={t('ui.chatInput.more')}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
+            <button className={`${styles.plusBtn}${plusOpen ? ` ${styles.plusBtnOpen}` : ''}`} onClick={() => (plusOpen ? closePlusMenu() : setPlusOpen(true))} title={!isMobile ? t('ui.terminal.quickSettings') : t('ui.chatInput.more')}>
+              {!isMobile ? <SparkleIcon /> : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              )}
             </button>
             {plusOpen && (
               <>
-              <div className={styles.plusOverlay} onClick={() => setPlusOpen(false)} />
-              <div className={styles.plusMenu}>
-                {presetItems && presetItems.length > 0 && onOpenPresetModal && (
-                  <button className={`${styles.plusMenuItem} ${styles.plusMenuItemMuted}`} onClick={() => { setPlusOpen(false); onOpenPresetModal(); }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                    <span className={styles.presetLabel}>{t('ui.terminal.customShortcuts')}</span>
-                  </button>
-                )}
-                {presetItems && presetItems.length > 0 && presetItems.map(item => {
-                  const isBuiltinRaw = item.builtinId && !item.modified;
-                  const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
-                  const desc = isBuiltinRaw ? t(item.description) : item.description;
-                  return (
-                    <button key={item.id} className={styles.plusMenuItem} onClick={() => {
-                      setPlusOpen(false);
-                      onPresetSend?.(desc);
-                    }} title={desc}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                        <circle cx="9" cy="7" r="4" />
-                        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                      </svg>
-                      <span className={styles.presetLabel}>{name || desc}</span>
+              <div className={styles.plusOverlay} onClick={closePlusMenu} />
+              <div className={`${styles.plusMenu}${!isMobile ? ` ${styles.plusMenuQuick}` : ''}`}>
+                {!isMobile ? (
+                  <>
+                    {/* 桌面：与终端工具栏四芒星菜单同款级联结构（共享 QuickAutoApproveRows）。
+                        改值必须走 AppBase handler（经 ChatView 钻取的 onAutoApproveChange /
+                        onPlanAutoApproveChange），原因见组件内注释 */}
+                    <QuickAutoApproveRows
+                      autoApproveSeconds={autoApproveSeconds}
+                      planAutoApproveSeconds={planAutoApproveSeconds}
+                      onAutoApproveChange={onAutoApproveChange}
+                      onPlanAutoApproveChange={onPlanAutoApproveChange}
+                      expandedKey={quickExpanded}
+                      onToggle={setQuickExpanded}
+                      onHoverEnter={qmHover.enter}
+                      onHoverLeave={qmHover.leave}
+                    />
+                    {/* AgentTeam ▸：原平铺的自定义快捷方式 + 预设列表收进级联子菜单。
+                        未启用时只引导去终端启用——启用流程依赖终端 ws
+                        （TerminalPanel.handleEnableAgentTeam），本菜单无法就地启用 */}
+                    <div
+                      className={`${chrome.quickMenuGroup} ${quickExpanded === 'agentteam' ? chrome.quickMenuGroupOpen : ''}`}
+                      onMouseEnter={() => qmHover.enter('agentteam')}
+                      onMouseLeave={() => qmHover.leave('agentteam')}
+                    >
+                      <button className={chrome.quickMenuRow} onClick={() => setQuickExpanded(quickExpanded === 'agentteam' ? null : 'agentteam')}>
+                        <span className={chrome.quickMenuRowIcon}><AgentTeamIcon /></span>
+                        <span className={chrome.quickMenuLabel}>{t('ui.terminal.agentTeam')}</span>
+                        <span className={chrome.quickMenuCaret}>▸</span>
+                      </button>
+                      <div className={chrome.quickMenuSubWrap}>
+                        <div className={chrome.quickMenuSub}>
+                          {!agentTeamEnabled ? (
+                            <div className={chrome.quickMenuSubTipBox}>{t('ui.chatInput.agentTeamEnableHint')}</div>
+                          ) : (
+                            <>
+                              {onOpenPresetModal && (
+                                <button className={`${styles.plusMenuItem} ${styles.plusMenuItemMuted} ${styles.quickMenuPresetItem}`} onClick={() => { closePlusMenu(); onOpenPresetModal(); }}>
+                                  {t('ui.terminal.customShortcuts')}
+                                </button>
+                              )}
+                              {(presetItems || []).map(item => {
+                                const isBuiltinRaw = item.builtinId && !item.modified;
+                                const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
+                                const desc = isBuiltinRaw ? t(item.description) : item.description;
+                                return (
+                                  <button key={item.id} className={`${styles.plusMenuItem} ${styles.quickMenuPresetItem}`} onClick={() => { closePlusMenu(); onPresetSend?.(desc); }} title={desc}>
+                                    {name || desc}
+                                  </button>
+                                );
+                              })}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* 移动端：保持原平铺菜单，仅 UltraPlan 移出为输入栏独立按钮 */}
+                    {presetItems && presetItems.length > 0 && onOpenPresetModal && (
+                      <button className={`${styles.plusMenuItem} ${styles.plusMenuItemMuted}`} onClick={() => { closePlusMenu(); onOpenPresetModal(); }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        <span className={styles.presetLabel}>{t('ui.terminal.customShortcuts')}</span>
+                      </button>
+                    )}
+                    {presetItems && presetItems.length > 0 && presetItems.map(item => {
+                      const isBuiltinRaw = item.builtinId && !item.modified;
+                      const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
+                      const desc = isBuiltinRaw ? t(item.description) : item.description;
+                      return (
+                        <button key={item.id} className={styles.plusMenuItem} onClick={() => {
+                          closePlusMenu();
+                          onPresetSend?.(desc);
+                        }} title={desc}>
+                          <AgentTeamIcon />
+                          <span className={styles.presetLabel}>{name || desc}</span>
+                        </button>
+                      );
+                    })}
+                    {onClearContext && (
+                      <button className={styles.plusMenuItem} onClick={() => { closePlusMenu(); onClearContext(); }}>
+                        <TrashIcon />
+                        <span>{t('ui.chatInput.clearContext')}</span>
+                      </button>
+                    )}
+                    <button className={styles.plusMenuItem} onClick={handleUploadPick}>
+                      <UploadIcon />
+                      <span>{t('ui.terminal.upload')}</span>
                     </button>
-                  );
-                })}
-                {onOpenUltraPlan && (
-                  <button className={styles.plusMenuItem} onClick={() => { setPlusOpen(false); onOpenUltraPlan(); }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="2.5"/><ellipse cx="12" cy="12" rx="10" ry="4"/>
-                      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(60 12 12)"/>
-                      <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(120 12 12)"/>
-                    </svg>
-                    <span>UltraPlan</span>
-                  </button>
+                  </>
                 )}
-                {onClearContext && (
-                  <button className={styles.plusMenuItem} onClick={() => { setPlusOpen(false); onClearContext(); }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M5 6v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>
-                    </svg>
-                    <span>{t('ui.chatInput.clearContext')}</span>
-                  </button>
-                )}
-                <button className={styles.plusMenuItem} onClick={() => {
-                  setPlusOpen(false);
-                  const input = document.createElement('input');
-                  input.type = 'file';
-                  input.onchange = async (e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    await runUpload(file);
-                  };
-                  input.click();
-                }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  <span>{t('ui.terminal.upload')}</span>
-                </button>
               </div>
               </>
             )}
           </div>
+          {/* UltraPlan / 上传 / 清空上下文平铺为输入栏独立圆钮（顺序与终端工具栏一致）；
+              移动端按需求只外置 UltraPlan，上传/清空仍留在 [+] 平铺菜单内。
+              桌面 ultraplanPopover 由 ChatView 组装（终端同款 UltraplanPanel + 守卫），
+              按钮点击走 onOpenUltraPlan 开、onOpenChange 只关——镜像终端单向模式 */}
+          {onOpenUltraPlan && (ultraplanPopover ? (
+            <Popover
+              trigger="click"
+              placement="top"
+              overlayClassName="ccv-ultraplan-popover"
+              open={ultraplanPopover.open}
+              onOpenChange={ultraplanPopover.onOpenChange}
+              overlayInnerStyle={ultraplanPopover.overlayInnerStyle}
+              content={ultraplanPopover.content}
+            >
+              <button className={styles.plusBtn} title="UltraPlan" onClick={onOpenUltraPlan}>
+                <UltraplanIcon />
+              </button>
+            </Popover>
+          ) : (
+            <button className={styles.plusBtn} title="UltraPlan" onClick={onOpenUltraPlan}>
+              <UltraplanIcon />
+            </button>
+          ))}
+          {!isMobile && (
+            <button className={styles.plusBtn} title={t('ui.terminal.upload')} onClick={handleUploadPick}>
+              <UploadIcon />
+            </button>
+          )}
+          {!isMobile && onClearContextNow && (() => {
+            // 与终端工具栏清空按钮同款 Popconfirm 气泡确认（非居中 Modal）：
+            // i18n 是单句 "X？Y。" 结构，按 ? / ？ 拆成 title + description 以换行呈现
+            const confirmFull = t('ui.chatInput.clearContextConfirm');
+            const qIdx = Math.max(confirmFull.indexOf('？'), confirmFull.indexOf('?'));
+            const confirmTitle = qIdx > 0 ? confirmFull.slice(0, qIdx + 1) : confirmFull;
+            const confirmDesc = qIdx > 0 ? confirmFull.slice(qIdx + 1).trim() : null;
+            return (
+              <Popconfirm
+                title={confirmTitle}
+                description={confirmDesc}
+                okText={t('ui.chatInput.clearContext')}
+                cancelText={t('ui.common.confirmCancel')}
+                okButtonProps={{ danger: true }}
+                placement="top"
+                onConfirm={onClearContextNow}
+              >
+                <button className={styles.plusBtn} title={t('ui.chatInput.clearContext')}>
+                  <TrashIcon />
+                </button>
+              </Popconfirm>
+            );
+          })()}
           {SpeechRec && (
             <button
               type="button"

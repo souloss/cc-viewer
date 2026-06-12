@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Typography, Empty } from 'antd';
-import { RightOutlined, DownOutlined } from '@ant-design/icons';
+import { Typography, Empty, Switch, Button, message } from 'antd';
+import { RightOutlined, DownOutlined, CopyOutlined } from '@ant-design/icons';
 import { renderMarkdown } from '../../utils/markdown';
 import { t } from '../../i18n';
 import { getContextSidebarArrowNavigation } from '../../utils/contextSidebarNavigation';
+import { buildContextItemRawText } from '../../utils/contextRaw';
 import JsonViewer from '../viewers/JsonViewer';
 import ConceptHelp from '../common/ConceptHelp';
 
@@ -128,6 +129,8 @@ function extractPreviewText(content) {
   return '';
 }
 
+// 注意：非 user 开头的消息（首条 assistant、连续 assistant 等）不进任何 turn，
+// 「原文」视图与解析视图同口径，同样不展示这些消息。
 function groupMessagesIntoTurns(messages) {
   const turns = [];
   let i = 0;
@@ -143,6 +146,9 @@ function groupMessagesIntoTurns(messages) {
       assistantTimestamp: assistantMsg?._timestamp || null,
       userBlocks: parseContentBlocks(userMsg?.content),
       assistantBlocks: assistantMsg ? parseContentBlocks(assistantMsg.content) : null,
+      // 原始消息引用：供「原文」视图无损输出（解析 blocks 是单向的，不可逆）
+      rawUser: userMsg,
+      rawAssistant: assistantMsg,
       preview: extractPreviewText(userMsg?.content),
     });
     i += assistantMsg ? 2 : 1;
@@ -406,7 +412,10 @@ function AccordionSection({ sectionKey, title, items, historyItems = [], onSelec
 
 export default function ContextTab({ body, response }) {
   const [selectedItem, setSelectedItem] = useState(null);
+  // 「原文」模式：右侧面板显示选中节点的原始 JSON 纯文本；切换节点时保持
+  const [rawMode, setRawMode] = useState(false);
   const sidebarRef = useRef(null);
+  const contentRef = useRef(null);
 
   // Compute turns from messages; override last turn's assistant blocks with actual response.
   const turns = useMemo(() => {
@@ -417,7 +426,13 @@ export default function ContextTab({ body, response }) {
     const responseBlocks = response?.content ? parseContentBlocks(response.content) : null;
     return [
       ...allTurns.slice(0, -1),
-      { ...last, assistantBlocks: responseBlocks ?? last.assistantBlocks },
+      {
+        ...last,
+        assistantBlocks: responseBlocks ?? last.assistantBlocks,
+        // 当前轮 assistant 原文 = 完整 response body（即该回复的原始 JSON，含 usage/model）；
+        // response 为字符串/null（流式中）时回退请求体内 assistant，与解析视图同口径
+        rawAssistant: responseBlocks ? response : last.rawAssistant,
+      },
     ];
   }, [body, response]);
 
@@ -429,6 +444,14 @@ export default function ContextTab({ body, response }) {
       setSelectedItem(null);
     }
   }, [body, response]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Resolve selected turn against live turns array to pick up response updates.
+  // 提前到 early return 之前：rawText 的 useMemo 依赖它（hooks 顺序约束）。
+  const currentSelectedItem = selectedItem?.isTurn
+    ? (turns.find((turn) => turn.id === selectedItem.id) ?? null)
+    : selectedItem;
+
+  const rawText = useMemo(() => buildContextItemRawText(currentSelectedItem), [currentSelectedItem]);
 
   if (!body || typeof body !== 'object') {
     return (
@@ -449,6 +472,7 @@ export default function ContextTab({ body, response }) {
         id: `tool__${i}`,
         label: tool?.name || `Tool ${i}`,
         blocks: parseToolBlocks(tool),
+        raw: tool,
       })),
     });
   }
@@ -459,7 +483,7 @@ export default function ContextTab({ body, response }) {
     accordionSections.push({
       key: 'system',
       title: t('ui.context.systemPrompt'),
-      items: [{ id: 'system__0', label: t('ui.context.systemPrompt'), blocks: systemBlocks }],
+      items: [{ id: 'system__0', label: t('ui.context.systemPrompt'), blocks: systemBlocks, raw: body.system }],
     });
   }
 
@@ -494,10 +518,6 @@ export default function ContextTab({ body, response }) {
     );
   }
 
-  // Resolve selected turn against live turns array to pick up response updates.
-  const currentSelectedItem = selectedItem?.isTurn
-    ? (turns.find((turn) => turn.id === selectedItem.id) ?? null)
-    : selectedItem;
   const itemMap = new Map();
   accordionSections.forEach((section) => {
     (section.historyItems || []).forEach((item) => itemMap.set(item.id, item));
@@ -525,30 +545,63 @@ export default function ContextTab({ body, response }) {
         ))}
       </div>
 
-      <div className={styles.content}>
-        {currentSelectedItem == null ? (
-          <div className={styles.contentEmpty}>
-            <Text type="secondary">{t('ui.context.selectPrompt')}</Text>
-          </div>
-        ) : (
-          <div key={currentSelectedItem.id} className={styles.contentInner}>
-            {currentSelectedItem.isTurn ? (
-              <TurnContent turn={currentSelectedItem} />
-            ) : (
-              <>
-                {currentSelectedItem.role && (
-                  <div className={styles.roleHeader}>
-                    <span className={`${styles.roleBadge} ${styles[`role_${currentSelectedItem.role}`] || ''}`}>
-                      {currentSelectedItem.role}
-                    </span>
-                    <span className={styles.roleLabel}>{currentSelectedItem.label}</span>
-                  </div>
-                )}
-                <RenderBlocks blocks={currentSelectedItem.blocks} />
-              </>
+      <div className={styles.contentWrap}>
+        {/* 工具条独占一行（滚动区之外），不悬浮、不遮挡内容 */}
+        {currentSelectedItem != null && (
+          <div className={styles.contentToolbar}>
+            {rawMode && (
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                onClick={() => {
+                  // navigator.clipboard 在非安全上下文（局域网明文 HTTP）为 undefined，先判存在
+                  if (!navigator.clipboard) return;
+                  navigator.clipboard.writeText(rawText).then(() => message.success(t('ui.copySuccess'))).catch(() => {});
+                }}
+              >
+                {t('ui.copy')}
+              </Button>
             )}
+            <span className={styles.contentToolbarLabel}>{t('ui.context.viewRaw')}</span>
+            <Switch
+              size="small"
+              checked={rawMode}
+              aria-label={t('ui.context.viewRaw')}
+              onChange={(v) => {
+                setRawMode(v);
+                // 长解析视图切短原文时不留滚出内容的空白滚动位
+                if (contentRef.current) contentRef.current.scrollTop = 0;
+              }}
+            />
           </div>
         )}
+        <div className={styles.content} ref={contentRef}>
+          {currentSelectedItem == null ? (
+            <div className={styles.contentEmpty}>
+              <Text type="secondary">{t('ui.context.selectPrompt')}</Text>
+            </div>
+          ) : (
+            <div key={currentSelectedItem.id} className={styles.contentInner}>
+              {rawMode ? (
+                <pre className={styles.rawPre}>{rawText}</pre>
+              ) : currentSelectedItem.isTurn ? (
+                <TurnContent turn={currentSelectedItem} />
+              ) : (
+                <>
+                  {currentSelectedItem.role && (
+                    <div className={styles.roleHeader}>
+                      <span className={`${styles.roleBadge} ${styles[`role_${currentSelectedItem.role}`] || ''}`}>
+                        {currentSelectedItem.role}
+                      </span>
+                      <span className={styles.roleLabel}>{currentSelectedItem.label}</span>
+                    </div>
+                  )}
+                  <RenderBlocks blocks={currentSelectedItem.blocks} />
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

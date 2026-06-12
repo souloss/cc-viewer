@@ -154,6 +154,11 @@ function stripSystemTags(text) {
     .replace(/<command-args>[\s\S]*?<\/command-args>/gi, '')
     .replace(/<teammate-message[\s\S]*?<\/teammate-message>/gi, '')
     .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, '')
+    // harness 注入队友消息轮的包裹文本：前缀行 + 尾部 IMPORTANT 免责段。
+    // 尾段用 ^...m 多行锚定——段落必须起行才剥，用户正文中段引用该句不受影响；
+    // 只锚定句首短语、不绑定其后的破折号/措辞（harness 微调标点不致尾段泄漏成 user 气泡）
+    .replace(/^Another Claude session sent a message:\s*/i, '')
+    .replace(/^IMPORTANT: This is NOT from your user\b[\s\S]*?(?=\n\n|$)/im, '')
     .trim();
 }
 
@@ -194,6 +199,9 @@ export function isSystemText(text) {
   if (/^Base directory for this skill:/i.test(trimmed)) return true;
   // CLI 内部合成 prompt（Recap/Title/Compact/Topic/Summary）
   if (isSyntheticPromptText(trimmed)) return true;
+  // harness 注入的队友消息轮：包裹文本（前缀 + 尾部 IMPORTANT 段）非用户手输，
+  // teammate 内容本身经 classifyUserContent 提取为 teammateBlocks 独立渲染
+  if (/^Another Claude session sent a message:/i.test(trimmed)) return true;
   // 用户拒绝 tool / 中断 Claude 时 CLI 注入的占位 user message —— 与上方 "✗ 已拒绝" badge 语义重复
   // 涵盖历史变体："[Request interrupted by user for tool use]"、"[Request interrupted by user]"、"[Request interrupted...]"
   if (/^\[Request interrupted/i.test(trimmed)) return true;

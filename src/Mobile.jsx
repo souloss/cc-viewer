@@ -5,7 +5,8 @@ import AppBase, { styles, OPTIMISTIC_CLEAR_PERCENT } from './AppBase';
 import { isIOS, isPad, setViewMode } from './env';
 import { isMainAgent, isSystemText, classifyUserContent } from './utils/contentFilter';
 import { parseImOrigin } from './utils/imOrigin';
-import { getModelMaxTokens, getEffectiveModel, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens, AUTO_APPROVE_INSTANT } from './utils/helpers';
+import { getModelMaxTokens, getEffectiveModel, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens } from './utils/helpers';
+import { PERM_AUTO_APPROVE_OPTIONS, PLAN_AUTO_APPROVE_OPTIONS, autoApproveSelectOptions } from './utils/autoApproveOptions';
 import ChatView from './components/chat/ChatView';
 import TerminalPanel from './components/terminal/TerminalPanel';
 import { TerminalWsProvider } from './components/terminal/TerminalWsContext';
@@ -926,7 +927,10 @@ class Mobile extends AppBase {
                     onPendingPlanApproval={this.handlePendingPlanApproval}
                     onPendingAsk={this.handleApprovalAsk}
                     onPendingPtyPlan={this.handleApprovalPtyPlan}
+                    autoApproveSeconds={this.state.autoApproveSeconds}
+                    onAutoApproveChange={this.handleAutoApproveChange}
                     planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds}
+                    onPlanAutoApproveChange={this.handlePlanAutoApproveChange}
                     ownTabId={this.state.ownTabId}
                     projectName={this.state.projectName}
                     suppressInlineApprovalPanels={true}
@@ -950,6 +954,10 @@ class Mobile extends AppBase {
                 onRemovePendingImage={this._handleRemoveTerminalImage}
                 onClearPendingImages={this._handleClearTerminalImages}
                 onClearContextOptimistic={this.handleClearContextOptimistic}
+                autoApproveSeconds={this.state.autoApproveSeconds}
+                onAutoApproveChange={this.handleAutoApproveChange}
+                planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds}
+                onPlanAutoApproveChange={this.handlePlanAutoApproveChange}
               />
             </div>
           )}
@@ -1137,13 +1145,7 @@ class Mobile extends AppBase {
                     size="small"
                     value={this.state.autoApproveSeconds || 0}
                     onChange={this.handleAutoApproveChange}
-                    options={[
-                      { label: t('ui.permission.autoApprove.off'), value: 0 },
-                      { label: '3s', value: 3 },
-                      { label: '5s', value: 5 },
-                      { label: '10s', value: 10 },
-                      { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
-                    ]}
+                    options={autoApproveSelectOptions(PERM_AUTO_APPROVE_OPTIONS, t)}
                     style={{ width: 100 }}
                   />
                 </div>
@@ -1159,13 +1161,7 @@ class Mobile extends AppBase {
                       size="small"
                       value={this.state.approvalPrefs.planAutoApproveSeconds || 0}
                       onChange={(value) => this.handleApprovalPrefsChange({ planAutoApproveSeconds: value })}
-                      options={[
-                        { label: t('ui.permission.autoApprove.off'), value: 0 },
-                        { label: '3s', value: 3 },
-                        { label: '5s', value: 5 },
-                        { label: '10s', value: 10 },
-                        { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
-                      ]}
+                      options={autoApproveSelectOptions(PLAN_AUTO_APPROVE_OPTIONS, t)}
                       style={{ width: 100 }}
                     />
                   </div>

@@ -32,6 +32,9 @@ import ChatInputBar from './ChatInputBar';
 import WorkflowLiveHud from '../viewers/WorkflowLiveHud';
 import PresetModal from '../terminal/PresetModal';
 import UltraPlanModal from '../terminal/UltraPlanModal';
+import UltraplanPanel, { readUltraplanPopoverSize, ultraplanOverlayInnerStyle } from '../terminal/UltraplanPanel';
+import UltraplanExpertManagerModal from '../terminal/UltraplanExpertManagerModal';
+import { visibleExpertKeys } from '../../utils/ultraplanExperts';
 import { TerminalWsContext } from '../terminal/TerminalWsContext';
 import CustomUltraplanEditModal from '../terminal/CustomUltraplanEditModal';
 import { buildLocalUltraplan } from '../../utils/ultraplanTemplates';
@@ -253,7 +256,7 @@ class ChatView extends React.Component {
       uploadingItems: [], // [{ id, name, previewUrl }] — 上传在途的占位项(路径还没 resolve);预览条只从 pendingImages 渲染缩略图,故占位需独立 state
       sendDeferred: false, // 仅渲染用:有上传在途时按了发送 → 缓发态(发送按钮 spinner)。权威双发标志是实例字段 _sendDeferred
       agentTeamEnabled: false,
-      ultraplanModalOpen: false,
+      ultraplanModalOpen: false, // 移动端专用（桌面走 ultraplanPopoverOpen 的终端同款弹层）
       ultraplanVariant: 'codeExpert',
       ultraplanPrompt: '',
       ultraplanFiles: [],
@@ -263,6 +266,14 @@ class ChatView extends React.Component {
       customUltraplanExperts: [],
       customUltraplanEditOpen: false,
       customUltraplanEditing: null,
+      // 桌面隐藏终端的输入栏 UltraPlan 弹层（与终端工具栏共用 UltraplanPanel）
+      ultraplanPopoverOpen: false,
+      ultraplanPopoverSize: readUltraplanPopoverSize(), // 与终端弹层共享同一对 localStorage key
+      ultraplanExpertOrder: [],
+      ultraplanExpertHidden: [],
+      ultraplanManagerOpen: false,
+      ultraplanLightbox: null,
+      ultraplanConfirming: false,
       // ExitPlanMode V2 input.planFilePath 异步读盘缓存：{ [planFilePath]: content }
       planFileContents: {},
     };
@@ -490,6 +501,9 @@ class ChatView extends React.Component {
       nextProps.fileLoading !== this.props.fileLoading ||
       nextProps.claudeSettings !== this.props.claudeSettings ||
       nextProps.preferences !== this.props.preferences ||
+      // 审批档位值要直达终端工具栏快捷菜单：不能只依赖 preferences 引用同批变化放行
+      nextProps.autoApproveSeconds !== this.props.autoApproveSeconds ||
+      nextProps.planAutoApproveSeconds !== this.props.planAutoApproveSeconds ||
       nextState !== this.state
     );
   }
@@ -2133,15 +2147,37 @@ class ChatView extends React.Component {
       items.unshift({ id: Date.now() + Math.random(), builtinId: bp.builtinId, teamName: bp.teamName, description: bp.description });
     }
     const customExperts = Array.isArray(data.customUltraplanExperts) ? data.customUltraplanExperts : [];
-    // 若当前选中的自定义专家已不存在（被另一端删除），回退到 codeExpert
+    const expertOrder = Array.isArray(data.ultraplanExpertOrder) ? data.ultraplanExpertOrder : [];
+    const expertHidden = Array.isArray(data.ultraplanExpertHidden) ? data.ultraplanExpertHidden : [];
+    const next = {
+      presetItems: items,
+      customUltraplanExperts: customExperts,
+      ultraplanExpertOrder: expertOrder,
+      ultraplanExpertHidden: expertHidden,
+    };
+    // 若当前选中的变体已不可见（被另一端删除 / 隐藏），回退到首个可见专家（无可见则 codeExpert）。
+    // 与 TerminalPanel._loadPresetShortcuts 同款语义。
     const current = this.state.ultraplanVariant;
-    const next = { presetItems: items, customUltraplanExperts: customExperts };
-    if (typeof current === 'string' && current.startsWith('custom:')) {
-      const id = current.slice('custom:'.length);
-      if (!customExperts.some(e => e.id === id)) next.ultraplanVariant = 'codeExpert';
+    const visible = visibleExpertKeys(customExperts, expertOrder, expertHidden);
+    if (typeof current === 'string' && !visible.includes(current)) {
+      next.ultraplanVariant = visible[0] || 'codeExpert';
     }
     this.setState(next);
   }
+
+  // 清空上下文的直接执行体（无确认弹层）：移动端菜单项经 Modal.confirm 包装调用；
+  // 桌面输入栏独立按钮由 ChatInputBar 的 Popconfirm（与终端工具栏同款气泡）确认后调用。
+  _doClearContext = () => {
+    const textarea = this._inputRef.current;
+    if (!textarea) return;
+    textarea.value = '/clear';
+    // /clear 不应被「上传缓发」卡住:先撤销缓发 + 清空上传占位(并 revoke url),
+    // setState 提交后再发 → handleInputSend 守卫看到 uploadingItems 为空,不会 defer。
+    this._clearDeferSend();
+    for (const u of this.state.uploadingItems) { if (u.previewUrl) { try { URL.revokeObjectURL(u.previewUrl); } catch {} } }
+    this.setState({ inputEmpty: false, pendingImages: [], uploadingItems: [] }, () => this.handleInputSend());
+    this.props.onClearContextOptimistic?.();
+  };
 
   handlePresetSend = (description) => {
     if (!description) return;
@@ -2193,6 +2229,7 @@ class ChatView extends React.Component {
       }
       this.setState({
         ultraplanModalOpen: false,
+        ultraplanPopoverOpen: false,
         ultraplanPrompt: '',
         ultraplanVariant: 'codeExpert',
         ultraplanFiles: [],
@@ -2205,6 +2242,7 @@ class ChatView extends React.Component {
 
     this.setState({
       ultraplanModalOpen: false,
+      ultraplanPopoverOpen: false,
       ultraplanPrompt: '',
       ultraplanVariant: 'codeExpert',
       ultraplanFiles: [],
@@ -2240,23 +2278,43 @@ class ChatView extends React.Component {
   };
 
   _openCustomUltraplanEditor = (item) => {
-    // 打开专家编辑器时关闭父 UltraPlan 弹窗，避免两层 modal 在移动端叠加遮挡。
-    // 用快照记录原本的打开状态，close 时按实际状态恢复——防御未来非 UltraPlan 路径调用。
-    this.setState(prev => ({
-      customUltraplanEditOpen: true,
-      customUltraplanEditing: item || null,
-      _ultraplanWasOpenBeforeEdit: prev.ultraplanModalOpen,
-      ultraplanModalOpen: false,
-    }));
+    if (isMobile) {
+      // 移动端：打开专家编辑器时关闭父 UltraPlan 弹窗，避免两层 modal 叠加遮挡。
+      // 用快照记录原本的打开状态，close 时按实际状态恢复——防御未来非 UltraPlan 路径调用。
+      this.setState(prev => ({
+        customUltraplanEditOpen: true,
+        customUltraplanEditing: item || null,
+        _ultraplanWasOpenBeforeEdit: prev.ultraplanModalOpen,
+        ultraplanModalOpen: false,
+      }));
+      return;
+    }
+    // 桌面 popover 路径与终端逐字一致：编辑器打开不收面板，
+    // 靠 _ultraplanPopoverOnOpenChange 守卫拦编辑器 mask 的外部点击
+    this.setState({ customUltraplanEditOpen: true, customUltraplanEditing: item || null });
   };
 
   _closeCustomUltraplanEditor = () => {
-    this.setState(prev => ({
-      customUltraplanEditOpen: false,
-      customUltraplanEditing: null,
-      ultraplanModalOpen: !!prev._ultraplanWasOpenBeforeEdit,
-      _ultraplanWasOpenBeforeEdit: false,
-    }));
+    if (isMobile) {
+      this.setState(prev => ({
+        customUltraplanEditOpen: false,
+        customUltraplanEditing: null,
+        ultraplanModalOpen: !!prev._ultraplanWasOpenBeforeEdit,
+        _ultraplanWasOpenBeforeEdit: false,
+      }));
+      return;
+    }
+    this.setState({ customUltraplanEditOpen: false, customUltraplanEditing: null });
+  };
+
+  // 桌面输入栏 UltraPlan 弹层的关闭守卫（与 TerminalPanel 的 onOpenChange 同机制）：
+  // 编辑器/管理弹窗是 portal Modal，其 mask 对本 Popover 而言是「外部点击」——rc-trigger
+  // 的 capture-phase mousedown 早于 rc-dialog 的 bubble click，守卫读到的状态仍为 true，
+  // 直接拦掉本次关闭；lightbox / ConfirmRemoveButton 气泡同理。
+  _ultraplanPopoverOnOpenChange = (v) => {
+    if (!v && (this.state.ultraplanLightbox || this.state.ultraplanConfirming
+      || this.state.customUltraplanEditOpen || this.state.ultraplanManagerOpen)) return;
+    if (!v) this.setState({ ultraplanPopoverOpen: false });
   };
 
   _saveCustomUltraplanExpert = (...a) => this._ultraplan.saveExpert(...a);
@@ -3850,26 +3908,45 @@ class ChatView extends React.Component {
               presetItems={this.state.presetItems}
               onPresetSend={this.handlePresetSend}
               onOpenPresetModal={() => this.setState({ mobilePresetModalVisible: true })}
-              onOpenUltraPlan={this.state.agentTeamEnabled && this.props.cliMode ? () => this.setState({ ultraplanModalOpen: true }) : null}
+              onOpenUltraPlan={this.state.agentTeamEnabled && this.props.cliMode
+                ? (isMobile ? () => this.setState({ ultraplanModalOpen: true }) : () => this.setState({ ultraplanPopoverOpen: true }))
+                : null}
+              ultraplanPopover={(!isMobile && this.state.agentTeamEnabled && this.props.cliMode) ? {
+                open: this.state.ultraplanPopoverOpen,
+                onOpenChange: this._ultraplanPopoverOnOpenChange,
+                overlayInnerStyle: ultraplanOverlayInnerStyle(this.state.ultraplanPopoverSize),
+                content: (
+                  <UltraplanPanel
+                    variant={this.state.ultraplanVariant}
+                    prompt={this.state.ultraplanPrompt}
+                    files={this.state.ultraplanFiles}
+                    customExperts={this.state.customUltraplanExperts}
+                    expertOrder={this.state.ultraplanExpertOrder}
+                    expertHidden={this.state.ultraplanExpertHidden}
+                    onVariantChange={(v) => this.setState({ ultraplanVariant: v })}
+                    onPromptChange={(p) => this.setState({ ultraplanPrompt: p })}
+                    onSend={this._handleUltraplanSend}
+                    onUpload={this._handleUltraplanUpload}
+                    onPaste={this._handleUltraplanPaste}
+                    onRemoveFile={this._handleUltraplanRemoveFile}
+                    onClose={() => this.setState({ ultraplanPopoverOpen: false })}
+                    onOpenManager={() => this.setState({ ultraplanManagerOpen: true })}
+                    onOpenCustomEditor={this._openCustomUltraplanEditor}
+                    onPreviewImage={(lb) => this.setState({ ultraplanLightbox: lb })}
+                    onConfirmingChange={(open) => this.setState({ ultraplanConfirming: open })}
+                    onSizeChange={(size) => this.setState({ ultraplanPopoverSize: size })}
+                  />
+                ),
+              } : null}
               onClearContext={this.props.cliMode ? () => {
                 Modal.confirm({
                   title: t('ui.chatInput.clearContextConfirm'),
                   okType: 'danger',
                   okText: t('ui.chatInput.clearContext'),
-                  onOk: () => {
-                    const textarea = this._inputRef.current;
-                    if (textarea) {
-                      textarea.value = '/clear';
-                      // /clear 不应被「上传缓发」卡住:先撤销缓发 + 清空上传占位(并 revoke url),
-                      // setState 提交后再发 → handleInputSend 守卫看到 uploadingItems 为空,不会 defer。
-                      this._clearDeferSend();
-                      for (const u of this.state.uploadingItems) { if (u.previewUrl) { try { URL.revokeObjectURL(u.previewUrl); } catch {} } }
-                      this.setState({ inputEmpty: false, pendingImages: [], uploadingItems: [] }, () => this.handleInputSend());
-                      this.props.onClearContextOptimistic?.();
-                    }
-                  },
+                  onOk: this._doClearContext,
                 });
               } : null}
+              onClearContextNow={this.props.cliMode ? this._doClearContext : null}
               isStreaming={uiStreaming}
               pendingImages={this.state.pendingImages}
               onRemovePendingImage={this._removePendingImage}
@@ -3878,6 +3955,11 @@ class ChatView extends React.Component {
               onUploadStart={this.handleUploadStart}
               onUploadEnd={this.handleUploadEnd}
               setContextBarSlot={this.props.setContextBarSlot}
+              autoApproveSeconds={this.props.autoApproveSeconds}
+              onAutoApproveChange={this.props.onAutoApproveChange}
+              planAutoApproveSeconds={this.props.planAutoApproveSeconds}
+              onPlanAutoApproveChange={this.props.onPlanAutoApproveChange}
+              agentTeamEnabled={this.state.agentTeamEnabled}
             />
             </div>
             <UltraPlanModal
@@ -3887,6 +3969,8 @@ class ChatView extends React.Component {
               files={this.state.ultraplanFiles}
               agentTeamEnabled={this.state.agentTeamEnabled}
               customExperts={this.state.customUltraplanExperts}
+              expertOrder={this.state.ultraplanExpertOrder}
+              expertHidden={this.state.ultraplanExpertHidden}
               onClose={() => this.setState({ ultraplanModalOpen: false })}
               onVariantChange={(v) => this.setState({ ultraplanVariant: v })}
               onPromptChange={(t) => this.setState({ ultraplanPrompt: t })}
@@ -3895,6 +3979,7 @@ class ChatView extends React.Component {
               onPaste={this._handleUltraplanPaste}
               onRemoveFile={this._handleUltraplanRemoveFile}
               onOpenCustomEditor={this._openCustomUltraplanEditor}
+              onOpenManager={() => this.setState({ ultraplanManagerOpen: true })}
               modalSize={this.state.ultraplanModalSize}
               onModalSizeChange={this._handleUltraplanModalSizeChange}
             />
@@ -3905,6 +3990,22 @@ class ChatView extends React.Component {
               onDelete={this._deleteCustomUltraplanExpert}
               onClose={this._closeCustomUltraplanEditor}
             />
+            <UltraplanExpertManagerModal
+              open={this.state.ultraplanManagerOpen}
+              customExperts={this.state.customUltraplanExperts}
+              order={this.state.ultraplanExpertOrder}
+              hidden={this.state.ultraplanExpertHidden}
+              onPersist={({ order, hidden }) => this._ultraplan.persistExpertLayout({ order, hidden })}
+              onClose={() => this.setState({ ultraplanManagerOpen: false })}
+            />
+            {this.state.ultraplanLightbox && (
+              <ImageLightbox
+                src={this.state.ultraplanLightbox.src}
+                alt={this.state.ultraplanLightbox.alt}
+                zIndex={1200}
+                onClose={() => this.setState({ ultraplanLightbox: null })}
+              />
+            )}
             </div>
           </div>
           {cliMode && !this.props.sdkMode && onToggleTerminal && (
@@ -3945,6 +4046,10 @@ class ChatView extends React.Component {
                 getChatScroller={() => this._getScrollContainer()}
                 onClearContextOptimistic={this.props.onClearContextOptimistic}
                 setContextBarSlot={this.props.setContextBarSlot}
+                autoApproveSeconds={this.props.autoApproveSeconds}
+                onAutoApproveChange={this.props.onAutoApproveChange}
+                planAutoApproveSeconds={this.props.planAutoApproveSeconds}
+                onPlanAutoApproveChange={this.props.onPlanAutoApproveChange}
                 />
               </div>
             </>

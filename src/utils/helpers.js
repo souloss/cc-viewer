@@ -312,11 +312,9 @@ export function getModelInfo(modelName) {
   return info;
 }
 
-// 自动审批 autoApproveSeconds 的三态语义（持久化于 preferences.autoApproveSeconds）：
-//   0   = 关闭（手动审批）
-//   > 0 = 倒计时该秒数后自动批准
-//   -1  = 免审批（AUTO_APPROVE_INSTANT）：请求到达即放行，从源头绕过审批面板
-export const AUTO_APPROVE_INSTANT = -1;
+// 自动审批三态语义与档位的唯一事实源迁至 ./autoApproveOptions.js（node 可直接测试，
+// 无 Vite 专属依赖）；这里 re-export 维持既有 import 路径不变。
+export { AUTO_APPROVE_INSTANT } from './autoApproveOptions.js';
 
 export function getSvgAvatar(type) {
   if (type === 'user') {

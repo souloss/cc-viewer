@@ -7078,6 +7078,14 @@ const i18nData = {
     "ar": "الدور {n}", "no": "Tur {n}", "pt-BR": "Turno {n}",
     "th": "รอบ {n}", "tr": "Tur {n}", "uk": "Хід {n}"
   },
+  "ui.context.viewRaw": {
+    "zh": "原文", "en": "Raw", "zh-TW": "原文",
+    "ko": "원문", "ja": "原文", "de": "Rohdaten",
+    "es": "Original", "fr": "Brut", "it": "Grezzo",
+    "da": "Rå", "pl": "Surowy", "ru": "Исходник",
+    "ar": "النص الأصلي", "no": "Rå", "pt-BR": "Bruto",
+    "th": "ต้นฉบับ", "tr": "Ham", "uk": "Вихідний"
+  },
   "ui.workspaces.title": {
     "zh": "工作区", "en": "Workspaces", "zh-TW": "工作區",
     "ko": "워크스페이스", "ja": "ワークスペース", "de": "Arbeitsbereiche",
@@ -7396,6 +7404,26 @@ const i18nData = {
     "th": "กด Ctrl+C ในเทอร์มินัลที่เปิด ccv เพื่อออก",
     "tr": "Çıkmak için ccv'nin başlatıldığı terminalde Ctrl+C'ye basın",
     "uk": "Натисніть Ctrl+C у терміналі, де був запущений ccv, щоб вийти"
+  },
+  "ui.terminal.quickSettings": {
+    "zh": "快捷设置",
+    "en": "Quick settings",
+    "zh-TW": "快捷設定",
+    "ko": "빠른 설정",
+    "ja": "クイック設定",
+    "de": "Schnelleinstellungen",
+    "es": "Ajustes rápidos",
+    "fr": "Réglages rapides",
+    "it": "Impostazioni rapide",
+    "da": "Hurtige indstillinger",
+    "pl": "Szybkie ustawienia",
+    "ru": "Быстрые настройки",
+    "ar": "إعدادات سريعة",
+    "no": "Hurtiginnstillinger",
+    "pt-BR": "Configurações rápidas",
+    "th": "การตั้งค่าด่วน",
+    "tr": "Hızlı ayarlar",
+    "uk": "Швидкі налаштування"
   },
   "ui.terminal.agentTeam": {
     "zh": "AgentTeam",
@@ -7980,6 +8008,26 @@ const i18nData = {
     "pt-BR": "Limpar o contexto atual? Não pode ser desfeito.",
     "th": "ล้างบริบทปัจจุบัน? ไม่สามารถย้อนกลับได้",
     "tr": "Mevcut bağlamı temizle? Bu geri alınamaz.", "uk": "Очистити контекст? Це не можна скасувати."
+  },
+  "ui.chatInput.agentTeamEnableHint": {
+    "zh": "AgentTeam 未启用，请在终端工具栏的快捷设置菜单中启用",
+    "en": "AgentTeam is not enabled. Enable it from the quick settings menu in the terminal toolbar",
+    "zh-TW": "AgentTeam 未啟用，請在終端工具列的快捷設定選單中啟用",
+    "ko": "AgentTeam이 활성화되지 않았습니다. 터미널 도구 모음의 빠른 설정 메뉴에서 활성화하세요",
+    "ja": "AgentTeam は有効になっていません。ターミナルツールバーのクイック設定メニューから有効化してください",
+    "de": "AgentTeam ist nicht aktiviert. Aktiviere es über das Schnelleinstellungsmenü in der Terminal-Symbolleiste",
+    "es": "AgentTeam no está habilitado. Actívalo desde el menú de ajustes rápidos en la barra de herramientas del terminal",
+    "fr": "AgentTeam n'est pas activé. Activez-le depuis le menu des réglages rapides de la barre d'outils du terminal",
+    "it": "AgentTeam non è abilitato. Abilitalo dal menu delle impostazioni rapide nella barra degli strumenti del terminale",
+    "da": "AgentTeam er ikke aktiveret. Aktivér det via menuen for hurtige indstillinger i terminalens værktøjslinje",
+    "pl": "AgentTeam nie jest włączony. Włącz go w menu szybkich ustawień na pasku narzędzi terminala",
+    "ru": "AgentTeam не включён. Включите его в меню быстрых настроек на панели инструментов терминала",
+    "ar": "AgentTeam غير مُفعَّل. فعِّله من قائمة الإعدادات السريعة في شريط أدوات الطرفية",
+    "no": "AgentTeam er ikke aktivert. Aktiver det via hurtiginnstillinger-menyen i terminalens verktøylinje",
+    "pt-BR": "O AgentTeam não está habilitado. Habilite-o no menu de configurações rápidas na barra de ferramentas do terminal",
+    "th": "AgentTeam ยังไม่ได้เปิดใช้งาน โปรดเปิดใช้งานจากเมนูการตั้งค่าด่วนในแถบเครื่องมือเทอร์มินัล",
+    "tr": "AgentTeam etkin değil. Terminal araç çubuğundaki hızlı ayarlar menüsünden etkinleştirin",
+    "uk": "AgentTeam не ввімкнено. Увімкніть його в меню швидких налаштувань на панелі інструментів термінала"
   },
   "ui.terminal.upload": {
     "zh": "上传文件",

@@ -5,7 +5,8 @@ import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
 import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
-import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, resolveCalibrationTokens, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens, AUTO_APPROVE_INSTANT } from '../../utils/helpers';
+import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, resolveCalibrationTokens, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
+import { PERM_AUTO_APPROVE_OPTIONS, PLAN_AUTO_APPROVE_OPTIONS, autoApproveSelectOptions } from '../../utils/autoApproveOptions';
 import { isSystemText, classifyUserContent, isMainAgent } from '../../utils/contentFilter';
 import { parseImOrigin } from '../../utils/imOrigin';
 import { PINNED_KEY, parsePinned, serializePinned, togglePinned } from '../../utils/pinnedMenu';
@@ -1899,13 +1900,7 @@ class AppHeader extends React.Component {
                 size="small"
                 value={autoApproveSeconds || 0}
                 onChange={(value) => onAutoApproveChange && onAutoApproveChange(value)}
-                options={[
-                  { label: t('ui.permission.autoApprove.off'), value: 0 },
-                  { label: '3s', value: 3 },
-                  { label: '5s', value: 5 },
-                  { label: '10s', value: 10 },
-                  { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
-                ]}
+                options={autoApproveSelectOptions(PERM_AUTO_APPROVE_OPTIONS, t)}
                 style={{ width: 100 }}
               />
             </div>
@@ -1922,13 +1917,7 @@ class AppHeader extends React.Component {
                     size="small"
                     value={this.props.approvalPrefs.planAutoApproveSeconds || 0}
                     onChange={(value) => this.props.onApprovalPrefsChange({ planAutoApproveSeconds: value })}
-                    options={[
-                      { label: t('ui.permission.autoApprove.off'), value: 0 },
-                      { label: '3s', value: 3 },
-                      { label: '5s', value: 5 },
-                      { label: '10s', value: 10 },
-                      { label: t('ui.permission.autoApprove.instant'), value: AUTO_APPROVE_INSTANT },
-                    ]}
+                    options={autoApproveSelectOptions(PLAN_AUTO_APPROVE_OPTIONS, t)}
                     style={{ width: 100 }}
                   />
                 </div>
