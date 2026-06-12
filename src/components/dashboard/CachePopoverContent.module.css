@@ -9,9 +9,16 @@
      antd Popover 默认 autoAdjustOverflow 仍会把超出视口的部分顶回来，矮窗口下不会贴边溢出。 */
   max-height: calc(100vh - 140px);
   overflow-y: auto;
-  /* iOS 抽屉里也用此组件：开启原生惯性滚动，避免 body 弹性滚动穿透。 */
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+}
+
+/* 移动端抽屉变体（inDrawer）：抽屉的 .mobileCachePanelBody 已是滚动容器，
+   这里不限高、不自滚动 —— 100vh 在 zoom/scale(0.6) 子树里只剩约 60% 屏高，
+   PC 弹层的 max-height 在抽屉里会把内容压到半屏并产生嵌套双滚动。 */
+.cacheScrollAreaInDrawer {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .cachePopoverTitle {

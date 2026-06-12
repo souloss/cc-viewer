@@ -49,6 +49,7 @@ export default function CachePopoverContent({
   onRefreshMemory,
   onSkillImported,
   memoryRefreshing = false,
+  inDrawer = false,
 }) {
   const skillFileInputRef = useRef(null);
   const skillFolderInputRef = useRef(null);
@@ -406,7 +407,7 @@ export default function CachePopoverContent({
           />
         </div>
       </div>
-      <div className={styles.cacheScrollArea}>
+      <div className={inDrawer ? styles.cacheScrollAreaInDrawer : styles.cacheScrollArea}>
         {hasBuiltin && (
           <div className={`${styles.cacheSection} ${styles.cacheSectionBordered}`}>
             <div className={styles.cacheSectionLabel}>

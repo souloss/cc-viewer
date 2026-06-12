@@ -987,6 +987,7 @@ class Mobile extends AppBase {
               <div className={styles.mobileCachePanelBody}>
                 {this.state.mobileCachePanelVisible && (
                   <CachePopoverContent
+                    inDrawer
                     requests={filteredRequests}
                     serverCachedContent={this.state.serverCachedContent}
                     contextPercent={mobileContextPercent}
