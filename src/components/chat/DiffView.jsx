@@ -32,7 +32,7 @@ function computeDiffLines(oldStr, newStr, startLine) {
   return lines;
 }
 
-function DiffView({ file_path, old_string, new_string, startLine = 1, onOpenFile }) {
+function DiffView({ file_path, old_string, new_string, startLine = 1, onOpenFile, label = 'Edit:' }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const diffLines = useMemo(
@@ -63,7 +63,7 @@ function DiffView({ file_path, old_string, new_string, startLine = 1, onOpenFile
     <div className={styles.wrapper}>
       <div className={styles.header}>
         <Text className={onOpenFile ? styles.filePathClickable : styles.filePath}>
-          Edit: <span onClick={onOpenFile ? (e) => { e.stopPropagation(); onOpenFile(file_path); } : undefined}>{file_path}</span>
+          {label} <span onClick={onOpenFile ? (e) => { e.stopPropagation(); onOpenFile(file_path); } : undefined}>{file_path}</span>
         </Text>
         <span className={styles.headerRight}>
           <Text className={styles.diffSummary}>

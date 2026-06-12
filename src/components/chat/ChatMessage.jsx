@@ -474,7 +474,22 @@ class ChatMessage extends React.Component {
         null
       );
     }
-    // Write: show file path + content preview
+    // Write: 整文件按 git diff 新增行渲染（old_string='' → 全部 add 行绿底），
+    // 复用 Edit 的 DiffView（行号/+前缀/+N 统计/折叠/路径点击全套）。
+    if (tu.name === 'Write' && inp.content != null) {
+      return (
+        <DiffView
+          key={tu.id}
+          label="Write:"
+          file_path={inp.file_path || ''}
+          old_string=""
+          new_string={inp.content}
+          startLine={1}
+          onOpenFile={this.props.onOpenFile}
+        />
+      );
+    }
+    // Write 流式半截参数（content 还没到）：白底回退
     if (tu.name === 'Write') {
       const fp = inp.file_path || '';
       const content = inp.content || '';
