@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.313 (2026-06-13)
 
 - fix(terminal): 终端乱码残片根治——flushBatch 批边界半截序列缓带（新增 `splitTrailingIncomplete`，SYNC 包裹不再劈开序列）+ resync/重连重置改带内 `\x07\x18\x1bc` 替代 `terminal.reset()` + 写队列积压丢弃锚点推进 + send 抛错/消息解析失败接入 resync 兜底
 - fix(terminal): `ccv -c` 打开页面终端持续空白修复——SIGWINCH 重绘兜底改为数据感知延迟重试（PTY 零输出时 2s/6s 补发）
