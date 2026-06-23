@@ -18,7 +18,7 @@ import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from '
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
 import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries } from './utils/entryCache';
-import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace } from './utils/sessionManager';
+import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace, getSessionStableId, resolveDisplaySessions } from './utils/sessionManager';
 import { mergeMainAgentSessions as _mergeMainAgentSessions, isMergeBlockedEntry } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
 import { createEntrySlimmer, createIncrementalSlimmer, restoreSlimmedEntry, internEntryBigFields } from './utils/entry-slim.js';
@@ -88,6 +88,12 @@ class AppBase extends React.Component {
       cacheExpireAt,
       cacheType,
       mainAgentSessions: [], // [{ messages, response }]
+      // 「仅展示当前会话」锁定的会话稳定 id（= 会话起点 ts）；null = 未锁定。
+      // 服务端持久化（按项目 + 可选 --pid 实例隔离），同进程多端经 SSE 实时一致。
+      // 命名提示：本字段就是服务端 /api/session-pin 里的 `pinnedSessionId`（同一个值，Ts/Id 同物）。
+      pinnedSessionTs: null,
+      // 本实例 id（来自 ccv --pid），随 /api/project-name 拿回；null = 默认模式。仅用于标题 项目(id)。
+      instanceId: null,
       importModalVisible: false,
       localLogs: {},       // { projectName: [{file, timestamp, size}] }
       localLogsLoading: false,
@@ -173,6 +179,13 @@ class AppBase extends React.Component {
     };
     this.eventSource = null;
     this._currentSessionId = null;
+    // pin 竞态守卫（_maintainPinState/_hydratePin/session_pin SSE 用）：
+    //  _isHydratingPin   — 服务端 pin 的 GET 在途；期间禁 lazy-lock + 禁 persist，防抢在真值返回前误锁/回写。
+    //  _applyingRemotePin — 正在采纳服务端值（hydrate/SSE）；期间禁 persist，防把服务端值当本地改动回 POST（防回环）。
+    //  _prevOnlyCurrent  — 上一次「仅展示当前会话」的生效值，用于识别开关「刚打开」需强制重锁最新。
+    this._isHydratingPin = false;
+    this._applyingRemotePin = false;
+    this._prevOnlyCurrent = false;
     // 跟踪上一次 mainAgent entry 的 timestamp，给新增 assistant msg 赋 _generatedTs（生成时 ts）。
     // 解决 bubble 时间标签晚一拍的 bug：assistant 响应是上一次 API 调用产出的，
     // 被这次 API 调用带进 body.messages，旧逻辑统一赋 entry.timestamp 导致显示成"下一次 ts"。
@@ -220,10 +233,13 @@ class AppBase extends React.Component {
     try {
       if (typeof document === 'undefined') return;
       const alias = getProjectAlias(projectName);
+      // --pid 实例：标题加 (id) 后缀，让多开 ccv 时能从标签页一眼分辨是哪个实例。
+      const id = this.state.instanceId;
+      const suffix = id ? `(${id})` : '';
       if (alias) {
-        document.title = alias;
+        document.title = `${alias}${suffix}`;
       } else if (projectName) {
-        document.title = projectName;
+        document.title = `${projectName}${suffix}`;
       } else {
         document.title = 'CC Viewer';
       }
@@ -295,6 +311,200 @@ class AppBase extends React.Component {
       onlyCurrentSession: prefs.onlyCurrentSession !== undefined ? !!prefs.onlyCurrentSession : /Windows/i.test(navigator.userAgent),
       showThinkingSummaries: !!cs.showThinkingSummaries,
     };
+  }
+
+  // 把 /api/preferences 回包水合进散落在 this.state 的偏好字段（autoApproveSeconds / approvalPrefs /
+  // themeColor / displayScale / resumeAutoChoice 等，区别于 _prefValues() 直接读 context 的那几个）。
+  // 初次加载与 refreshAllPrefs（toggle「项目独立配置」后）共用，避免抽屉里这半数控件读到旧的全局值。
+  _hydratePrefsFromData = (data) => {
+    if (!data) return;
+    if (data.lang) this.setState({ lang: data.lang });
+    // collapseToolResults / expandThinking / expandDiff / showFullToolContent
+    // 不再镜像进 state —— render 经 _prefValues() 直接读 context.preferences。
+    if (data.resumeAutoChoice) {
+      this.setState({ resumeAutoChoice: data.resumeAutoChoice });
+    }
+    if (typeof data.autoApproveSeconds === 'number') {
+      this.setState({ autoApproveSeconds: data.autoApproveSeconds });
+    }
+    // Approval modal preferences (defaults already in initial state — only override when persisted).
+    if (data.approvalModal && typeof data.approvalModal === 'object') {
+      // setState updater 不做 side effect，先在外层算 next + mismatch，再 setState + POST + IPC。
+      const prevPrefs = this.state.approvalPrefs;
+      const mergedVP = mergeVoicePackInto(prevPrefs.voicePack, data.approvalModal.voicePack);
+      const next = {
+        modalEnabled: data.approvalModal.modalEnabled !== undefined ? !!data.approvalModal.modalEnabled : prevPrefs.modalEnabled,
+        soundEnabled: data.approvalModal.soundEnabled !== undefined ? !!data.approvalModal.soundEnabled : prevPrefs.soundEnabled,
+        notifyOnlyWhenHidden: data.approvalModal.notifyOnlyWhenHidden !== undefined ? !!data.approvalModal.notifyOnlyWhenHidden : prevPrefs.notifyOnlyWhenHidden,
+        planAutoApproveSeconds: typeof data.approvalModal.planAutoApproveSeconds === 'number' ? data.approvalModal.planAutoApproveSeconds : prevPrefs.planAutoApproveSeconds,
+        voicePack: mergedVP,
+      };
+      // 合并开关迁移：server 端 soundEnabled !== voicePack.enabled 时以 soundEnabled 为准强制对齐（幂等回写）。
+      const mismatch = !!next.voicePack.enabled !== !!next.soundEnabled;
+      if (mismatch) {
+        next.voicePack = { ...next.voicePack, enabled: next.soundEnabled };
+      }
+      this.setState({ approvalPrefs: next });
+      // updatePreferences 顶层浅 merge：必须传完整 next（含 voicePack 子树），否则 events/volume 被砍。
+      if (mismatch) {
+        this.context?.updatePreferences?.({ approvalModal: next });
+      }
+      // 同步给 electron main 进程（voicePack 不发——播放在 renderer）。
+      try {
+        const { voicePack: _omit, ...forIpc } = next;
+        window.tabBridge?.setApprovalPref?.(forIpc);
+      } catch (e) { console.warn('[approvalPref IPC] hydrate sync failed:', e); }
+    }
+    // hydrate：prefs 没存过 themeColor 时回退当前 state（首次安装 'light'）。不写回 prefs，但同步 localStorage。
+    const effective = (data.themeColor === 'light' || data.themeColor === 'dark')
+      ? data.themeColor
+      : this.state.themeColor;
+    this._applyTheme(effective);
+    // 整体显示大小：prefs 为准（跨设备），没存过回退当前 state(默认 100)。
+    this._applyDisplayScale(data.displayScale ?? this.state.displayScale);
+    // filterIrrelevant 默认 true，showAll = !filterIrrelevant
+    const filterIrrelevant = data.filterIrrelevant !== undefined ? !!data.filterIrrelevant : true;
+    this.setState({ showAll: !filterIrrelevant });
+    if (data.logDir) {
+      this.setState({ logDir: data.logDir });
+    }
+    // URL 参数覆盖主题（白名单校验防 XSS）。一次性覆盖，不写回 prefs，但同步 localStorage。
+    const urlTheme = new URLSearchParams(window.location.search).get('theme');
+    if (urlTheme === 'light' || urlTheme === 'dark') {
+      this._applyTheme(urlTheme);
+    }
+  };
+
+  // 重新拉取偏好并重跑本地 state 水合（toggle 项目独立配置后、admin 改完他人 fork 后调用）。
+  refreshAllPrefs = () => {
+    const p = this.context?.refreshPreferences?.();
+    if (!p || typeof p.then !== 'function') return Promise.resolve(null);
+    return p.then(d => { if (d) this._hydratePrefsFromData(d); return d; });
+  };
+
+  // 切换「启动项目独立配置」：开启 = 把当前全局偏好 fork 到本项目；关闭 = 删除该 fork。
+  // 服务端按当前项目 key 处理；成功后整刷一遍偏好（GET 会据 fork 解析出有效值）。
+  handleToggleProjectScoped = (enabled) => {
+    return fetch(apiUrl('/api/project-prefs/toggle'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled }),
+    }).then(r => (r.ok ? r.json() : null))
+      .then((resp) => {
+        // 服务端确认后立刻乐观翻 _projectScoped，关掉"确认→refresh 到位"窗口内偏好写误投全局的风险；
+        // 随后 refreshAllPrefs 再按 fork 解析出的有效值整体校准。toggle 失败(resp 为 null)则只刷新校准。
+        if (resp) this.context?.mergeLocalPreferences?.({ _projectScoped: !!enabled });
+        return this.refreshAllPrefs();
+      })
+      .catch(() => this.refreshAllPrefs());
+  };
+
+  // ─── 「仅展示当前会话」会话锁定（pin） ──────────────────────────
+  // 生效的「仅展示当前会话」值：本地日志模式强制关闭（须看全量历史），否则取 _prefValues()
+  // （含 Windows 未设时默认开启），与 App.jsx render 传给 ChatView 的口径一致。
+  _effectiveOnlyCurrentSession() {
+    if (this._isLocalLog) return false;
+    return !!this._prefValues().onlyCurrentSession;
+  }
+
+  // 移动端 splitHotCold 的「强制保热」集合：始终把当前 pin 会话纳入，防其被冷淘汰后
+  // 在 [对话] 里退化成「加载」占位（findIndex 也就再找不到它）。可附加额外 id（如刚加载的冷 session）。
+  _pinnedSessionIdSet(extra) {
+    const s = new Set();
+    if (this.state.pinnedSessionTs != null) s.add(this.state.pinnedSessionTs);
+    if (Array.isArray(extra)) {
+      for (const id of extra) { if (id != null) s.add(id); }
+    }
+    return s;
+  }
+
+  // 一次性清理旧版浏览器本地 pin（ccv_pinnedSession_<项目>）。pin 已改服务端存储，这些键不再使用，
+  // 历史上每访问一个项目就攒一个、永不回收。mount 时调用一次即可。
+  _cleanupLegacyPinKeys() {
+    try {
+      const stale = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('ccv_pinnedSession_')) stale.push(k);
+      }
+      for (const k of stale) localStorage.removeItem(k);
+    } catch {}
+  }
+
+  // pin 持久化 → 服务端（POST /api/session-pin），由 server 按项目 + --pid 实例键落盘并 SSE 广播本进程，
+  // 多端实时一致。本地日志模式无 server，短路不发。
+  _persistPin() {
+    if (this._isLocalLog) return;
+    const val = this.state.pinnedSessionTs;
+    try {
+      fetch(apiUrl('/api/session-pin'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinnedSessionId: val == null ? null : String(val) }),
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // 从服务端读回 pin（刷新/切项目/重连后恢复）。异步：hydrate 在途时置 _isHydratingPin，
+  // 抑制 _maintainPinState 的 lazy-lock / persist，避免抢在 GET 返回前误锁并 POST 覆盖服务端真值。
+  // 采纳服务端值时置 _applyingRemotePin，避免被 persist 分支当成本地改动回写。
+  _hydratePin() {
+    if (this._isLocalLog) return;
+    this._isHydratingPin = true;
+    fetch(apiUrl('/api/session-pin'))
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        const raw = data && data.pinnedSessionId;
+        const val = (typeof raw === 'string' && raw) ? raw : null;
+        if (val !== this.state.pinnedSessionTs) {
+          this._applyingRemotePin = true;
+          this.setState({ pinnedSessionTs: val }, () => { this._applyingRemotePin = false; });
+        }
+      })
+      .catch(() => {})
+      .finally(() => { this._isHydratingPin = false; });
+  }
+
+  // App / Mobile 子类的 componentDidUpdate 都 `super.componentDidUpdate(...)`，故 pin 维护集中在此。
+  componentDidUpdate(prevProps, prevState) {
+    this._maintainPinState(prevState);
+  }
+
+  // 维护 pin：开关刚打开 → 强制重锁最新；尚未锁定（pin 为空）→ 惰性锁到最新；
+  // 切项目重 hydrate；pin 变化持久化。锁定后由 _flushPendingEntries 跟随本窗口实时新会话推进。
+  _maintainPinState(prevState) {
+    const effOnly = this._effectiveOnlyCurrentSession();
+    const turnedOn = effOnly && !this._prevOnlyCurrent;
+    this._prevOnlyCurrent = effOnly;
+
+    // _isHydratingPin：服务端 pin 的 GET 在途时，不要 lazy-lock（否则会抢在真值返回前误锁到最新）。
+    if (effOnly && !this._isHydratingPin) {
+      const sessions = this.state.mainAgentSessions;
+      const last = sessions && sessions.length ? sessions[sessions.length - 1] : null;
+      const latestId = getSessionStableId(last) || this._currentSessionId || null;
+      // turnedOn：开关刚打开，强制重锁到当前最新（即便已有 stale pin）。
+      // pin == null：初次加载 / 切项目清空后，惰性锁到最新（pin 非空后不再覆盖，由实时新会话推进）。
+      // 不变式：切项目那一拍这里的乐观锁不会被持久化——下面同一趟的 _hydratePin() 会同步置
+      // _isHydratingPin=true，把下一拍 persist 分支挡掉（由 hydrate 的服务端真值收口），故无需在此回写。
+      if (latestId && (turnedOn || this.state.pinnedSessionTs == null) && this.state.pinnedSessionTs !== latestId) {
+        this.setState({ pinnedSessionTs: latestId });
+      }
+    }
+
+    if (prevState && prevState.projectName !== this.state.projectName) {
+      // 切项目：从服务端重新 hydrate（旧 pin 已在切换 setState 里清空）。
+      this._hydratePin();
+    } else if (prevState && prevState.pinnedSessionTs !== this.state.pinnedSessionTs && this.state.projectName
+               && !this._applyingRemotePin && !this._isHydratingPin) {
+      // pin 本地变化且 projectName 稳定 → 持久化到服务端。
+      // _applyingRemotePin：来自 hydrate/SSE 的服务端值不回写（防回环）；_isHydratingPin：hydrate 在途不写。
+      this._persistPin();
+    }
+  }
+
+  // App / Mobile render 共用：按生效的「仅展示当前会话」+ pin 切出传给 ChatView 的会话与上界。
+  _displaySessionsFor(mainAgentSessions) {
+    return resolveDisplaySessions(mainAgentSessions, this.state.pinnedSessionTs, this._effectiveOnlyCurrentSession());
   }
 
   /**
@@ -523,7 +733,7 @@ class AppBase extends React.Component {
         : sessionIndex;
       const unslimmed = entries.map(e => e._slimmed ? restoreSlimmedEntry(e, entries) : e);
       const { hotEntries, allSessions, coldGroups } = splitHotCold(
-        unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT
+        unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
       );
       this._sseSlimmer = null; this._sseReconstructor = null;
       // 冷 session entries 异步写入 IndexedDB
@@ -592,6 +802,8 @@ class AppBase extends React.Component {
   }
 
   componentDidMount() {
+    // pin 已改服务端存储：清掉旧版浏览器本地 ccv_pinnedSession_* 残留（一次性）。
+    this._cleanupLegacyPinKeys();
     // 全局键盘缩放监听(Cmd/Ctrl +/-/0)仅 Electron 注册——驱动原生 setZoomFactor 并与下拉同步。
     // 纯浏览器**不**注册,把 Cmd/Ctrl +/- 交还浏览器原生缩放(不拦截)。unmount 时按同一 ref 卸载。
     if (hasNativeZoom) window.addEventListener('keydown', this._onScaleKeydown);
@@ -639,78 +851,7 @@ class AppBase extends React.Component {
     // 等 SettingsProvider 完成 /api/preferences fetch,把字段同步到本地 state。
     // setLang / setClaudeConfigDir 已由 Provider 处理,这里不再重复。
     // initSSE 仍可读 this._prefsReady(getter 代理到 context),resume_prompt 行为不变。
-    this.context._prefsReady.then(data => {
-      if (!data) return;
-      if (data.lang) this.setState({ lang: data.lang });
-      // collapseToolResults / expandThinking / expandDiff / showFullToolContent
-      // 不再镜像进 state —— render 经 _prefValues() 直接读 context.preferences。
-      if (data.resumeAutoChoice) {
-        this.setState({ resumeAutoChoice: data.resumeAutoChoice });
-      }
-      if (typeof data.autoApproveSeconds === 'number') {
-        this.setState({ autoApproveSeconds: data.autoApproveSeconds });
-      }
-      // Approval modal preferences (defaults already in initial state — only override when persisted).
-      if (data.approvalModal && typeof data.approvalModal === 'object') {
-        // setState updater 不做 side effect，先在外层算 next + mismatch，再 setState + POST + IPC。
-        // hydrate 走在 fetch().then 链路里，不会与并发 setState 冲突，直接读 this.state 是安全的。
-        const prevPrefs = this.state.approvalPrefs;
-        const mergedVP = mergeVoicePackInto(prevPrefs.voicePack, data.approvalModal.voicePack);
-        const next = {
-          modalEnabled: data.approvalModal.modalEnabled !== undefined ? !!data.approvalModal.modalEnabled : prevPrefs.modalEnabled,
-          soundEnabled: data.approvalModal.soundEnabled !== undefined ? !!data.approvalModal.soundEnabled : prevPrefs.soundEnabled,
-          notifyOnlyWhenHidden: data.approvalModal.notifyOnlyWhenHidden !== undefined ? !!data.approvalModal.notifyOnlyWhenHidden : prevPrefs.notifyOnlyWhenHidden,
-          planAutoApproveSeconds: typeof data.approvalModal.planAutoApproveSeconds === 'number' ? data.approvalModal.planAutoApproveSeconds : prevPrefs.planAutoApproveSeconds,
-          voicePack: mergedVP,
-        };
-        // 合并开关迁移：只要 server 端 next.soundEnabled !== next.voicePack.enabled 就强制对齐。
-        // 覆盖三种老用户：
-        //   (a) sound + voicePack 都存且不一致 — 经典 mismatch
-        //   (b) 仅 sound 存（用户在旧 AppHeader 关过审批提示音、从未点开 VoicePackSettings）
-        //       → next.soundEnabled=false, next.voicePack.enabled 走新默认 true → 不一致
-        //   (c) 仅 voicePack.enabled 存（早期 adopter）→ next.soundEnabled 走新默认 true, voicePack.enabled=false → 不一致
-        // 一致情况（含全缺：两者都走默认 true）不触发，无回写。
-        const mismatch = !!next.voicePack.enabled !== !!next.soundEnabled;
-        if (mismatch) {
-          // 以 soundEnabled 为准强制对齐 voicePack.enabled（用户已确认的迁移规则）。
-          next.voicePack = { ...next.voicePack, enabled: next.soundEnabled };
-        }
-        this.setState({ approvalPrefs: next });
-        // SettingsContext.updatePreferences 是顶层浅 merge：必须传完整 next（含完整 voicePack 子树），
-        // 否则会把 events / volume 整片砍掉，AskTimeoutCountdown / ChatView SDK 直接读 events[*] 变 undefined。
-        // 仅 mismatch 时写回 server，幂等；对齐后的用户后续 hydrate 不再触发。
-        if (mismatch) {
-          this.context?.updatePreferences?.({ approvalModal: next });
-        }
-        // 同步给 electron main 进程,让 maybeNotify 用最新的 notifyOnlyWhenHidden 决策。
-        // 非 electron 环境下 tabBridge 不存在,可选链跳过。
-        // voicePack 字段不发给 main —— 播放发生在 renderer，main 只需要知道通知策略。
-        try {
-          const { voicePack: _omit, ...forIpc } = next;
-          window.tabBridge?.setApprovalPref?.(forIpc);
-        } catch (e) { console.warn('[approvalPref IPC] hydrate sync failed:', e); }
-      }
-      // hydrate：prefs 没保存过 themeColor 时回退到当前 state（首次安装是 'light'）。
-      // 不写回 prefs（这一路是从 prefs 读出来的），但写 localStorage 让 inline boot script 抢占。
-      const effective = (data.themeColor === 'light' || data.themeColor === 'dark')
-        ? data.themeColor
-        : this.state.themeColor;
-      this._applyTheme(effective);
-      // 整体显示大小：prefs 为准（跨设备），没存过则回退当前 state(默认 100)。
-      // 不写回 prefs(这一路从 prefs 读出),但同步 localStorage 让 inline boot script 抢占。
-      this._applyDisplayScale(data.displayScale ?? this.state.displayScale);
-      // filterIrrelevant 默认 true，showAll = !filterIrrelevant
-      const filterIrrelevant = data.filterIrrelevant !== undefined ? !!data.filterIrrelevant : true;
-      this.setState({ showAll: !filterIrrelevant });
-      if (data.logDir) {
-        this.setState({ logDir: data.logDir });
-      }
-      // URL 参数覆盖主题（白名单校验防 XSS）。一次性覆盖，不写回 prefs，但同步 localStorage。
-      const urlTheme = new URLSearchParams(window.location.search).get('theme');
-      if (urlTheme === 'light' || urlTheme === 'dark') {
-        this._applyTheme(urlTheme);
-      }
-    });
+    this.context._prefsReady.then(data => this._hydratePrefsFromData(data));
 
     // 获取系统用户头像和名字
     fetch(apiUrl('/api/user-profile'))
@@ -758,8 +899,9 @@ class AppBase extends React.Component {
       .then(res => res.json())
       .then(data => {
         const projectName = data.projectName || '';
-        this.setState({ projectName });
-        this._applyDocTitle(projectName);
+        const instanceId = data.instanceId || null;
+        // instanceId 与 projectName 同批入 state；标题在回调里应用，确保读到已更新的 instanceId。
+        this.setState({ projectName, instanceId }, () => this._applyDocTitle(projectName));
         this._resubscribeAlias(projectName);
         // 移动端：从缓存恢复数据，在 SSE 数据到达前立即渲染
         if (isMobile && projectName && !logfile && this.state.requests.length === 0) {
@@ -773,7 +915,7 @@ class AppBase extends React.Component {
                 // slimmer 全平台：split 前还原 slimmed entries，确保 IndexedDB / hot 数据完整
                 const unslimmed = cached.map(e => e._slimmed ? restoreSlimmedEntry(e, cached) : e);
                 const { hotEntries, allSessions } = splitHotCold(
-                  unslimmed, mainAgentSessions, sessionIndex, HOT_SESSION_COUNT
+                  unslimmed, mainAgentSessions, sessionIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
                 );
                 this._sseSlimmer = null; this._sseReconstructor = null; // 重置，下帧 SSE 重建
                 const hotFiltered = hotEntries.filter(e => isRelevantRequest(e));
@@ -993,7 +1135,7 @@ class AppBase extends React.Component {
           const fullIndex = mergeSessionIndices(this.state.sessionIndex, sessionIndex);
           const unslimmed = merged.map(e => e._slimmed ? restoreSlimmedEntry(e, merged) : e);
           const { hotEntries, allSessions, coldGroups } = splitHotCold(
-            unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT
+            unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
           );
           this._sseSlimmer = null; this._sseReconstructor = null;
           const pn = this.state.projectName;
@@ -1069,7 +1211,13 @@ class AppBase extends React.Component {
       this.eventSource = new EventSource(apiUrl(url));
       // 每次收到任何 SSE 事件（包括心跳注释帧触发的隐式活动）都重置超时
       this.eventSource.onmessage = (event) => { this._resetSSETimeout(); this.handleEventMessage(event); };
-      this.eventSource.onopen = () => { this._resetSSETimeout(); };
+      this.eventSource.onopen = () => {
+        this._resetSSETimeout();
+        // 每次连上都补一次 pin GET 同步：浏览器原生 EventSource 自愈重连复用同一 EventSource、
+        // 不走 _reconnectSSE（不增 _sseReconnectCount），故不能只在 wasReconnect 时同步，否则原生重连
+        // 期间他端改的 pin 会一直 stale 到下次 session_pin 或切项目。GET 幂等，_applyingRemotePin 防回写。
+        this._hydratePin();
+      };
       // Live streaming overlay: 直接更新 streamingLatest state（不走 reconstructor / dedup）
       // rAF coalesce + startTransition：每个 SSE chunk 只在下一帧合并成一次 setState，
       // 并标记为低优先级渲染，避免阻塞用户输入。最终 chunk 经 entry path 交付而非
@@ -1284,6 +1432,10 @@ class AppBase extends React.Component {
           // 在切换后才提交、覆盖新项目数据（闸门缓冲属旧项目，直接丢弃不泄洪）
           this._abortColdIngest();
           this._rebuildRequestIndex([]);
+          // 切项目要连 _currentSessionId 一并清掉：否则 _maintainPinState 的 lazy-lock 兜底
+          // (getSessionStableId(null) || this._currentSessionId) 会拿旧项目的会话 id 误锁新项目，
+          // 在 hydrate GET 抢先返回前可能把旧 id POST 进新项目的 pin 文件。
+          this._currentSessionId = null;
           // SSE workspace switch — rebind alias subscription to the new
           // project before writing the title so the title reflects the new
           // alias if one exists. _applyDocTitle handles the "no alias"
@@ -1303,6 +1455,8 @@ class AppBase extends React.Component {
             cliMode: true,
             requests: [],
             mainAgentSessions: [],
+            // 切项目：清空旧项目 pin，由 App.componentDidUpdate 按新 projectName 重新 hydrate
+            pinnedSessionTs: null,
             selectedIndex: null,
             streamingLatest: null,
             isStreaming: false,
@@ -1317,11 +1471,13 @@ class AppBase extends React.Component {
         this._resetSSETimeout();
         this._teardownTransientLiveState();
         this._rebuildRequestIndex([]);
+        this._currentSessionId = null; // 同 workspace_started：清旧会话 id，避免 lazy-lock 误锁
         this.setState({
           workspaceMode: true,
           requests: [],
           mainAgentSessions: [],
           projectName: '',
+          pinnedSessionTs: null,
           selectedIndex: null,
           streamingLatest: null,
           contextBarLocked: false,
@@ -1379,6 +1535,20 @@ class AppBase extends React.Component {
         try {
           const cfg = JSON.parse(event?.data || '{}');
           if (typeof cfg.turnEndDebounceMs === 'number') setTurnEndCooldownMs(cfg.turnEndDebounceMs);
+        } catch { /* tolerate parse error */ }
+      });
+      // session_pin SSE — 本进程任一端改了「当前会话」pin 后广播，让同实例多端（电脑+手机）实时一致。
+      // 采纳服务端值时置 _applyingRemotePin，避免 _maintainPinState 把它当本地改动回 POST（防回环）。
+      this.eventSource.addEventListener('session_pin', (event) => {
+        this._resetSSETimeout();
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          const raw = data.pinnedSessionId;
+          const val = (typeof raw === 'string' && raw) ? raw : null;
+          if (val !== this.state.pinnedSessionTs) {
+            this._applyingRemotePin = true;
+            this.setState({ pinnedSessionTs: val }, () => { this._applyingRemotePin = false; });
+          }
         } catch { /* tolerate parse error */ }
       });
       // turn_end SSE — broadcast by /api/turn-end-notify whenever Claude Code's Stop hook
@@ -1539,6 +1709,9 @@ class AppBase extends React.Component {
       let cacheType = prev.cacheType;
       let mainAgentSessions = prev.mainAgentSessions;
       let shouldClearStreaming = false;  // 检测到最终 entry 时原子清除 Live overlay
+      // 本窗口实时新会话（/clear、/resume）时推进 pin —— 仅实时追加路径会跟随，
+      // 整体重载（_processEntries）不动 pin，于是多开时 [对话] 不被重载/他实例拖走。
+      let _newPinTs = null;
 
       // P0 perf: lazy init 增量剪枝器
       if (!this._sseSlimmer) {
@@ -1636,6 +1809,9 @@ class AppBase extends React.Component {
             // 新 session 起点：reset _prevMainAgentTs 防跨 session 串场（旧 session 的末尾 ts
             // 不应作为新 session 第一条 assistant msg 的"生成时 ts"）
             this._prevMainAgentTs = null;
+            // 开启「仅展示当前会话」时，跟随本窗口新会话：把 pin 推进到新会话起点 ts
+            //（= 新会话 messages[0]._timestamp，与 getSessionStableId 一致）。
+            if (this._effectiveOnlyCurrentSession()) _newPinTs = timestamp;
           } else if (this._currentSessionId === null) {
             this._currentSessionId = timestamp;
           }
@@ -1686,6 +1862,7 @@ class AppBase extends React.Component {
       return {
         requests, cacheExpireAt, cacheType, mainAgentSessions,
         ...(shouldClearStreaming && { streamingLatest: null }),
+        ...(_newPinTs != null && { pinnedSessionTs: _newPinTs }),
       };
     }, () => {
       // 移动端：防抖 5s 批量写入缓存
@@ -1740,11 +1917,11 @@ class AppBase extends React.Component {
 
         const sessionIndex = buildSessionIndex(merged, mainAgentSessions);
         const fullIndex = mergeSessionIndices(this.state.sessionIndex, sessionIndex);
-        // Fix #3: pin 加载的 session，防止 splitHotCold 立即淘汰
+        // Fix #3: pin 加载的 session，防止 splitHotCold 立即淘汰（并入「仅展示当前会话」锁定的 pin）
         const unslimmed = merged.map(e => e._slimmed ? restoreSlimmedEntry(e, merged) : e);
         const { hotEntries, allSessions, coldGroups } = splitHotCold(
           unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT,
-          new Set([sessionId])
+          this._pinnedSessionIdSet([sessionId])
         );
         this._sseSlimmer = null; this._sseReconstructor = null;
         const pn = this.state.projectName;
@@ -1777,7 +1954,7 @@ class AppBase extends React.Component {
 
     const unslimmed = requests.map(e => e._slimmed ? restoreSlimmedEntry(e, requests) : e);
     const { hotEntries, allSessions, coldGroups } = splitHotCold(
-      unslimmed, mainAgentSessions, this.state.sessionIndex, HOT_SESSION_COUNT
+      unslimmed, mainAgentSessions, this.state.sessionIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
     );
     this._sseSlimmer = null; this._sseReconstructor = null;
     const fullIndex = this.state.sessionIndex;
@@ -1854,11 +2031,13 @@ class AppBase extends React.Component {
       .then(() => {
         this._teardownTransientLiveState();
         this._rebuildRequestIndex([]);
+        this._currentSessionId = null; // 同 workspace_started：清旧会话 id，避免 lazy-lock 误锁
         this.setState({
           workspaceMode: true,
           requests: [],
           mainAgentSessions: [],
           projectName: '',
+          pinnedSessionTs: null,
           selectedIndex: null,
           streamingLatest: null,
           contextBarLocked: false,

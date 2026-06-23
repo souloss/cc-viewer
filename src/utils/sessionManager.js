@@ -228,6 +228,59 @@ export function splitHotCold(entries, mainAgentSessions, sessionIndex, hotCount,
 }
 
 /**
+ * 取会话的「稳定 id」—— 跨热/冷/淘汰一致的会话身份。
+ *
+ * 热 session：首条消息的 `_timestamp`（= 会话起点 ts，首次赋值后不再变），它同时等于
+ *   `entry._sessionId` / `sessionIndex[i].sessionId` / 冷占位的 `session.sessionId` /
+ *   `AppBase._currentSessionId`（该会话为当前会话时）。
+ * 冷 session：占位对象 `messages` 为 null，身份只剩 `sessionId`。
+ *
+ * 注意：**不要用 `session.entryTimestamp`** —— 它在每次 mergeMainAgentSessions 时被改写为
+ * 最新 entry 的 ts（sessionMerge.js），会漂移，不能作身份。仅作 messages 缺失时的兜底。
+ *
+ * @param {object} session
+ * @returns {string|null}
+ */
+export function getSessionStableId(session) {
+  if (!session) return null;
+  if (session._cold) return session.sessionId || session.entryTimestamp || null;
+  const first = session.messages && session.messages[0];
+  return (first && first._timestamp) || session.sessionId || null;
+}
+
+/**
+ * 解析「仅展示当前会话」锁定下，实际传给 ChatView 的会话切片。
+ *
+ * 策略：把 mainAgentSessions 切到「以 pin 会话结尾」(`slice(0, idx+1)`)，让 pin 会话从
+ * ChatView 视角就是最后一个会话 —— 所有 `si === length-1` 的既有逻辑（Last Response 卡片、
+ * Ask/ExitPlanMode 审批 modal、分隔线）原样可用。常见情形（pin == 最新 / 未命中 / 未开）
+ * 直接原样返回，行为与今天逐字节一致。
+ *
+ * @param {Array} mainAgentSessions
+ * @param {string|null} pinnedTs - 记住的会话稳定 id；null = 未锁定
+ * @param {boolean} onlyCurrentSession - 生效的「仅展示当前会话」开关
+ * @returns {{ sessions: Array, upperBoundTs: (string|null) }}
+ *   upperBoundTs：pin 在中段时为下一个会话的起点 ts（供 ChatView 截断更晚会话的 sub-agent /
+ *   抑制 streaming 浮层）；其余情形为 null。
+ */
+export function resolveDisplaySessions(mainAgentSessions, pinnedTs, onlyCurrentSession) {
+  const sessions = Array.isArray(mainAgentSessions) ? mainAgentSessions : [];
+  if (!onlyCurrentSession || pinnedTs == null || sessions.length === 0) {
+    return { sessions, upperBoundTs: null };
+  }
+  const idx = sessions.findIndex(s => getSessionStableId(s) === pinnedTs);
+  // 未命中（pin 会话已不在）/ 命中末尾 → 原样（回退到展示最新）
+  if (idx === -1 || idx === sessions.length - 1) {
+    return { sessions, upperBoundTs: null };
+  }
+  // 命中中段 → 切到「以 pin 会话结尾」，上界 = 下一个会话起点 ts
+  return {
+    sessions: sessions.slice(0, idx + 1),
+    upperBoundTs: getSessionStableId(sessions[idx + 1]),
+  };
+}
+
+/**
  * 合并两个 sessionIndex（用于 loadMoreHistory 后合并旧索引和新索引）。
  * 策略：新索引完全覆盖重叠的 sessionId，旧索引中不在新索引范围内的保留。
  * @param {Array} oldIndex - 旧索引（可能包含更早的 cold session 信息）

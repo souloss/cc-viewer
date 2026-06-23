@@ -301,6 +301,19 @@ async function runProxyCommand(args) {
 
 // ensureHooks() extracted to server/lib/ensure-hooks.js (shared with electron/tab-worker.js)
 
+// Print the `--pid` instance id + this project's previously-used ids in the startup banner,
+// so the user can recall which id to reuse (with `-c`) next time. No-op without `--pid`.
+function printInstanceBanner(serverMod) {
+  try {
+    const id = serverMod.getInstanceId && serverMod.getInstanceId();
+    if (!id) return;
+    console.log(`  ${t('cli.instanceId', { id })}`);
+    const known = (serverMod.getKnownInstances && serverMod.getKnownInstances()) || [];
+    const others = known.filter((x) => x !== id);
+    if (others.length) console.log(`  ${t('cli.instanceHistory', { ids: others.join(', ') })}`);
+  } catch { /* banner is best-effort */ }
+}
+
 async function runCliMode(extraClaudeArgs = [], cwd, noOpen = false) {
   // 首先尝试 npm 版本（包括 nvm 安装），找不到再尝试 native 版本
   let claudePath = resolveNpmClaudePath();
@@ -422,6 +435,7 @@ async function runCliMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
+  printInstanceBanner(serverMod);
 
   // 5. 注册退出处理（hardened：watchdog 5s 强退 + 连按 Ctrl+C 立退，
   //    防 Windows 上 ConPTY kill / IM teardown 挂住导致"Ctrl+C 完全无反应"）
@@ -597,6 +611,7 @@ async function runSdkMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
+  printInstanceBanner(serverMod);
 
   // 注册退出处理（hardened，与 PTY 模式同款三层防御）
   const cleanup = createHardenedCleanup({
@@ -687,6 +702,29 @@ if (usePwdIdx !== -1) {
     if (val.length > 0) process.env.CCV_PASSWORD = val;
   }
   args.splice(usePwdIdx, 1);
+}
+
+// Extract --pid[=<name>] / --pid <name> — instance id for per-instance session-pin isolation.
+// NB: "pid" here is an instance *id* LABEL (user-chosen, e.g. alpha/beta), NOT an OS process id —
+// it only keys the session-pin file `.session-pin.<id>.json`; unrelated to process.pid.
+// ccv-owned (NEVER forwarded to claude — an unknown --pid would otherwise crash claude): sets
+// CCV_INSTANCE_ID and splices out. Sanitized to a filesystem-safe token (it becomes part of a
+// `.session-pin.<id>.json` filename → guard against path traversal / invalid names).
+const pidIdx = args.findIndex((a) => a === '--pid' || a.startsWith('--pid='));
+if (pidIdx !== -1) {
+  const arg = args[pidIdx];
+  let rawVal;
+  if (arg.startsWith('--pid=')) {
+    rawVal = arg.slice('--pid='.length);
+    args.splice(pidIdx, 1);
+  } else {
+    rawVal = args[pidIdx + 1];
+    if (rawVal && !rawVal.startsWith('-')) args.splice(pidIdx, 2);
+    else { console.error(t('cli.pidInvalid')); process.exit(1); }
+  }
+  const sanitized = (rawVal || '').replace(/[^a-zA-Z0-9_\-.]/g, '_');
+  if (!sanitized) { console.error(t('cli.pidInvalid')); process.exit(1); }
+  process.env.CCV_INSTANCE_ID = sanitized;
 }
 
 // Extract --im <platformId> — 启动一个独立常驻 IM worker：工作目录 IM_<id>/、绑 127.0.0.1、

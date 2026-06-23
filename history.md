@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.323 (2026-06-23)
+
+- feat(chat): 「仅展示当前会话」开启后锁定到当前会话并只展示它——会话 id 改存服务端（按项目，可用 `ccv --pid <名>` 按实例隔离），同一实例多端（电脑+手机）经 SSE `session_pin` 实时一致；多开同一项目时不再被其他窗口/页面重载的会话切换打架；本窗口 /clear、/resume 仍跟随，刷新后保留，锁定会话失效则回退最新；pin 会话防移动端冷淘汰，streaming 浮层/自动滚动在锁定更早会话时抑制；旧浏览器本地 `ccv_pinnedSession_*` 自动清理；`ui.onlyCurrentSession.help` 文案 18 语言同步
+- feat(cli): 新增 `ccv --pid <名>`（或 `--pid=<名>`）锁定实例 id（消毒为安全文件名、ccv 自身消费不透传给 claude，可与 `-c`/`--d` 共用）；启动横幅打印本次 PID + 该项目历史 PID 列表（`.instances.json`，去重/上限 50），网页标题与头部显示「项目(id)」；`cli.instanceId`/`cli.instanceHistory`/`cli.pidInvalid` 18 语言
+- test(session-manager): 新增 `getSessionStableId` / `resolveDisplaySessions` 单测（未开 / pin==最新 / pin 中段切片+上界 / pin 失效回退 / 冷 session 命中）
+- test(session-pin/instance-registry): 新增 `session-pin-store`（往返/null 清除/实例隔离/无项目短路/原子写）、`/api/session-pin` 路由（GET-POST 往返+广播）与 `instance-registry`（去重 move-to-end/上限/消毒/并发锁）单测
+- feat(preferences): 新增「项目独立配置」——多人共用一台 server 时按项目隔离偏好。非本机(LAN)打开时偏好抽屉/移动端设置底部出现「启动项目独立配置」开关，开启后把当前全部偏好 fork 一份到当前项目名下（键为项目完整目录），此后该项目客户端的修改只作用于此 fork、不影响全局；关闭则删除该 fork。本机(127.0.0.1)打开时，若存在其他项目的独立配置则显示「配置管理」入口，弹窗内复用偏好控件逐项查看/编辑/删除各项目 fork；无独立配置时入口隐藏。fork 永不含 auth/IM 凭据与机器级路径（logDir 等）；管理接口本机鉴权
+- feat(preferences): `prefsByProject` 存于 `preferences.json`，全局写 / fork 写 / auth 写统一走 `prefs-store` 锁 + 原子写（tmp→rename + 0600），避免并发写覆盖含密码的偏好文件
+- test(project-prefs): 新增 `project-prefs` 单测（fork 快照剥离敏感/机器/元字段、toggle 增删、非本机 GET 解析 fork、本机回全局 + `_projectPrefsKeys`、update/delete 本机鉴权、POST `/api/preferences` 剥 `_` 元字段）；偏好新增 11 个 i18n key×18 语言并入快捷设置守卫单测
+
 ## 1.6.322 (2026-06-23)
 
 - feat(ultraplan): 调研专家模板首段去掉 `TeamCreate`、新增「执行前须确保已加载 `EnterPlanMode`/`ExitPlanMode`/`TaskCreate`/`TaskGet`/`TaskList` 工具」一句；源模板、`ultraAgents/research-expert.json` demo 与 18 语言 `concepts/*/UltraPlan.md` 同步

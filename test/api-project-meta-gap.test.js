@@ -72,7 +72,7 @@ describe('GET /api/project-name', () => {
     const res = makeRes();
     route('/api/project-name')({}, res);
     assert.equal(res.status, 200);
-    assert.deepEqual(res.json(), { projectName: '' });
+    assert.deepEqual(res.json(), { projectName: '', instanceId: null });
   });
 
   it('reflects the project name after initForWorkspace (live binding)', () => {

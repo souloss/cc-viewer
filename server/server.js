@@ -17,6 +17,8 @@ import { createDispatcher } from './routes/_dispatch.js';
 import { projectMetaRoutes } from './routes/project-meta.js';
 import { miscRoutes } from './routes/misc.js';
 import { preferencesRoutes } from './routes/preferences.js';
+import { projectPrefsRoutes } from './routes/project-prefs.js';
+import { sessionPinRoutes } from './routes/session-pin.js';
 import { gitRoutes } from './routes/git.js';
 import { pluginsRoutes } from './routes/plugins.js';
 import { logsRoutes } from './routes/logs.js';
@@ -70,6 +72,7 @@ function execWithStdin(cmd, args, input, options) {
   });
 }
 import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort } from './interceptor.js';
+import { recordInstance, listInstances } from './lib/instance-registry.js';
 import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../findcc.js';
 import { t, getLang, setLang } from './i18n.js';
 import { loadAuthConfig, loadAuthState, saveAuthConfig, clearProjectOverride, generatePassword, decideAuth, parseCookies, renderLoginPage, localeFromAcceptLanguage } from './lib/auth.js';
@@ -105,6 +108,12 @@ try {
 const isCliMode = process.env.CCV_CLI_MODE === '1';
 const isSdkMode = process.env.CCV_SDK_MODE === '1';
 const isWorkspaceMode = process.env.CCV_WORKSPACE_MODE === '1';
+// Instance id from `ccv --pid <name>` (sanitized in cli.js). null = default mode (no
+// per-instance isolation): the session-pin file falls back to the project-shared key.
+const INSTANCE_ID = process.env.CCV_INSTANCE_ID || null;
+// Remember this id under the project so the CLI banner can list past ids next run (memory
+// aid only). Fire-and-forget; no-ops when there's no active project (e.g. workspace mode).
+if (INSTANCE_ID && _logDir) recordInstance(_logDir, INSTANCE_ID).catch(() => {});
 const _defaultProxyProfiles = { active: 'max', profiles: [{ id: 'max', name: 'Default' }] };
 const _maskApiKey = (k) => k && typeof k === 'string' && k.length > 4 ? '****' + k.slice(-4) : k ? '****' : '';
 const _maskProfiles = (data) => {
@@ -559,6 +568,7 @@ const deps = {
   isCliMode,
   isSdkMode,
   isWorkspaceMode,
+  instanceId: INSTANCE_ID,
   defaultProxyProfiles: _defaultProxyProfiles,
 };
 
@@ -572,6 +582,8 @@ const _routes = [
   ...projectMetaRoutes,
   ...miscRoutes,
   ...preferencesRoutes,
+  ...projectPrefsRoutes,
+  ...sessionPinRoutes,
   ...gitRoutes,
   ...pluginsRoutes,
   ...logsRoutes,
@@ -1907,6 +1919,15 @@ export function getInternalToken() {
 // can't run in CLI mode). Plaintext is fine: this stays in-process (admin terminal).
 export function getAuthConfig() {
   return authConfig;
+}
+
+// Instance id (`--pid`) + the project's previously-used ids — printed by cli.js in the
+// CLI-mode startup banner so the user can recall which id to reuse with `-c` next time.
+export function getInstanceId() {
+  return INSTANCE_ID;
+}
+export function getKnownInstances() {
+  try { return listInstances(_logDir); } catch { return []; }
 }
 
 // In-process broadcast helper for the `turn_end` SSE event. Two callers:

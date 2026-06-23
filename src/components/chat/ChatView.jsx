@@ -483,6 +483,7 @@ class ChatView extends React.Component {
     return (
       nextProps.requests !== this.props.requests ||
       nextProps.mainAgentSessions !== this.props.mainAgentSessions ||
+      nextProps.sessionUpperBoundTs !== this.props.sessionUpperBoundTs ||
       nextProps.streamingLatest !== this.props.streamingLatest ||
       nextProps.collapseToolResults !== this.props.collapseToolResults ||
       nextProps.expandThinking !== this.props.expandThinking ||
@@ -720,7 +721,8 @@ class ChatView extends React.Component {
       this._stickyController.startSmoothFollow(this._virtuosoScrollerEl);
     }
     // 同样：Live streaming overlay 变化时也要重新吸底（丝滑缓动，避免每个 chunk 画面硬跳）。
-    if (prevProps.streamingLatest !== this.props.streamingLatest && this.state.stickyBottom) {
+    // pin 锁在更早会话时（sessionUpperBoundTs != null），streaming 来自未展示的更新会话，不应抢滚动。
+    if (prevProps.streamingLatest !== this.props.streamingLatest && this.state.stickyBottom && this.props.sessionUpperBoundTs == null) {
       const el = useVirtuoso ? this._virtuosoScrollerEl : this.containerRef.current;
       if (el) this._stickyController.startSmoothFollow(el);
     }
@@ -829,7 +831,8 @@ class ChatView extends React.Component {
             || prevProps.expandThinking !== this.props.expandThinking
             || prevProps.showFullToolContent !== this.props.showFullToolContent
             || prevProps.showThinkingSummaries !== this.props.showThinkingSummaries
-            || prevProps.onlyCurrentSession !== this.props.onlyCurrentSession) {
+            || prevProps.onlyCurrentSession !== this.props.onlyCurrentSession
+            || prevProps.sessionUpperBoundTs !== this.props.sessionUpperBoundTs) {
       // 这些显示开关只改 buildAllItems 的输出，不改 mainAgentSessions/requests 引用，故上面两条增量
       // 分支不会触发。allItems 缓存在 state（render 读 state.allItems），必须在此显式重建，否则切换开关
       // 后 SCU 虽放行 re-render，画面仍是旧 allItems（[对话] 与派生它的 [用户 Prompt 导航] 都不刷新）。
@@ -1934,7 +1937,10 @@ class ChatView extends React.Component {
         const sa = subAgentEntries[subIdx];
         // 只插入属于当前 session 时间范围内的（下一个 session 之前的）
         const nextSessionStart = si < mainAgentSessions.length - 1 && mainAgentSessions[si + 1].messages?.[0]?._timestamp;
-        if (nextSessionStart && sa.timestamp > nextSessionStart) break;
+        // pin 锁在更早会话时，传入的会话已被切到「以 pin 会话结尾」，nextSessionStart 失效（无 si+1），
+        // 改用 sessionUpperBoundTs（= 下一个未展示会话的起点）截断，避免更晚会话的 sub-agent 渗入。
+        const bound = nextSessionStart || this.props.sessionUpperBoundTs;
+        if (bound && sa.timestamp > bound) break;
         if (sa.timestamp) tsItemMap[sa.timestamp] = allItems.length;
         const subCacheTotal = sa.requestIndex != null
           ? (requestCacheTokenMap?.get(sa.requestIndex) ?? 0)
@@ -3521,7 +3527,9 @@ class ChatView extends React.Component {
     const _assistantFilteredOut = _isFiltering && !this.state.roleFilterSelected.has('assistant');
     // 乐观停止：点「停止」后即时停掉实时打字机浮层，避免按钮/页内指示器已切非运行态、
     // 而中断落地前的残余 SSE chunk 仍在 overlay 里继续吐字（自相矛盾）。
-    if (this.props.streamingLatest && !_assistantFilteredOut && !this.state.stopOptimistic) {
+    // pin 锁在更早会话时（sessionUpperBoundTs != null），streaming 来自未展示的更新会话，
+    // 不应把它的实时浮层叠在 pin 会话底部（会显示用户根本没看的会话内容）。
+    if (this.props.streamingLatest && !_assistantFilteredOut && !this.state.stopOptimistic && this.props.sessionUpperBoundTs == null) {
       const sl = this.props.streamingLatest;
       const liveBlocks = (sl.content || []).filter(b =>
         b.type === 'text' || b.type === 'thinking'

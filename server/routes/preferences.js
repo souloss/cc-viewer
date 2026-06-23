@@ -1,15 +1,18 @@
 // Preferences, Claude settings, and proxy-profile routes (moved verbatim from server.js).
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../../findcc.js';
 import { PROFILE_PATH, _defaultConfig, getActiveProfileId, setActiveProfileForWorkspace, _loadProxyProfile } from '../interceptor.js';
 import { setLang } from '../i18n.js';
 import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manager.js';
-import { mergeApprovalModalPrefs as vpMergeAM } from '../lib/approval-modal-prefs.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { sendEventToClients } from '../lib/log-watcher.js';
 import { listPlatforms } from '../lib/im-config.js';
+import { mutatePrefs, applyPrefsPatch, readPrefsRaw } from '../lib/prefs-store.js';
+import {
+  getCurrentProjectKey, getCurrentProjectName, hasFork, listForks, resolveScoped,
+} from '../lib/project-prefs.js';
 
 // IM bridge configs (dingtalk, feishu, …) carry base64 app secrets and are only exposed via the
 // admin-only /api/dingtalk/* and /api/im/* surfaces (with secrets masked). Strip every platform's
@@ -35,6 +38,22 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   delete prefs.auth;
   delete prefs.authByProject;
   stripImConfigs(prefs); // dingtalk / feishu / … — admin-only, never to a LAN client
+  // 项目独立配置（多人共用一台 server 时按项目隔离偏好）：非本机(LAN)客户端若当前项目有 fork，
+  // 解析出该项目的有效偏好；本机(admin)始终看全局。forks blob 绝不下发，仅以 _projectPrefsKeys
+  // 元信息告知本机管理入口该不该出现。元字段以 _ 前缀标记，POST 侧会剥离不落盘。
+  const _projectKey = getCurrentProjectKey();
+  const _scoped = !isLocal && hasFork(prefs, _projectKey);
+  const _forkKeys = isLocal ? listForks(prefs) : null; // 计算需早于 delete prefsByProject
+  const _fork = _scoped ? prefs.prefsByProject[_projectKey] : null;
+  delete prefs.prefsByProject;
+  if (_scoped) {
+    prefs = resolveScoped(prefs, _fork);
+    // 防御性二次剥离：fork 按构造已不含密码/IM（写入侧已剥），但这是唯一把 fork 内容下发给远程
+    // 客户端的读路径，与 admin 列表口保持对称——手改 preferences.json 注入的脏 fork 也不会泄露。
+    delete prefs.auth;
+    delete prefs.authByProject;
+    stripImConfigs(prefs);
+  }
   prefs.logDir = LOG_DIR; // 始终返回当前运行时的日志目录
   // 日志设置出厂默认"继承"：键缺失（从未设置过）才注入；显式关闭持久化的是 null（键存在），不覆盖。
   // 虚拟默认 —— 仅注入回包不落盘（GET 不写文件），直接读 preferences.json 的代码看不到该默认。
@@ -48,6 +67,12 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   if (prefs.approvalModal?.voicePack) {
     prefs.approvalModal.voicePack = vpReconcile(LOG_DIR, prefs.approvalModal.voicePack);
   }
+  // 项目独立配置元信息（_ 前缀 = 仅回包、不落盘；POST 侧统一剥离）：前端据此决定
+  // 非本机显示"启动项目独立配置"开关、本机在有 fork 时显示"配置管理"入口。
+  prefs._isLocal = isLocal;
+  prefs._projectName = getCurrentProjectName();
+  prefs._projectScoped = _scoped;
+  if (isLocal) prefs._projectPrefsKeys = _forkKeys;
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(prefs));
 }
@@ -55,43 +80,50 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
 function preferencesPost(req, res, parsedUrl, isLocal, deps) {
   let body = '';
   req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', () => {
+  req.on('end', async () => {
+    // 解析与持久化分两段 try：JSON 坏 → 400 'Invalid JSON'；写盘/取锁失败 → 500/503（不再被误报成
+    // 400 让客户端以为是请求体问题、也不重试瞬时锁超时）。
+    let incoming;
+    try { incoming = JSON.parse(body); }
+    catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      return;
+    }
     try {
-      const incoming = JSON.parse(body);
       // auth 只能经 admin-only 的 /api/auth/config 修改;剥掉 incoming.auth 与 incoming.authByProject
       // 防止任意已授权客户端(含远程密码登录用户)借 /api/preferences 改开关/密码、或植入/篡改
       // 任意项目的覆盖,绕过 admin 门禁。
       delete incoming.auth;
       delete incoming.authByProject;
+      // prefsByProject(项目独立配置 fork)只能经 admin-only 的 /api/project-prefs/* 修改；元字段
+      // (_isLocal/_projectScoped/…)仅 GET 回包，绝不让它们经 /api/preferences 落盘污染。
+      delete incoming.prefsByProject;
+      for (const k of Object.keys(incoming)) if (k[0] === '_') delete incoming[k];
       // IM bridge configs 同理：只能经 admin-only 的 /api/dingtalk/config、/api/im/* 修改，禁止借
       // /api/preferences 植入凭据。
       stripImConfigs(incoming);
-      // 如果修改了日志目录，先切换再保存到新位置（新目录下生成 preferences.json）
+      // 切日志目录：把旧文件的完整内容（含 auth 密码 / prefsByProject forks / 其它偏好）带到新位置，
+      // 避免切目录后密码与各项目 fork 凭空消失；并把写目标在 setLogDir 前后固定为"新文件"，让本次
+      // 合并只跑在一个文件 / 一把锁上（不再因 LOG_DIR 中途漂移而劈裂进程内锁队列）。
+      let targetFile = deps.getPrefsFile();
+      let carried = null;
       if (incoming.logDir && typeof incoming.logDir === 'string') {
+        carried = readPrefsRaw(targetFile); // 旧文件全量（锁外读，迁移属罕见 admin 操作）
         setLogDir(incoming.logDir);
+        targetFile = deps.getPrefsFile();
       }
-      let prefs = {};
-      try { if (existsSync(deps.getPrefsFile())) prefs = JSON.parse(readFileSync(deps.getPrefsFile(), 'utf-8')); } catch { }
-      // Deep-merge approvalModal so partial updates (e.g. `{ voicePack: { events: { askQuestion: id } } }`)
-      // don't blow away unrelated approval prefs. Shallow Object.assign for everything else.
-      const { approvalModal: incAM, ...incRest } = incoming;
-      Object.assign(prefs, incRest);
-      if (incAM && typeof incAM === 'object') {
-        prefs.approvalModal = vpMergeAM(prefs.approvalModal, incAM, {
-          reconcile: (vp) => vpReconcile(LOG_DIR, vp),
-        });
-      }
-      // 确保目录存在
-      const prefsFile = deps.getPrefsFile();
-      const prefsDir = dirname(prefsFile);
-      if (!existsSync(prefsDir)) mkdirSync(prefsDir, { recursive: true });
-      writeFileSync(prefsFile, JSON.stringify(prefs, null, 2));
+      // 全局写入：locked + atomic（prefs-store），与 fork 写共用同一把锁，避免并发写互相覆盖含密码的
+      // preferences.json。Deep-merge approvalModal 的逻辑下沉到 applyPrefsPatch，与 /api/project-prefs
+      // 的 fork 写共用一份合并实现，防止两路漂移。
+      const prefs = await mutatePrefs((p) => {
+        // 迁移：把旧文件里新文件尚无的键（auth/forks/其它偏好）带过来，再应用本次补丁
+        if (carried) for (const k of Object.keys(carried)) if (!(k in p)) p[k] = carried[k];
+        applyPrefsPatch(p, incoming, { logDir: LOG_DIR });
+      }, targetFile);
       // UI 切语言时同步服务端 i18n currentLang，让 DingTalk 桥接等服务端 t() 立即跟随。
       // setLang 自带 locale 校验，非法值回落 en。
       if (incoming.lang) setLang(incoming.lang);
-      // preferences.json 可能携带 auth 的 base64 密码 —— 与 lib/auth.js writePrefs 一致地
-      // 重申 0600,避免该路径(无 mode/不 chmod)把密码文件留成默认 umask 的可读权限。
-      try { chmodSync(prefsFile, 0o600); } catch { /* best-effort; non-POSIX or race */ }
       // 主题切换时同步到 Claude Code CLI：发 /theme，监听输出验证结果。
       // 现代 CLI（≥2.x）的 /theme 是交互式选择器（args 被忽略），注入后对话框可能
       // 残留在终端：
@@ -132,15 +164,18 @@ function preferencesPost(req, res, parsedUrl, isLocal, deps) {
       // 已授权的远程客户端。磁盘上的值已在上面写入,这里只清内存对象供响应用。
       delete prefs.auth;
       delete prefs.authByProject;
+      delete prefs.prefsByProject; // fork blob 绝不回显（与 GET 一致）
       stripImConfigs(prefs);
       prefs.logDir = LOG_DIR;
       // 与 GET 一致：回显里补齐 resumeAutoChoice 虚拟默认（已在上方落盘，文件不含该默认值）
       if (!('resumeAutoChoice' in prefs)) prefs.resumeAutoChoice = 'continue';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(prefs));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid JSON' }));
+    } catch (err) {
+      // 写盘/取锁失败：锁超时 → 503（瞬时，客户端可重试）；其余持久化错误 → 500。绝不再用 400。
+      const isLockTimeout = /Lock acquisition timeout/.test(err?.message || '');
+      res.writeHead(isLockTimeout ? 503 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to save preferences' }));
     }
   });
 }

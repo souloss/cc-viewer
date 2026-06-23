@@ -25,6 +25,7 @@ import CachePopoverContent from './CachePopoverContent';
 import LiveTagPopover from './LiveTagPopover';
 import MemoryDetailModal from '../common/MemoryDetailModal';
 import SkillsManagerModal from '../settings/SkillsManagerModal';
+import ProjectPrefsManagerModal from '../settings/ProjectPrefsManagerModal';
 import PluginModal from '../settings/PluginModal';
 import ProcessModal from '../settings/ProcessModal';
 import ProxyModal from '../settings/ProxyModal';
@@ -77,11 +78,12 @@ function makeAuthState(over = {}) {
 // Bridges the useProjectAlias hook into AppHeader (class component). Renders
 // `${liveMonitoringPrefix}${projectName}${alias ? ` (${alias})` : ''}` followed
 // by the inline pencil editor (hidden when isLocalLog / no projectName).
-function HeaderProjectLabel({ projectName, isLocalLog }) {
+function HeaderProjectLabel({ projectName, isLocalLog, instanceId }) {
   const alias = useProjectAlias(projectName);
   return (
     <span className={styles.headerProjectName}>
       {t('ui.liveMonitoring')}{projectName ? `:${projectName}` : ''}
+      {instanceId ? `(${instanceId})` : ''}
       {alias ? ` (${alias})` : ''}
       <ProjectAliasEditor projectName={projectName} isLocalLog={isLocalLog} />
     </span>
@@ -93,7 +95,7 @@ class AppHeader extends React.Component {
 
   constructor(props) {
     super(props);
-    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(), proxyModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
+    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(), proxyModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, projectPrefsModalOpen: false, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
       // 文件系统权威的 skill 列表（/api/skills 返回）；live-tail 下作为 popover chip 和管理弹窗的共享数据源。
       // null=未加载 / false=失败 / [] 或 Array=加载结果。workspace 切换由 componentDidUpdate + seq 控制。
       _fsSkills: null,
@@ -704,6 +706,7 @@ class AppHeader extends React.Component {
       nextProps.isLocalLog !== this.props.isLocalLog ||
       nextProps.localLogFile !== this.props.localLogFile ||
       nextProps.projectName !== this.props.projectName ||
+      nextProps.instanceId !== this.props.instanceId ||
       nextProps.filterIrrelevant !== this.props.filterIrrelevant ||
       nextProps.logDir !== this.props.logDir ||
       nextProps.cliMode !== this.props.cliMode ||
@@ -1723,7 +1726,7 @@ class AppHeader extends React.Component {
               </Tag>
             ) : null;
           })()}
-          <HeaderProjectLabel projectName={projectName} isLocalLog={isLocalLog} />
+          <HeaderProjectLabel projectName={projectName} isLocalLog={isLocalLog} instanceId={this.props.instanceId} />
           {this.renderContextBarPortal()}
         </Space>
 
@@ -2134,6 +2137,45 @@ class AppHeader extends React.Component {
               />
             </div>
           </div>
+          {/* 项目独立配置（多人共用一台 server，按项目隔离偏好）：
+              - 非本机(LAN) + 有真实项目 + 非日志模式 → 显示「启动项目独立配置」开关；
+              - 本机(127.0.0.1) 且已存在其他项目的独立配置 → 显示「配置管理」入口。
+              两者互斥（LAN vs 本机），无任一条件时整组隐藏。 */}
+          {(() => {
+            const pp = this.props.preferences || {};
+            const showToggle = !isLocalLog && !!pp._projectName && pp._isLocal === false;
+            const forkKeys = Array.isArray(pp._projectPrefsKeys) ? pp._projectPrefsKeys : [];
+            const showManage = pp._isLocal === true && forkKeys.length > 0;
+            if (!showToggle && !showManage) return null;
+            return (
+              <div className={styles.settingsGroupBox}>
+                <div className={styles.settingsGroupTitle}>{t('ui.projectScopedPrefs.group')}</div>
+                {showToggle && (
+                  <div className={styles.settingsItem}>
+                    <span className={styles.settingsLabel}>
+                      {t('ui.projectScopedPrefs')}
+                      <Tooltip title={t('ui.projectScopedPrefs.help')}>
+                        <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                      </Tooltip>
+                    </span>
+                    <Switch
+                      aria-label={t('ui.projectScopedPrefs')}
+                      checked={!!pp._projectScoped}
+                      onChange={(checked) => this.props.onToggleProjectScoped && this.props.onToggleProjectScoped(checked)}
+                    />
+                  </div>
+                )}
+                {showManage && (
+                  <div className={styles.settingsItem}>
+                    <span className={styles.settingsLabel}>{t('ui.projectPrefsManage')}</span>
+                    <Button size="small" onClick={() => this.setState({ projectPrefsModalOpen: true })}>
+                      {t('ui.projectPrefsManage.open', { count: forkKeys.length })}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </Drawer>
         <Drawer
           title={<span>{t('ui.globalSettings')} <ConceptHelp doc="GlobalSettings" /></span>}
@@ -2217,6 +2259,13 @@ class AppHeader extends React.Component {
 
         {/* Skills Manager Modal — 从 AppHeader popover「已载入 Skill」→「管理」按钮打开 */}
         {this.renderSkillsManagerModal()}
+
+        {/* 项目独立配置管理（本机）：偏好抽屉底部「配置管理」入口打开 */}
+        <ProjectPrefsManagerModal
+          open={this.state.projectPrefsModalOpen}
+          onClose={() => this.setState({ projectPrefsModalOpen: false })}
+          onChanged={this.props.onRefreshProjectPrefs}
+        />
       </div>
     );
   }

@@ -40,6 +40,18 @@ const KEYS = [
   'ui.chatInput.more',                  // 复用:聊天输入栏 [+] 按钮 tooltip
   'ui.common.confirmCancel',            // 复用:Popconfirm 取消按钮
   'ui.chatInput.agentTeamEnableHint',   // 新增:输入栏菜单 AgentTeam 未启用引导
+  // 项目独立配置（偏好抽屉 + 移动端设置 + 本机管理弹窗）新增 key
+  'ui.projectScopedPrefs.group',
+  'ui.projectScopedPrefs',
+  'ui.projectScopedPrefs.help',
+  'ui.projectPrefsManage',
+  'ui.projectPrefsManage.open',
+  'ui.projectPrefsManage.title',
+  'ui.projectPrefsManage.count',
+  'ui.projectPrefsManage.delete',
+  'ui.projectPrefsManage.deleteConfirm',
+  'ui.projectPrefsManage.currentTag',
+  'ui.projectPrefsManage.empty',
 ];
 
 describe('quick settings menu i18n — all 18 locales', () => {

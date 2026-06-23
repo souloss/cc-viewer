@@ -21,6 +21,7 @@ import VoicePackSettings from './components/settings/VoicePackSettings';
 import CachePopoverContent from './components/dashboard/CachePopoverContent';
 import MemoryDetailModal from './components/common/MemoryDetailModal';
 import SkillsManagerModal from './components/settings/SkillsManagerModal';
+import ProjectPrefsManagerModal from './components/settings/ProjectPrefsManagerModal';
 import PluginModal from './components/settings/PluginModal';
 import ProcessModal from './components/settings/ProcessModal';
 import ProxyModal from './components/settings/ProxyModal';
@@ -38,9 +39,9 @@ const CALIBRATION_MODELS = appConfig.calibrationModels;
 // tight and aliasing on mobile is less common. Cross-tab / same-tab updates
 // still propagate here via the hook so a desktop alias edit reflects on
 // mobile without reload.
-function MobileCtxLabelText({ projectName }) {
+function MobileCtxLabelText({ projectName, instanceId }) {
   const alias = useProjectAlias(projectName);
-  const base = `${t('ui.liveMonitoring')}${projectName ? `: ${projectName}` : ''}`;
+  const base = `${t('ui.liveMonitoring')}${projectName ? `: ${projectName}` : ''}${instanceId ? `(${instanceId})` : ''}`;
   return <>{base}{alias ? ` (${alias})` : ''}</>;
 }
 
@@ -55,6 +56,7 @@ class Mobile extends AppBase {
       mobileChatVisible: false,
       mobileLogMgmtVisible: false,
       mobileSettingsVisible: false,
+      projectPrefsModalOpen: false,
       mobilePromptVisible: false,
       mobileTerminalVisible: false,
       mobileFileExplorerVisible: false,
@@ -519,6 +521,8 @@ class Mobile extends AppBase {
   render() {
     const { filteredRequests, fileLoading, fileLoadingCount, mainAgentSessions } = this.renderPrepare();
     const prefs = this._prefValues();
+    // 「仅展示当前会话」锁定：切到「以 pin 会话结尾」（与 App 同口径，见 _displaySessionsFor）。
+    const { sessions: displaySessions, upperBoundTs: sessionUpperBoundTs } = this._displaySessionsFor(mainAgentSessions);
 
     // 工作区选择器模式
     if (this.state.workspaceMode) {
@@ -655,7 +659,7 @@ class Mobile extends AppBase {
                 >
                   <span className={styles.mobileCtxTagFill} style={{ width: `${contextPercent}%`, backgroundColor: ctxColor }} />
                   <span className={styles.mobileCtxTagContent}>
-                    <MobileCtxLabelText projectName={this.state.projectName} />
+                    <MobileCtxLabelText projectName={this.state.projectName} instanceId={this.state.instanceId} />
                   </span>
                 </span>
               );
@@ -830,7 +834,8 @@ class Mobile extends AppBase {
                   <ChatView
                     {...this._settingsProps()}
                     requests={filteredRequests}
-                    mainAgentSessions={mainAgentSessions}
+                    mainAgentSessions={displaySessions}
+                    sessionUpperBoundTs={sessionUpperBoundTs}
                     streamingLatest={this.state.streamingLatest}
                     userProfile={this.state.userProfile}
                     collapseToolResults={prefs.collapseToolResults}
@@ -957,6 +962,11 @@ class Mobile extends AppBase {
             onToggle={(s) => this.handleToggleSkill(s)}
             onDelete={(s) => this.handleDeleteSkill(s)}
             onClose={() => this.setState(prev => ({ _skillsModal: { ...prev._skillsModal, open: false } }))}
+          />
+          <ProjectPrefsManagerModal
+            open={this.state.projectPrefsModalOpen}
+            onClose={() => this.setState({ projectPrefsModalOpen: false })}
+            onChanged={this.refreshAllPrefs}
           />
           {/* PC 端对齐的 3 个 modal —— 与 AppHeader 共用同款 self-contained 组件。
               proxyProfiles / activeProxyId / defaultConfig / handleProxyProfileChange 由 AppBase 持有,
@@ -1228,6 +1238,42 @@ class Mobile extends AppBase {
                   />
                 </div>
               </div>
+              {/* 项目独立配置：非本机(LAN)+有真实项目 → 开关；本机+有其他项目独立配置 → 管理入口（详见 AppHeader 抽屉同款逻辑） */}
+              {(() => {
+                const pp = (this.context && this.context.preferences) || {};
+                const showToggle = !this._isLocalLog && !!pp._projectName && pp._isLocal === false;
+                const forkKeys = Array.isArray(pp._projectPrefsKeys) ? pp._projectPrefsKeys : [];
+                const showManage = pp._isLocal === true && forkKeys.length > 0;
+                if (!showToggle && !showManage) return null;
+                return (
+                  <div className={styles.mobileSettingsGroup}>
+                    <div className={styles.mobileSettingsSectionTitle}>{t('ui.projectScopedPrefs.group')}</div>
+                    {showToggle && (
+                      <div className={styles.mobileSettingsRow}>
+                        <span className={styles.mobileSettingsLabel}>
+                          {t('ui.projectScopedPrefs')}
+                          <Tooltip title={t('ui.projectScopedPrefs.help')}>
+                            <QuestionCircleOutlined className={styles.mobileSettingsHelpIcon} />
+                          </Tooltip>
+                        </span>
+                        <Switch
+                          aria-label={t('ui.projectScopedPrefs')}
+                          checked={!!pp._projectScoped}
+                          onChange={(checked) => this.handleToggleProjectScoped(checked)}
+                        />
+                      </div>
+                    )}
+                    {showManage && (
+                      <div className={styles.mobileSettingsRow}>
+                        <span className={styles.mobileSettingsLabel}>{t('ui.projectPrefsManage')}</span>
+                        <Button size="small" onClick={() => this.setState({ projectPrefsModalOpen: true })}>
+                          {t('ui.projectPrefsManage.open', { count: forkKeys.length })}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
           <div className={`${styles.mobilePromptOverlay} ${this.state.mobilePromptVisible ? styles.mobilePromptOverlayVisible : ''}`}>

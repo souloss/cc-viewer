@@ -9,6 +9,8 @@ import {
   splitHotCold,
   mergeSessionIndices,
   applyInPlaceLastMsgReplace,
+  getSessionStableId,
+  resolveDisplaySessions,
 } from '../src/utils/sessionManager.js';
 
 // ─── Test helpers ─────────────────────────────────────────────────��───────────
@@ -575,5 +577,93 @@ describe('applyInPlaceLastMsgReplace', () => {
     const result = applyInPlaceLastMsgReplace([session3], entry5, '2026-05-09T11:10:03Z', false);
     assert.equal(result.applied, true);
     assert.equal(applyInPlaceLastMsgReplace.appliedCount, 1, 'applied 路径应累加 appliedCount');
+  });
+});
+
+// ─── getSessionStableId ──────────────────────────────────────────────────────
+
+// 构造一个带 messages[0]._timestamp 的热 session
+function pinnedSession(startTs, msgCount = 2) {
+  const messages = [];
+  for (let i = 0; i < msgCount; i++) {
+    messages.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `m${i}`, _timestamp: i === 0 ? startTs : `${startTs}#${i}` });
+  }
+  // entryTimestamp 故意设成「漂移后的最新 ts」，确保 stable id 不取它
+  return { userId: 'u1', messages, response: { status: 200, body: {} }, entryTimestamp: `${startTs}#drifted` };
+}
+
+describe('getSessionStableId', () => {
+  it('热 session 取 messages[0]._timestamp（而非漂移的 entryTimestamp）', () => {
+    const s = pinnedSession('2025-01-01T00:00:00Z');
+    assert.equal(getSessionStableId(s), '2025-01-01T00:00:00Z');
+  });
+
+  it('冷 session 取 sessionId', () => {
+    const cold = { _cold: true, sessionId: '2025-01-01T02:00:00Z', messages: null, entryTimestamp: '2025-01-01T02:30:00Z' };
+    assert.equal(getSessionStableId(cold), '2025-01-01T02:00:00Z');
+  });
+
+  it('null / 空 session 返回 null', () => {
+    assert.equal(getSessionStableId(null), null);
+    assert.equal(getSessionStableId({ messages: [] }), null);
+  });
+});
+
+// ─── resolveDisplaySessions ──────────────────────────────────────────────────
+
+describe('resolveDisplaySessions', () => {
+  const s0 = pinnedSession('2025-01-01T00:00:00Z');
+  const s1 = pinnedSession('2025-01-01T01:00:00Z');
+  const s2 = pinnedSession('2025-01-01T02:00:00Z');
+  const sessions = [s0, s1, s2];
+
+  it('未开「仅展示当前会话」→ 原样返回，无上界', () => {
+    const r = resolveDisplaySessions(sessions, '2025-01-01T00:00:00Z', false);
+    assert.equal(r.sessions, sessions);
+    assert.equal(r.upperBoundTs, null);
+  });
+
+  it('无 pin → 原样返回', () => {
+    const r = resolveDisplaySessions(sessions, null, true);
+    assert.equal(r.sessions, sessions);
+    assert.equal(r.upperBoundTs, null);
+  });
+
+  it('pin == 最新会话 → 原样返回（与今天行为一致，不切片）', () => {
+    const r = resolveDisplaySessions(sessions, '2025-01-01T02:00:00Z', true);
+    assert.equal(r.sessions, sessions);
+    assert.equal(r.upperBoundTs, null);
+  });
+
+  it('pin 在中段 → 切到以 pin 会话结尾，上界 = 下一会话起点', () => {
+    const r = resolveDisplaySessions(sessions, '2025-01-01T01:00:00Z', true);
+    assert.deepEqual(r.sessions, [s0, s1]);
+    assert.equal(r.sessions.length, 2);
+    assert.equal(r.upperBoundTs, '2025-01-01T02:00:00Z');
+  });
+
+  it('pin 是首个会话且有更晚会话 → 仅含该会话，上界 = 第二个会话起点', () => {
+    const r = resolveDisplaySessions(sessions, '2025-01-01T00:00:00Z', true);
+    assert.deepEqual(r.sessions, [s0]);
+    assert.equal(r.upperBoundTs, '2025-01-01T01:00:00Z');
+  });
+
+  it('pin 已失效（不在列表）→ 回退原样（展示最新）', () => {
+    const r = resolveDisplaySessions(sessions, '1999-01-01T00:00:00Z', true);
+    assert.equal(r.sessions, sessions);
+    assert.equal(r.upperBoundTs, null);
+  });
+
+  it('pin 命中冷 session（按 sessionId 匹配）→ 切片 + 上界', () => {
+    const cold = { _cold: true, sessionId: '2025-01-01T00:00:00Z', messages: null };
+    const r = resolveDisplaySessions([cold, s1, s2], '2025-01-01T00:00:00Z', true);
+    assert.deepEqual(r.sessions, [cold]);
+    assert.equal(r.upperBoundTs, '2025-01-01T01:00:00Z');
+  });
+
+  it('空列表 → 原样返回', () => {
+    const r = resolveDisplaySessions([], '2025-01-01T00:00:00Z', true);
+    assert.deepEqual(r.sessions, []);
+    assert.equal(r.upperBoundTs, null);
   });
 });
