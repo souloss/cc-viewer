@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats } from '../../utils/helpers';
 import { classifyRequest } from '../../utils/requestType';
 import ConceptHelp from '../common/ConceptHelp';
+import ToolsHelp from '../common/ToolsHelp';
 import { t } from '../../i18n';
 import headerStyles from '../common/sharedChrome.module.css';
 import styles from './MobileStats.module.css';
@@ -155,7 +156,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
             {/* 3. Tool Usage Stats */}
             {toolStats.length > 0 && (
               <div className={headerStyles.modelCard}>
-                <div className={headerStyles.modelName}>{t('ui.toolUsageStats')}</div>
+                <div className={headerStyles.modelName}>{t('ui.toolUsageStats')} <ToolsHelp /></div>
                 <table className={headerStyles.statsTable}>
                   <thead>
                     <tr>

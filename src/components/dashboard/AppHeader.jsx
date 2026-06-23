@@ -19,6 +19,7 @@ import { apiUrl } from '../../utils/apiUrl';
 import * as SeqLoaders from '../../utils/seqResourceLoaders';
 import { SettingsContext } from '../../contexts/SettingsContext';
 import ConceptHelp from '../common/ConceptHelp';
+import ToolsHelp from '../common/ToolsHelp';
 import OpenFolderIcon from '../common/OpenFolderIcon';
 import CachePopoverContent from './CachePopoverContent';
 import LiveTagPopover from './LiveTagPopover';
@@ -104,6 +105,8 @@ class AppHeader extends React.Component {
       _memoryRefreshing: false,
       // 点击记忆链接时拉起的明细 Modal 状态：null=关 / { name, content?, error?, loading? }
       _memoryDetail: null,
+      // 从血条 Popover「官方工具」标题打开的「所有工具」目录 Modal 是否开启（用于守卫 Popover 不收起）
+      _toolsCatalogOpen: false,
       // CLAUDE.md 候选清单：null=未加载 / false=拉取失败 / [] 隐藏整段 / [{id,scope,tail,...}]
       _claudeMd: null,
       // CLAUDE.md 明细 Modal：与 _memoryDetail 分槽，避免 memory 链接点击与 CLAUDE 链接点击交叉污染
@@ -625,8 +628,11 @@ class AppHeader extends React.Component {
   // 提取为 class field 后引用稳定,LiveTagPopover memo 不会因 callback 引用变化而失效。
   // 由 popover 内部打开的明细 Modal(CLAUDE.md / 记忆条目 / Skill 管理)是否处于打开态。
   _isCacheDetailModalOpen = () => !!(
-    this.state._memoryDetail || this.state._claudeMdDetail || (this.state._skillsModal && this.state._skillsModal.open)
+    this.state._memoryDetail || this.state._claudeMdDetail || this.state._toolsCatalogOpen || (this.state._skillsModal && this.state._skillsModal.open)
   );
+
+  // 稳定引用,避免内联箭头破坏 LiveTagPopover 的 memo（与其它 popover 回调一致）。
+  _setToolsCatalogOpen = (o) => this.setState({ _toolsCatalogOpen: o });
 
   handleCachePopoverOpenChange = (open) => {
     // 这些明细 Modal 打开时，鼠标移到 Modal 上会让 hover 触发的血条 Popover 收到 mouseleave→close。
@@ -922,7 +928,7 @@ class AppHeader extends React.Component {
     URL.revokeObjectURL(url);
   }
 
-  renderTokenStats() {
+  renderTokenStats(closeParent) {
     const { requests = [] } = this.props;
     const { cacheHighlightIdx, cacheHighlightFading } = this.state;
     // Popover 打开期间 AppHeader 可能因 contextWindow / serverCachedContent 等其他
@@ -999,7 +1005,7 @@ class AppHeader extends React.Component {
     const toolColumn = toolStats.length > 0 ? (
       <div className={styles.toolStatsColumn}>
         <div className={sharedChrome.modelCard}>
-          <div className={sharedChrome.modelName}>{t('ui.toolUsageStats')}</div>
+          <div className={sharedChrome.modelName}>{t('ui.toolUsageStats')} <ToolsHelp closeParent={closeParent} /></div>
           <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
@@ -1565,6 +1571,7 @@ class AppHeader extends React.Component {
         onOpenClaudeMd={this.loadClaudeMdDetail}
         onOpenSkillsModal={this.handleOpenSkillsModal}
         onRefreshMemory={this.handleRefreshMemory}
+        onToolsCatalogOpenChange={this._setToolsCatalogOpen}
         projectName={projectName}
       />,
       slot

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.322 (2026-06-23)
+
+- feat(ultraplan): 调研专家模板首段去掉 `TeamCreate`、新增「执行前须确保已加载 `EnterPlanMode`/`ExitPlanMode`/`TaskCreate`/`TaskGet`/`TaskList` 工具」一句；源模板、`ultraAgents/research-expert.json` demo 与 18 语言 `concepts/*/UltraPlan.md` 同步
+- test(ultraplan): UltraPlan 一致性守卫单测扩展到调研专家块（18 语言须与源模板逐字节一致）
+- feat(stats): 「工具使用统计」标题右侧加 (?) 弹出「所有工具」目录——按功能分类列出全部 37 个内置工具，点击某工具叠加二级弹窗展示该工具说明页（复用 `ConceptHelp` + `/api/concept` + `Tool-*.md`，目录弹窗保持在底层、无闪烁）；打开目录时收起承载它的 token 统计 hover 弹层（`ChatView` 该弹层改受控，经 `App`/`AppHeader.renderTokenStats` 透传 `closeParent`）；血条 Popover 的「官方工具」标题也可点击打开同一目录（不改文案颜色；`ToolsHelp` 支持 children 触发 + `onOpenChange`，经 `LiveTagPopover`/`CachePopoverContent` 接入 `_isCacheDetailModalOpen` 守卫使血条面板不收起）；新增工具目录单一来源 `src/utils/toolCatalog.js`，`ConceptHelp` 白名单 `Tool-*` 由其派生；桌面 `AppHeader` 与移动 `MobileStats` 同步；新增 12 个 i18n key×18 语言
+- test(stats): 新增守卫单测——目录工具须在 18 语言均有 `Tool-*.md`、无重复、doc 名合法，且新增 i18n key 18 语言齐全
+- feat(ultraplan): 「执行前加载工具」一句补全任务/消息类工具——代码专家加 `SendMessage`/`TaskUpdate`/`TaskStop`/`TaskOutput`，调研专家加 `TaskUpdate`/`TaskStop`/`TaskOutput`；源模板、`ultraAgents/{code,research}-expert.json` demo 与 18 语言 `concepts/*/UltraPlan.md` 同步
+
 ## 1.6.321 (2026-06-23)
 
 - fix(electron): 手机扫码编程弹窗——二维码弹层定位改用 tab bar 点击实测坐标 + 显示缩放换算（修复偏右错位），并支持点击页面空白处 / Esc 关闭（此前只能再次点图标开关）

@@ -34,7 +34,7 @@ class App extends AppBase {
       installMethod: null, // 'electron' | 'brew' | 'npm'：打开版本信息弹窗时按需拉取，精准匹配升级命令
     });
     this.appHeaderRef = React.createRef();
-    this._getTokenStatsContent = () => this.appHeaderRef.current?.renderTokenStats?.() ?? null;
+    this._getTokenStatsContent = (closeParent) => this.appHeaderRef.current?.renderTokenStats?.(closeParent) ?? null;
   }
 
   // 子组件（TerminalPanel / ChatInputBar）通过 ref callback 注册血条 slot DOM；

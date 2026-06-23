@@ -8,6 +8,7 @@ import { apiUrl } from '../../utils/apiUrl';
 import { renderMarkdown } from '../../utils/markdown';
 import { isMobile } from '../../env';
 import ConceptHelp from '../common/ConceptHelp';
+import ToolsHelp from '../common/ToolsHelp';
 import { parseMemoryLink } from '../../utils/memoryLinkParser';
 import appConfig from '../../config.json';
 import styles from './CachePopoverContent.module.css';
@@ -48,6 +49,7 @@ export default function CachePopoverContent({
   onOpenSkillsModal,
   onRefreshMemory,
   onSkillImported,
+  onToolsCatalogOpenChange,
   memoryRefreshing = false,
   inDrawer = false,
 }) {
@@ -410,9 +412,12 @@ export default function CachePopoverContent({
       <div className={inDrawer ? styles.cacheScrollAreaInDrawer : styles.cacheScrollArea}>
         {hasBuiltin && (
           <div className={`${styles.cacheSection} ${styles.cacheSectionBordered}`}>
-            <div className={styles.cacheSectionLabel}>
-              {t('ui.builtinTools')} ({builtin.length})
-            </div>
+            {/* 点标题也可打开「所有工具」目录(zIndex 抬到 1100 盖住血条 Popover;不改文案颜色) */}
+            <ToolsHelp zIndex={1100} onOpenChange={onToolsCatalogOpenChange}>
+              <div className={styles.cacheSectionLabel} role="button" tabIndex={0} title={t('ui.toolCatalog.help')}>
+                {t('ui.builtinTools')} ({builtin.length})
+              </div>
+            </ToolsHelp>
             {builtinBody}
           </div>
         )}

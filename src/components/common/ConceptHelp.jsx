@@ -4,23 +4,16 @@ import { renderMarkdown } from '../../utils/markdown';
 import { apiUrl } from '../../utils/apiUrl';
 import { getLang } from '../../i18n';
 import { isMobile, isPad } from '../../env';
+import { ALL_TOOL_NAMES } from '../../utils/toolCatalog';
 import styles from './ConceptHelp.module.css';
 
-const KNOWN_DOCS = new Set([
-  'Tool-Bash', 'Tool-Read', 'Tool-Edit', 'Tool-Write', 'Tool-Glob', 'Tool-Grep',
-  'Tool-NotebookEdit', 'Tool-WebFetch', 'Tool-WebSearch', 'Tool-ToolSearch',
-  'Tool-Agent', 'Tool-TaskOutput', 'Tool-TaskStop',
-  'Tool-TaskCreate', 'Tool-TaskGet', 'Tool-TaskUpdate', 'Tool-TaskList',
-  'Tool-TeamCreate', 'Tool-TeamDelete', 'Tool-SendMessage',
+// Tool-* docs come from the shared catalog (single source of truth, guarded by
+// test/tool-catalog-concepts.test.js); the rest are non-tool concept docs.
+const OTHER_DOCS = [
   'SubAgent-Search',
-  'Tool-EnterPlanMode', 'Tool-ExitPlanMode',
-  'Tool-AskUserQuestion', 'Tool-Skill',
-  'Tool-getDiagnostics', 'Tool-executeCode', 'Tool-EnterWorktree', 'Tool-ExitWorktree',
-  'Tool-LSP', 'Tool-Workflow',
-  'Tool-CronCreate', 'Tool-CronDelete', 'Tool-CronList',
-  'Tool-Monitor', 'Tool-PushNotification', 'Tool-RemoteTrigger', 'Tool-ScheduleWakeup',
   'MainAgent', 'Teammate', 'BodyFields', 'ResponseFields', 'Tools', 'ToolsFirst', 'CacheRebuild', 'BodyDiffJSON', 'TranslateContextPollution', 'KVCacheContent', 'ProxySwitch', 'GlobalSettings', 'QRCode', 'UltraPlan', 'CustomUltraplanExpert',
-]);
+];
+const KNOWN_DOCS = new Set([...ALL_TOOL_NAMES.map((n) => `Tool-${n}`), ...OTHER_DOCS]);
 
 export default function ConceptHelp({ doc, zIndex, children }) {
   const [open, setOpen] = useState(false);

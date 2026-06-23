@@ -266,6 +266,8 @@ class ChatView extends React.Component {
       customUltraplanExperts: [],
       customUltraplanEditOpen: false,
       customUltraplanEditing: null,
+      // 受控的 token 统计 hover 弹层：点开「所有工具」(?) 目录时需主动收起本弹层
+      tokenStatsPopoverOpen: false,
       // 桌面隐藏终端的输入栏 UltraPlan 弹层（与终端工具栏共用 UltraplanPanel）
       ultraplanPopoverOpen: false,
       ultraplanPopoverSize: readUltraplanPopoverSize(), // 与终端弹层共享同一对 localStorage key
@@ -1040,6 +1042,10 @@ class ChatView extends React.Component {
   //   - bind/unbind/dispose、scroll/RO 监听、引用计数 lock、双 rAF 缓动、用户滚动意图暂停窗口、决策去重
   //   - notifyAtBottom（Virtuoso 接管）、suppressOnce（handleLoadMore 用）、writeUnderLock（唯一写入）
   // 本类仅持 controller 实例（this._stickyController），所有 scrollTop 写入走 controller.writeUnderLock。
+
+  // 稳定引用:传给被 AppHeader.renderTokenStats 缓存的 <ToolsHelp closeParent>,
+  // 避免每次渲染新建闭包导致缓存子树持有过期引用(memo key 不含 closeParent)。
+  _closeTokenStatsPopover = () => this.setState({ tokenStatsPopoverOpen: false });
 
   handleStickToBottom = () => {
     // 显式动作清除用户滚动窗口：在 setState 之前同步调，让 userScrolling:false 与
@@ -3296,10 +3302,12 @@ class ChatView extends React.Component {
             // 上下各留 24px：顶部贴标题栏，底部留出工具栏 / chat input 视觉余量，
             // 避免窄屏 + 长内容时 popup 紧贴底部 footer 区域
             <div style={{ maxHeight: 'calc(100vh - 48px)', overflowY: 'auto', overflowX: 'hidden' }}>
-              {this.props.getTokenStatsContent?.()}
+              {this.props.getTokenStatsContent?.(this._closeTokenStatsPopover)}
             </div>
           )}
           trigger="hover"
+          open={this.state.tokenStatsPopoverOpen}
+          onOpenChange={(o) => this.setState({ tokenStatsPopoverOpen: o })}
           placement="right"
           arrow={{ pointAtCenter: true }}
           autoAdjustOverflow={false}
