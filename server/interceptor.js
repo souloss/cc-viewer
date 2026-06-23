@@ -16,7 +16,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel } from './lib/interceptor-core.js';
+import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel } from './lib/interceptor-core.js';
 
 
 
@@ -195,7 +195,11 @@ function generateNewLogFilePath() {
   const projectName = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   const dir = join(LOG_DIR, projectName);
   try { mkdirSync(dir, { recursive: true }); } catch { }
-  return { filePath: join(dir, `${projectName}_${ts}.jsonl`), dir, projectName };
+  // `--pid`(CCV_INSTANCE_ID) 实例：文件名前缀 `<pid>__`，让每个实例只读/续自己的日志血脉（多进程隔离）。
+  // 内部读 env（与上面内部读 cwd 同理）→ 轮转/workspace 等所有 caller 自动带前缀，无需逐处传参。
+  // 前缀走单一来源 logFilePrefix（与 matcher 共用，防漂移）。
+  const instanceId = process.env.CCV_INSTANCE_ID || '';
+  return { filePath: join(dir, `${logFilePrefix(projectName, instanceId)}${ts}.jsonl`), dir, projectName };
 }
 
 // Resume 状态（供 server.js 使用）
@@ -310,6 +314,10 @@ let _teamName = null;
   if (teamIdx !== -1 && teamIdx + 1 < args.length) _teamName = args[teamIdx + 1];
 }
 
+// `--pid` 实例 id（cli.js 在 import server 前已设 env，时序安全）。null = 默认模式（不分实例）。
+// 只用于日志文件名的分实例隔离（findRecentLog/cleanupTempFiles/claim）；不影响 claude 自己的 -c。
+const INSTANCE_ID = process.env.CCV_INSTANCE_ID || null;
+
 // 初始化日志文件路径（异步，支持用户交互）
 // 工作区模式下延迟到选择工作区后再初始化
 let _newLogFile, _logDir, _projectName;
@@ -323,12 +331,13 @@ if (process.env.CCV_WORKSPACE_MODE === '1') {
   try { cwd = process.cwd(); } catch { cwd = homedir(); }
   _projectName = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   _logDir = join(LOG_DIR, _projectName);
-  const _leaderLog = findRecentLog(_logDir, _projectName);
+  // teammate 子进程继承同一 env（含 CCV_INSTANCE_ID）→ 命中 leader 的 pid 日志；无 env 时为 null = 现状。
+  const _leaderLog = findRecentLog(_logDir, _projectName, INSTANCE_ID);
   _newLogFile = _leaderLog || ''; // 没有 leader 日志时不写入
 } else {
   ({ filePath: _newLogFile, dir: _logDir, projectName: _projectName } = generateNewLogFilePath());
-  // 启动时清理残留临时文件
-  cleanupTempFiles(_logDir, _projectName);
+  // 启动时清理残留临时文件（按本实例收窄，避免多进程下 rename 掉别的实例正在写的 _temp）
+  cleanupTempFiles(_logDir, _projectName, INSTANCE_ID);
 }
 let LOG_FILE = _newLogFile;
 
@@ -344,7 +353,14 @@ const _initPromise = (async () => {
   if (!_logDir || !_projectName) return; // 工作区模式下跳过
   if (_isTeammate) return; // Teammate 已在上方同步初始化，跳过 async resume 流程
   try {
-    const recentLog = findRecentLog(_logDir, _projectName);
+    let recentLog = findRecentLog(_logDir, _projectName, INSTANCE_ID);
+    // 首启接管（仅 --pid 实例）：本 pid 还没有自己的日志时，可接管项目里最近的【无标签】日志
+    // （原子 rename 成 `<pid>__…`），从此并入该 pid 血脉。claim 必须在 build _resumeState 之前，
+    // 这样 _resumeState.recentFile 指向 rename 后的新路径（否则会指向已被移走的旧名）。
+    if (!recentLog && INSTANCE_ID) {
+      const claimed = claimUntaggedLog(_logDir, _projectName, INSTANCE_ID);
+      if (claimed) recentLog = claimed;
+    }
     if (recentLog) {
       // IM worker：无人值守、无 UI 可应答 resume 交互。直接 continue 最近会话日志（保留记忆、
       // 让记录弹窗读到同一份持续增长的文件），不进入 resume 交互状态（否则会一直写 *_temp.jsonl，
@@ -374,11 +390,17 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
   const dir = join(LOG_DIR, projectName);
   try { mkdirSync(dir, { recursive: true }); } catch {}
 
-  cleanupTempFiles(dir, projectName);
+  cleanupTempFiles(dir, projectName, INSTANCE_ID);
 
   // 检查是否有最近的日志文件可以复用（始终复用最新日志）
   // forceNew: Electron multi-tab 模式下强制创建新文件，避免与已有 ccv 实例共享日志
-  const recentLog = !forceNew && findRecentLog(dir, projectName);
+  let recentLog = !forceNew && findRecentLog(dir, projectName, INSTANCE_ID);
+  // 首启接管（与单项目模式 _initPromise 一致）：本 pid 在该 workspace 还没有自己的日志时，
+  // 接管最近的无标签日志，避免 workspace 模式下 --pid 首启不接管的不一致。forceNew 时显式不接管。
+  if (!recentLog && INSTANCE_ID && !forceNew) {
+    const claimed = claimUntaggedLog(dir, projectName, INSTANCE_ID);
+    if (claimed) recentLog = claimed;
+  }
   if (recentLog) {
     _projectName = projectName;
     _logDir = dir;
@@ -398,7 +420,8 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
     + String(now.getMinutes()).padStart(2, '0')
     + String(now.getSeconds()).padStart(2, '0');
 
-  const filePath = join(dir, `${projectName}_${ts}.jsonl`);
+  // 与 generateNewLogFilePath 同款命名（共用 logFilePrefix）：`--pid` 实例带 `<pid>__` 前缀。
+  const filePath = join(dir, `${logFilePrefix(projectName, INSTANCE_ID)}${ts}.jsonl`);
 
   _projectName = projectName;
   _logDir = dir;

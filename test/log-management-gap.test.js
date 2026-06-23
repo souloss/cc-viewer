@@ -196,6 +196,17 @@ describe('archiveLogFiles branches + migrateStatsCacheKey', () => {
     assert.equal(res.archived.length, 0);
   });
 
+  it('protects the timestamp-latest file even when a <pid>__ prefix sorts it earlier by name', () => {
+    // 无标签旧日志(名以 'p' 开头) + pid 标签新日志(名以 '1' 开头)。
+    // 旧的"文件名整串排序+reverse"会误判更旧的 'proj_…' 为 latest 而放行归档活跃日志;
+    // 修复后按时间戳判定 → 真正最新的 123__ 文件被 latest-not-allowed 保护。
+    writeLog('proj', 'proj_20260101_000000.jsonl', [entry('t1', 'u1')]);        // 旧
+    writeLog('proj', '123__proj_20260401_000000.jsonl', [entry('t2', 'u2')]);   // 新(latest)
+    const res = archiveLogFiles(tmpDir, ['proj/123__proj_20260401_000000.jsonl']);
+    assert.equal(res.skipped[0]?.reason, 'latest-not-allowed');
+    assert.equal(res.archived.length, 0);
+  });
+
   it('archives an older file, migrates its stats-cache key to .jsonl.zip', () => {
     const old = 'aold_20260101_000000.jsonl';
     const newer = 'bnew_20260301_000000.jsonl';

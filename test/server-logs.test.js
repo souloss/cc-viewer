@@ -14,6 +14,9 @@ import { tmpdir } from 'node:os';
 const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-srvlogs-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
+// 清掉可能从 `ccv --pid <id>` 父会话继承来的实例 id，确保 server 以默认实例(null)启动，
+// 否则 /api/local-logs 会按继承的 pid 过滤掉本测试的无标签夹具（与运行环境耦合）。
+delete process.env.CCV_INSTANCE_ID;
 process.env.CCV_START_PORT = '19750';
 process.env.CCV_MAX_PORT = '19759';
 process.env.CCV_WORKSPACE_MODE = '1';
@@ -97,6 +100,30 @@ describe('server local logs endpoints', { concurrency: false }, () => {
     assert.equal(data[projectName][0].file, fileRel);
     assert.equal(data[projectName][0].turns, 3);
     assert.equal(data[projectName][0].timestamp, '20260101_120000');
+  });
+
+  it('GET /api/local-logs filters by instance; ?all=1 reveals pid-tagged logs newest-first', async () => {
+    // 同项目目录放一个更新的 pid 标签日志：默认实例(server 以 CCV_INSTANCE_ID= 空启动)不应看到它。
+    const pidFile = `999__${projectName}_20260105_120000.jsonl`;
+    writeFileSync(
+      join(projectDir, pidFile),
+      JSON.stringify({ timestamp: '2026-01-05T12:00:00Z', url: '/v1/messages', mainAgent: true, body: { model: 'm' } }) + '\n---\n',
+    );
+    try {
+      // 默认：只列无标签日志，排除 999__ 文件（HTTP 层确认 deps.instanceId=null 的硬隔离）。
+      const def = (await httpRequest(port, '/api/local-logs')).json();
+      assert.equal(def[projectName].length, 1, 'default hides pid-tagged log');
+      assert.equal(def[projectName][0].file, fileRel);
+      assert.equal(def[projectName][0].instanceId, null);
+      // ?all=1：确认 query 被解析并透传为 showAll=true → 两条都在，最新的 pid 日志排最前且带 instanceId。
+      const all = (await httpRequest(port, '/api/local-logs?all=1')).json();
+      assert.equal(all[projectName].length, 2, '?all=1 reveals all instances');
+      assert.equal(all[projectName][0].file, `${projectName}/${pidFile}`, 'newest (pid) first');
+      assert.equal(all[projectName][0].instanceId, '999');
+      assert.equal(all[projectName][1].instanceId, null);
+    } finally {
+      rmSync(join(projectDir, pidFile), { force: true });
+    }
   });
 
   it('GET /api/download-log rejects invalid file name', async () => {

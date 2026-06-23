@@ -6,9 +6,12 @@ import { _projectName } from '../interceptor.js';
 import { listLocalLogs, deleteLogFiles, mergeLogFiles, archiveLogFiles, validateLogPath } from '../lib/log-management.js';
 import { countLogEntries, streamRawEntriesAsync, readTailEntries } from '../lib/log-stream.js';
 
-async function localLogs(req, res) {
+async function localLogs(req, res, parsedUrl, isLocal, deps) {
   try {
-    const result = await listLocalLogs(LOG_DIR, _projectName);
+    // 按当前实例 pid 硬隔离日志列表；`?all=1` 越过过滤看全部实例（顶部「显示全部」开关）。
+    const instanceId = (deps && deps.instanceId) || null;
+    const showAll = parsedUrl?.searchParams?.get('all') === '1';
+    const result = await listLocalLogs(LOG_DIR, _projectName, { instanceId, showAll });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
   } catch (err) {

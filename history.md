@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.324 (2026-06-23)
+
+- feat(ui): 「日志管理」列表移除「对话轮次」列、下载按钮改纯图标(保留 hover 提示)；移除随之失效的 `ui.logTurns` i18n key
+- feat(multi-instance): 「日志管理/历史」列表按 `--pid` 实例硬隔离——带 `--pid` 的实例只列自己 `<pid>__` 的日志、默认实例只列无标签日志；每行显示实例(pid)标签（桌面端列，无 pid 留空）；顶部「显示全部实例」开关可临时越过过滤看全部实例日志（开关状态持久，SSE 触发的 refetch 也跟随）；顺带修排序 bug：列表展示序与归档「最新不允许」判定改按时间戳（此前按文件名整串排序，`<pid>__` 前缀因 `'1'<'c'` 把最新日志排到列表最底/把活跃日志误判成非最新）；`ui.showAllInstanceLogs`/`ui.logInstanceId` 18 语言
+- test(log-management): 新增 `listLocalLogs` 实例隔离 / pid 解析 / 时间戳排序、`archiveLogFiles`「最新」按时间戳、`ui.showAllInstanceLogs`+`ui.logInstanceId` 18 语言守卫单测;`npm test` 脚本清空继承的 `CCV_INSTANCE_ID`,使套件在 `ccv --pid` 会话内运行也确定性通过
+- fix(multi-instance): `--pid` 实例日志按文件名前缀 `<pid>__<project>_<ts>.jsonl` 隔离——每个实例只读/续自己的日志血脉，多进程下 [对话] 与「血条」不再串台（根因：findRecentLog 此前在共享项目目录按项目名取「最近一个日志」、实例盲）；无 `--pid` 行为不变、实例日志仍计入项目级统计；新 `--pid` 首启可 best-effort 接管最近的无标签日志（mtime 守卫 + 无标签 temp 守卫 + 原子 rename，不双计）；并按实例收窄 cleanupTempFiles，避免不同 `--pid` 实例间 rename 掉对方活动 `_temp`
+
 ## 1.6.323 (2026-06-23)
 
 - feat(chat): 「仅展示当前会话」开启后锁定到当前会话并只展示它——会话 id 改存服务端（按项目，可用 `ccv --pid <名>` 按实例隔离），同一实例多端（电脑+手机）经 SSE `session_pin` 实时一致；多开同一项目时不再被其他窗口/页面重载的会话切换打架；本窗口 /clear、/resume 仍跟随，刷新后保留，锁定会话失效则回退最新；pin 会话防移动端冷淘汰，streaming 浮层/自动滚动在锁定更早会话时抑制；旧浏览器本地 `ccv_pinnedSession_*` 自动清理；`ui.onlyCurrentSession.help` 文案 18 语言同步

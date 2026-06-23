@@ -6,6 +6,7 @@ import { join, sep } from 'node:path';
 import { reconstructEntries } from './delta-reconstructor.js';
 import { streamReconstructedEntriesAsync } from './log-stream.js';
 import { archiveJsonl, resolveJsonlPath } from './jsonl-archive.js';
+import { logFileMatcher } from './interceptor-core.js';
 
 export function validateLogPath(logDir, file) {
   const filePath = join(logDir, file);
@@ -28,7 +29,20 @@ function isLogFileName(name) {
   return name.endsWith('.jsonl') || name.endsWith('.jsonl.zip');
 }
 
-export async function listLocalLogs(logDir, currentProjectName) {
+// 解析日志文件名里的时间戳 `YYYYMMDD_HHMMSS`（带不带 `<pid>__` 前缀、归档与否都适用）。
+// 用于「按时间排序 / 判最新」——文件名整串排序会把 `<pid>__` 前缀（'1' < 'c'）的最新文件排到最底，
+// 必须按时间戳排。无法解析时返回 ''（排到最后）。listLocalLogs 与 archiveLogFiles 共用，防漂移。
+function parseLogTs(name) {
+  const m = name.match(/_(\d{8}_\d{6})\.jsonl(\.zip)?$/);
+  return m ? m[1] : '';
+}
+
+// instanceId / showAll 为可选项（默认 null / false = 现状的反面：硬隔离）：
+//  - instanceId 非空：只列本实例 `<pid>__<project>_…` 的日志；
+//  - instanceId 空：只列无标签 `<project>_…` 日志（排除任何 `<pid>__` 文件）；
+//  - showAll=true：越过上面的归属过滤，列出目录下全部日志（顶部「显示全部」开关用）。
+// 复用 interceptor-core 的 logFileMatcher（与写入端共用，防命名漂移）。第 3 参可选 → 旧 2 参调用零改动。
+export async function listLocalLogs(logDir, currentProjectName, { instanceId = null, showAll = false } = {}) {
   const grouped = {};
   if (!existsSync(logDir)) return { ...grouped, _currentProject: currentProjectName || '' };
 
@@ -37,30 +51,47 @@ export async function listLocalLogs(logDir, currentProjectName) {
     if (!entry.isDirectory()) continue;
     const project = entry.name;
     const projectDir = join(logDir, project);
-    const files = (await readdir(projectDir))
-      .filter(isLogFileName)
-      .sort()
-      .reverse();
-    let statsFiles = null;
+    // 单个项目目录读失败（权限 / 被并发删除 / EMFILE 等）只跳过该项目，不拖垮整个列表。
     try {
-      const statsFile = join(projectDir, `${project}.json`);
-      if (existsSync(statsFile)) {
-        statsFiles = JSON.parse(await readFile(statsFile, 'utf-8')).files;
+      const owns = logFileMatcher(project, instanceId);
+      const files = (await readdir(projectDir)).filter(isLogFileName);
+      let statsFiles = null;
+      try {
+        const statsFile = join(projectDir, `${project}.json`);
+        if (existsSync(statsFile)) {
+          statsFiles = JSON.parse(await readFile(statsFile, 'utf-8')).files;
+        }
+      } catch { }
+      for (const f of files) {
+        if (!showAll && !owns(f)) continue;
+        const match = f.match(/^(.+?)_(\d{8}_\d{6})\.jsonl(\.zip)?$/);
+        if (!match) continue;
+        const ts = match[2];
+        const archived = !!match[3];
+        // 从前缀解析归属实例 id 用于行内 badge：`<pid>__<project>` → pid；`<project>` → 无（null）。
+        // 项目名自身可含下划线，故用 endsWith('__'+project) 精确剥离，而非按 '__' split。
+        const g1 = match[1];
+        const fileInstanceId = (g1 !== project && g1.endsWith('__' + project))
+          ? g1.slice(0, -(project.length + 2))
+          : null;
+        const filePath = join(projectDir, f);
+        let size;
+        try { size = (await stat(filePath)).size; } catch { continue; }
+        if (size === 0) continue;
+        const stats = statsFiles?.[f] || (archived ? statsFiles?.[f.slice(0, -4)] : null);
+        const turns = stats?.summary?.sessionCount || 0;
+        if (!grouped[project]) grouped[project] = [];
+        grouped[project].push({ file: `${project}/${f}`, timestamp: ts, size, turns, preview: stats?.preview || [], archived, instanceId: fileInstanceId });
       }
-    } catch { }
-    for (const f of files) {
-      const match = f.match(/^(.+?)_(\d{8}_\d{6})\.jsonl(\.zip)?$/);
-      if (!match) continue;
-      const ts = match[2];
-      const archived = !!match[3];
-      const filePath = join(projectDir, f);
-      let size;
-      try { size = (await stat(filePath)).size; } catch { continue; }
-      if (size === 0) continue;
-      const stats = statsFiles?.[f] || (archived ? statsFiles?.[f.slice(0, -4)] : null);
-      const turns = stats?.summary?.sessionCount || 0;
-      if (!grouped[project]) grouped[project] = [];
-      grouped[project].push({ file: `${project}/${f}`, timestamp: ts, size, turns, preview: stats?.preview || [], archived });
+      // 按时间戳降序（文件名降序兜底，处理同秒 tie，保证确定性）。
+      // 不能再依赖文件名整串排序：`<pid>__` 前缀会把最新日志排到最底。
+      if (grouped[project]) {
+        grouped[project].sort((a, b) =>
+          b.timestamp.localeCompare(a.timestamp) || b.file.localeCompare(a.file));
+      }
+    } catch (err) {
+      console.error(`[CC Viewer] listLocalLogs: 跳过无法读取的项目 ${project}:`, err?.message || err);
+      continue;
     }
   }
   return { ...grouped, _currentProject: currentProjectName || '' };
@@ -242,10 +273,11 @@ export function archiveLogFiles(logDir, files) {
     const projectDir = join(logDir, project);
     let latest = null;
     try {
+      // 「最新文件不允许归档」——按时间戳判最新（与 listLocalLogs 同口径），
+      // 否则文件名整串排序会把 `<pid>__` 前缀的最新活跃日志误判成非最新而放行归档。
       const projectEntries = readdirSync(projectDir)
         .filter(isLogFileName)
-        .sort()
-        .reverse();
+        .sort((a, b) => parseLogTs(b).localeCompare(parseLogTs(a)) || b.localeCompare(a));
       latest = projectEntries[0] || null;
     } catch {}
 

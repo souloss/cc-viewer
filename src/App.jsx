@@ -620,6 +620,13 @@ class App extends AppBase {
             >
               {t('ui.refreshStats')}
             </Button>
+            <Checkbox
+              className={styles.btnMarginLeft}
+              checked={this.state.logShowAllInstances}
+              onChange={this.handleToggleShowAllLogs}
+            >
+              {t('ui.showAllInstanceLogs')}
+            </Checkbox>
           </div>
           {this.state.localLogsLoading ? (
             <div className={styles.spinCenter}><Spin /></div>

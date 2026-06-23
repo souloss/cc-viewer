@@ -98,6 +98,7 @@ class AppBase extends React.Component {
       localLogs: {},       // { projectName: [{file, timestamp, size}] }
       localLogsLoading: false,
       refreshingStats: false,
+      logShowAllInstances: false, // 「显示全部实例」开关：true 时越过 --pid 硬隔离列出全部实例日志
       showAll: false,
       lang: getLang(),
       userProfile: null,    // { name, avatar }
@@ -2298,9 +2299,15 @@ class AppBase extends React.Component {
 
   // ─── 日志管理 ──────────────────────────────────────────
 
+  // 集中构造 /api/local-logs URL：「显示全部实例」开启时带 ?all=1。打开弹窗 / 刷新统计 /
+  // 合并·归档·删除后这几处 refetch 都经此 helper，开关一改即自动跟随（apiUrl 的 token 追加已正确处理已有 ?）。
+  _localLogsUrl() {
+    return apiUrl(this.state.logShowAllInstances ? '/api/local-logs?all=1' : '/api/local-logs');
+  }
+
   handleImportLocalLogs = () => {
     this.setState({ importModalVisible: true, localLogsLoading: true });
-    fetch(apiUrl('/api/local-logs'))
+    fetch(this._localLogsUrl())
       .then(res => res.json())
       .then(data => {
         const { _currentProject, ...logs } = data;
@@ -2309,6 +2316,11 @@ class AppBase extends React.Component {
       .catch(() => {
         this.setState({ localLogs: {}, localLogsLoading: false });
       });
+  };
+
+  // 「显示全部实例」开关：翻转后用新 scope 重新拉取列表（开关状态持久，不随弹窗关闭重置）。
+  handleToggleShowAllLogs = () => {
+    this.setState(prev => ({ logShowAllInstances: !prev.logShowAllInstances }), () => this.handleImportLocalLogs());
   };
 
   handleCloseImportModal = () => {
@@ -2321,7 +2333,7 @@ class AppBase extends React.Component {
       .then(res => res.json())
       .then(data => {
         if (!data.ok) throw new Error(data.error || 'refresh failed');
-        return fetch(apiUrl('/api/local-logs'));
+        return fetch(this._localLogsUrl());
       })
       .then(res => res.json())
       .then(data => {

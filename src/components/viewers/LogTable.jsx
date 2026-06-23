@@ -30,6 +30,15 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
       width: mobile ? 150 : 180,
       render: (ts) => <span className={styles.tableTimestampCell}>{formatTimestamp(ts, mobile)}</span>,
     },
+    // 实例归属(pid)列：仅桌面端（移动端列宽紧张，沿用 turns 列同款 !mobile 守卫）。
+    // 无 pid 的无标签日志该列留空。
+    ...(!mobile ? [{
+      title: t('ui.logInstanceId'),
+      dataIndex: 'instanceId',
+      key: 'instanceId',
+      width: 90,
+      render: (id) => id ? <Tag className={styles.tableTag}>{id}</Tag> : null,
+    }] : []),
     {
       title: t('ui.logPreview'),
       dataIndex: 'preview',
@@ -78,13 +87,6 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
         );
       },
     },
-    ...(!mobile ? [{
-      title: t('ui.logTurns'),
-      dataIndex: 'turns',
-      key: 'turns',
-      width: 80,
-      render: (v) => <Tag className={styles.tableTag}>{v || 0}</Tag>,
-    }] : []),
     {
       title: t('ui.logSize'),
       dataIndex: 'size',
@@ -95,15 +97,13 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
     {
       title: t('ui.logActions'),
       key: 'actions',
-      width: mobile ? 160 : 180,
+      width: mobile ? 120 : 130,
       render: (_, log) => (
         <span className={styles.tableActionsCell}>
           <Button size="small" type="primary" onClick={(e) => { e.stopPropagation(); onOpenLog(log.file); }}>
             {t('ui.openLog')}
           </Button>
-          <Button size="small" icon={<DownloadOutlined />} onClick={(e) => { e.stopPropagation(); onDownloadLog(log.file); }}>
-            {t('ui.downloadLog')}
-          </Button>
+          <Button size="small" icon={<DownloadOutlined />} title={t('ui.downloadLog')} onClick={(e) => { e.stopPropagation(); onDownloadLog(log.file); }} />
         </span>
       ),
     },

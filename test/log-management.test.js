@@ -62,6 +62,52 @@ describe('listLocalLogs', () => {
   });
 });
 
+describe('listLocalLogs instance isolation (--pid)', () => {
+  const untagged = 'proj_20260601_100000.jsonl';        // 无标签(旧)
+  const tagged = '123__proj_20260602_100000.jsonl';     // pid=123(新)
+
+  function seedMixed() {
+    writeLog(tmpDir, 'proj', untagged, [makeEntry('t1', 'u1')]);
+    writeLog(tmpDir, 'proj', tagged, [makeEntry('t2', 'u2')]);
+  }
+
+  it('default (no instanceId) lists only untagged logs, excludes <pid>__ files', async () => {
+    seedMixed();
+    const result = await listLocalLogs(tmpDir, 'proj');
+    assert.equal(result.proj.length, 1);
+    assert.ok(result.proj[0].file.endsWith(untagged));
+    assert.equal(result.proj[0].instanceId, null);
+  });
+
+  it('instanceId scopes the list to that pid only', async () => {
+    seedMixed();
+    const result = await listLocalLogs(tmpDir, 'proj', { instanceId: '123' });
+    assert.equal(result.proj.length, 1);
+    assert.ok(result.proj[0].file.endsWith(tagged));
+    assert.equal(result.proj[0].instanceId, '123');
+  });
+
+  it('showAll returns every instance, newest-by-timestamp first (sort-bug fix)', async () => {
+    seedMixed();
+    const result = await listLocalLogs(tmpDir, 'proj', { showAll: true });
+    assert.equal(result.proj.length, 2);
+    // 修复前：'123__' 因 '1' < 'p' 被排到列表最底；修复后按时间戳，最新的 pid 日志排最前。
+    assert.ok(result.proj[0].file.endsWith(tagged), 'newest (pid-tagged) is first, not buried');
+    assert.equal(result.proj[0].instanceId, '123');
+    assert.equal(result.proj[1].instanceId, null);
+  });
+
+  it('parses pid correctly when the project name itself contains underscores', async () => {
+    writeLog(tmpDir, 'my_proj', 'alpha__my_proj_20260601_100000.jsonl', [makeEntry('t', 'u')]);
+    const scoped = await listLocalLogs(tmpDir, 'my_proj', { instanceId: 'alpha' });
+    assert.equal(scoped['my_proj'].length, 1);
+    assert.equal(scoped['my_proj'][0].instanceId, 'alpha');
+    // 默认实例看不到 alpha 的日志
+    const def = await listLocalLogs(tmpDir, 'my_proj');
+    assert.equal(def['my_proj'], undefined);
+  });
+});
+
 describe('readLocalLog', () => {
   it('reads and deduplicates entries', async () => {
     const e1 = makeEntry('2026-06-01T00:00:00Z', 'http://api/v1/messages');

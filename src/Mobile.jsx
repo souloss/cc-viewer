@@ -1047,6 +1047,10 @@ class Mobile extends AppBase {
               >
                 {t('ui.refreshStats')}
               </Button>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 'auto' }}>
+                <Switch size="small" checked={this.state.logShowAllInstances} onChange={this.handleToggleShowAllLogs} />
+                {t('ui.showAllInstanceLogs')}
+              </span>
             </div>
             <div className={styles.mobileLogMgmtBody}>
               {this.state.localLogsLoading ? (
