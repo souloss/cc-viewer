@@ -195,6 +195,149 @@ describe('updateAckCard', () => {
   });
 });
 
+// AI 卡片（逐字流式）：aiCardTemplateId 走 createAndDeliver + /card/streaming + flowStatus 状态标签。
+const aiCfg = { appKey: 'ak', appSecret: 'sec', aiCardTemplateId: 'ai1' };
+
+describe('AI card — sendAckCard', () => {
+  it('createAndDeliver (STREAM, string flowStatus, empty content) + kick frame, returns streaming handle', async () => {
+    const ctx = makeCtx(okToken);
+    const r = await adapter.sendAckCard(aiCfg, { conversationType: '1', robotCode: 'r', senderStaffId: 'u9' }, 'thinking', ctx);
+    const create = ctx.calls.find((c) => c.url.endsWith('/card/instances/createAndDeliver'));
+    assert.ok(create, 'uses the createAndDeliver endpoint');
+    assert.equal(create.body.cardTemplateId, 'ai1');
+    assert.equal(create.body.callbackType, 'STREAM');
+    assert.equal(create.body.cardData.cardParamMap.flowStatus, '1'); // 字符串
+    assert.equal(create.body.cardData.cardParamMap.content, '');
+    assert.match(create.body.openSpaceId, /IM_ROBOT\.u9/);
+    const kick = ctx.calls.find((c) => c.url.endsWith('/card/streaming'));
+    assert.ok(kick && kick.method === 'PUT', 'kick frame opens the streaming lifecycle');
+    assert.equal(kick.body.content, '');
+    assert.equal(kick.body.isFull, true);
+    assert.equal(r.outTrackId, create.body.outTrackId);
+    assert.equal(r.streaming, true);
+  });
+
+  it('group AI card uses the IM_GROUP openSpaceId + deliver model', async () => {
+    const ctx = makeCtx(okToken);
+    await adapter.sendAckCard(aiCfg, { conversationType: '2', robotCode: 'r', conversationId: 'g7' }, 'thinking', ctx);
+    const create = ctx.calls.find((c) => c.url.endsWith('/card/instances/createAndDeliver'));
+    assert.match(create.body.openSpaceId, /IM_GROUP\.g7/);
+    assert.equal(create.body.imGroupOpenDeliverModel.robotCode, 'r');
+  });
+
+  it('falls back to the legacy card when AI create fails but cardTemplateId is set', async () => {
+    const ctx = makeCtx((url) => {
+      if (url.includes('accessToken')) return { ok: true, json: async () => ({ accessToken: 'tok', expireIn: 7200 }) };
+      if (url.endsWith('/card/instances/createAndDeliver')) return { ok: false, status: 403, json: async () => ({ message: 'no perm' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    const r = await adapter.sendAckCard({ ...aiCfg, cardTemplateId: 'tmpl1' }, { conversationType: '1', robotCode: 'r', senderStaffId: 'u' }, 's', ctx);
+    assert.ok(ctx.calls.find((c) => c.url.endsWith('/card/instances') && c.method === 'POST'), 'legacy create');
+    assert.ok(ctx.calls.find((c) => c.url.includes('/card/instances/deliver')), 'legacy deliver');
+    assert.ok(r && !r.streaming, 'legacy handle has no streaming flag');
+  });
+
+  it('throws when AI create fails and there is no legacy cardTemplateId', async () => {
+    const ctx = makeCtx((url) => {
+      if (url.includes('accessToken')) return { ok: true, json: async () => ({ accessToken: 'tok', expireIn: 7200 }) };
+      if (url.endsWith('/card/instances/createAndDeliver')) return { ok: false, status: 403, json: async () => ({ message: 'no perm' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await assert.rejects(
+      () => adapter.sendAckCard(aiCfg, { conversationType: '1', robotCode: 'r', senderStaffId: 'u' }, 's', ctx),
+      /ai-card create 403.*no perm/,
+    );
+  });
+});
+
+describe('AI card — streamCardText', () => {
+  it('PUTs a streaming frame with all 7 fields (string content, isFull, isError:false)', async () => {
+    const ctx = makeCtx(okToken);
+    const ok = await adapter.streamCardText(aiCfg, {}, { outTrackId: 'ot9', streaming: true }, 'hello so far', ctx);
+    assert.equal(ok, true);
+    const put = ctx.calls.find((c) => c.url.endsWith('/card/streaming'));
+    assert.equal(put.method, 'PUT');
+    assert.equal(put.body.outTrackId, 'ot9');
+    assert.equal(put.body.key, 'content');
+    assert.equal(put.body.content, 'hello so far');
+    assert.equal(put.body.isFull, true);
+    assert.equal(put.body.isFinalize, false);
+    assert.equal(put.body.isError, false);
+    assert.equal(typeof put.body.guid, 'string');
+  });
+
+  it('is a no-op (false) for a non-streaming handle', async () => {
+    const ctx = makeCtx(okToken);
+    const ok = await adapter.streamCardText(aiCfg, {}, { outTrackId: 'ot' }, 'x', ctx);
+    assert.equal(ok, false);
+    assert.equal(ctx.calls.length, 0, 'no fetch for a non-streaming handle');
+  });
+
+  it('defaults the streaming key to "content" and honors a custom aiCardStreamKey', async () => {
+    const def = makeCtx(okToken);
+    await adapter.streamCardText(aiCfg, {}, { outTrackId: 'ot', streaming: true }, 'hi', def);
+    assert.equal(def.calls.find((c) => c.url.endsWith('/card/streaming')).body.key, 'content');
+
+    const cus = makeCtx(okToken);
+    await adapter.streamCardText({ ...aiCfg, aiCardStreamKey: 'reply' }, {}, { outTrackId: 'ot', streaming: true }, 'hi', cus);
+    assert.equal(cus.calls.find((c) => c.url.endsWith('/card/streaming')).body.key, 'reply');
+  });
+});
+
+describe('AI card — configurable stream key (create + finalize)', () => {
+  const customCfg = { appKey: 'ak', appSecret: 'sec', aiCardTemplateId: 'ai1', aiCardStreamKey: 'reply' };
+
+  it('createAndDeliver seeds cardParamMap under the custom key', async () => {
+    const ctx = makeCtx(okToken);
+    await adapter.sendAckCard(customCfg, { conversationType: '1', robotCode: 'r', senderStaffId: 'u' }, 's', ctx);
+    const create = ctx.calls.find((c) => c.url.endsWith('/card/instances/createAndDeliver'));
+    assert.ok('reply' in create.body.cardData.cardParamMap, 'uses the custom key, not content');
+    assert.equal(create.body.cardData.cardParamMap.reply, '');
+    assert.equal(create.body.cardData.cardParamMap.flowStatus, '1');
+  });
+
+  it('finalize writes the full text to the custom key via instances PUT', async () => {
+    const ctx = makeCtx(okToken);
+    await adapter.updateAckCard(customCfg, {}, { outTrackId: 'ot', streaming: true }, 'final answer', 'done', ctx);
+    const inst = ctx.calls.find((c) => c.url.endsWith('/card/instances') && c.method === 'PUT');
+    assert.equal(inst.body.cardData.cardParamMap.reply, 'final answer');
+    assert.equal(inst.body.cardData.cardParamMap.flowStatus, '3');
+  });
+});
+
+describe('AI card — updateAckCard finalize', () => {
+  it('finalizes via streaming (isFinalize) + sets flowStatus 3 via instances (updateCardDataByKey)', async () => {
+    const ctx = makeCtx(okToken);
+    const ok = await adapter.updateAckCard(aiCfg, {}, { outTrackId: 'ot1', streaming: true }, 'final answer', 'done', ctx);
+    assert.equal(ok, true);
+    const fin = ctx.calls.find((c) => c.url.endsWith('/card/streaming'));
+    assert.equal(fin.body.isFinalize, true);
+    assert.equal(fin.body.content, 'final answer');
+    const inst = ctx.calls.find((c) => c.url.endsWith('/card/instances') && c.method === 'PUT');
+    assert.equal(inst.body.cardData.cardParamMap.flowStatus, '3');
+    assert.equal(inst.body.cardUpdateOptions.updateCardDataByKey, true);
+  });
+
+  it('maps error/interrupted to flowStatus 5 + isError on the final frame', async () => {
+    const ctx = makeCtx(okToken);
+    await adapter.updateAckCard(aiCfg, {}, { outTrackId: 'ot1', streaming: true }, 'oops', 'error', ctx);
+    const fin = ctx.calls.find((c) => c.url.endsWith('/card/streaming'));
+    assert.equal(fin.body.isError, true);
+    const inst = ctx.calls.find((c) => c.url.endsWith('/card/instances') && c.method === 'PUT');
+    assert.equal(inst.body.cardData.cardParamMap.flowStatus, '5');
+  });
+
+  it('still succeeds via the instances PUT when the streaming PUT fails (degrades w/o Card.Streaming.Write)', async () => {
+    const ctx = makeCtx((url) => {
+      if (url.includes('accessToken')) return { ok: true, json: async () => ({ accessToken: 'tok', expireIn: 7200 }) };
+      if (url.endsWith('/card/streaming')) return { ok: false, status: 403, json: async () => ({ message: 'no stream perm' }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    const ok = await adapter.updateAckCard(aiCfg, {}, { outTrackId: 'ot1', streaming: true }, 'final', 'done', ctx);
+    assert.equal(ok, true, 'instances PUT settles the final content + tag, so finalize still counts as success');
+  });
+});
+
 describe('connect / ack via fake client factory', () => {
   beforeEach(() => __setClientFactory(null));
 

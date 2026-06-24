@@ -40,7 +40,7 @@ describe('encodeSecret / decodeSecret', () => {
 describe('normalizeDingTalk', () => {
   it('coerces types and trims', () => {
     const n = normalizeDingTalk({ enabled: 1, appKey: '   key  ', appSecret: ' sec ', allowStaffIds: ['a', 'a', ' b ', '', 2], maxChunkChars: '4000' });
-    assert.deepEqual(n, { enabled: true, appKey: 'key', appSecret: 'sec', allowStaffIds: ['a', 'b'], maxChunkChars: 4000, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '' });
+    assert.deepEqual(n, { enabled: true, appKey: 'key', appSecret: 'sec', allowStaffIds: ['a', 'b'], maxChunkChars: 4000, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '', aiCardTemplateId: '', aiCardStreamKey: '' });
   });
   it('defaults / clamps maxChunkChars', () => {
     assert.equal(normalizeDingTalk({}).maxChunkChars, 3800);
@@ -62,7 +62,7 @@ describe('save / load roundtrip', () => {
   it('roundtrips through preferences.json (plaintext in memory, base64 on disk)', () => {
     reset();
     saveDingTalkConfig({ enabled: true, appKey: 'ding123', appSecret: 'topsecret', allowStaffIds: ['u1'], maxChunkChars: 2000 });
-    assert.deepEqual(loadDingTalkConfig(), { enabled: true, appKey: 'ding123', appSecret: 'topsecret', allowStaffIds: ['u1'], maxChunkChars: 2000, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '' });
+    assert.deepEqual(loadDingTalkConfig(), { enabled: true, appKey: 'ding123', appSecret: 'topsecret', allowStaffIds: ['u1'], maxChunkChars: 2000, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '', aiCardTemplateId: '', aiCardStreamKey: '' });
     const onDisk = JSON.parse(readFileSync(getPrefsPath(), 'utf-8'));
     assert.equal(onDisk.dingtalk.enabled, true);
     assert.notEqual(onDisk.dingtalk.appSecret, 'topsecret', 'must not store raw secret');

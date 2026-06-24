@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.325 (2026-06-24)
+
+- feat(im/dingtalk): 钉钉回复新增「AI 卡片逐字流式 + flowStatus 状态标签」——填 `aiCardTemplateId`（AI 卡片场景模板，需声明流式变量 + flowStatus 变量）后，回复在对话过程中经 `/v1.0/card/streaming` 逐字吐字，并用 flowStatus 状态标签（处理中→执行完成/执行失败）替代「[收到]」文本，结束以 transcript 权威全文落定；未配置或流式失败时回退到普通卡片(`cardTemplateId`)单次更新或纯文本。逐字文本源复用 interceptor 主 agent SSE（仅 worker、跳过 thinking/teammate）；新增 `aiCardStreamKey` 配置（流式变量名，默认 `content`，模板用别名时填）；推送轮询 300ms；`stream-armed/stream-handle/stream-push` 审计便于诊断；help 注明「建卡失败静默回退普通卡片/纯文本」与「短/秒回回复无打字机（结果仍正确）」；`ui.dingtalk.aiCardTemplateId`/`aiCardStreamKey`(+Help) 18 语言
+- test(im/dingtalk): 新增 AI 卡片 createAndDeliver/kick 帧/流式帧 7 字段(含 isError)/finalize+flowStatus/降级回退/可配置 streamKey、核心 streamTimer（阈值推送·跨 isStreaming 抖动·finalize 权威全文·/stop 停推·帧上限·finalize 截断·单 in-flight 守卫）、interceptor 逐字累加器（只收 text_delta）单测
+
 ## 1.6.324 (2026-06-23)
 
 - feat(ui): 「日志管理」列表移除「对话轮次」列、下载按钮改纯图标(保留 hover 提示)；移除随之失效的 `ui.logTurns` i18n key

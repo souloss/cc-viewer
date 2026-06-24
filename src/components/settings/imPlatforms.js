@@ -39,6 +39,16 @@ export const dingtalkDescriptor = {
       labelKey: 'ui.dingtalk.cardTemplateId', fallback: 'Card Template ID',
       helpKey: 'ui.dingtalk.cardTemplateIdHelp', helpFallback: 'Interactive Card template ID from the DingTalk Open Platform (optional — leave empty for plain-text acknowledgment).',
     },
+    {
+      key: 'aiCardTemplateId', type: 'text', section: 'more', optional: true,
+      labelKey: 'ui.dingtalk.aiCardTemplateId', fallback: 'AI Card Template ID (streaming)',
+      helpKey: 'ui.dingtalk.aiCardTemplateIdHelp', helpFallback: 'AI-card scene template ID (must declare content + flowStatus variables). When set, replies stream character-by-character with a flowStatus status tag, replacing the “[received]” text. Requires the Card.Instance.Write + Card.Streaming.Write permissions. Leave empty to use the plain card / text above.',
+    },
+    {
+      key: 'aiCardStreamKey', type: 'text', section: 'more', optional: true,
+      labelKey: 'ui.dingtalk.aiCardStreamKey', fallback: 'AI Card streaming variable name (default: content)',
+      helpKey: 'ui.dingtalk.aiCardStreamKeyHelp', helpFallback: 'Name of the streaming markdown variable in your AI-card template. Leave empty to use the default “content”; set it only if your template names that variable differently.',
+    },
   ],
   notes: [],
 };

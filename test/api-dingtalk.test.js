@@ -76,7 +76,7 @@ describe('DingTalk config API (loopback=admin)', { concurrency: false }, () => {
   it('POST /api/dingtalk/config saves creds and returns masked state', async () => {
     const res = await httpRequest(port, '/api/dingtalk/config', {
       method: 'POST',
-      body: { enabled: false, appKey: 'dk123', appSecret: 'topsecret', allowStaffIds: ['u1', 'u2'], maxChunkChars: 2000 },
+      body: { enabled: false, appKey: 'dk123', appSecret: 'topsecret', allowStaffIds: ['u1', 'u2'], maxChunkChars: 2000, aiCardTemplateId: 'ai-tmpl' },
     });
     assert.equal(res.status, 200);
     const d = res.json();
@@ -85,6 +85,7 @@ describe('DingTalk config API (loopback=admin)', { concurrency: false }, () => {
     assert.equal('appSecret' in d, false);
     assert.deepEqual(d.allowStaffIds, ['u1', 'u2']);
     assert.equal(d.maxChunkChars, 2000);
+    assert.equal(d.aiCardTemplateId, 'ai-tmpl', 'aiCardTemplateId round-trips through the POST route + admin state');
     assert.ok(!res.body.includes('topsecret'), 'secret must not leak in the response');
   });
 

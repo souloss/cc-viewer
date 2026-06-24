@@ -82,6 +82,8 @@ function dingtalkConfigPost(req, res, parsedUrl, isLocal, deps) {
       blockOnSkipPermissions: incoming.blockOnSkipPermissions,
       ackCard: incoming.ackCard,
       cardTemplateId: incoming.cardTemplateId,
+      aiCardTemplateId: incoming.aiCardTemplateId,
+      aiCardStreamKey: incoming.aiCardStreamKey,
     });
     // 驱动进程管理器（替代旧的在进程 reloadBridge）：启用→重启 worker，停用→停 worker。
     try {

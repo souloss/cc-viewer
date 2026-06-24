@@ -34,7 +34,7 @@ const DESCRIPTORS = {
     allowListField: 'allowStaffIds',
     defaults: {
       enabled: false, appKey: '', appSecret: '', allowStaffIds: [],
-      maxChunkChars: 3800, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '',
+      maxChunkChars: 3800, blockOnSkipPermissions: false, ackCard: true, cardTemplateId: '', aiCardTemplateId: '', aiCardStreamKey: '',
     },
     fields: [
       { key: 'enabled', type: 'bool' },
@@ -45,6 +45,11 @@ const DESCRIPTORS = {
       { key: 'blockOnSkipPermissions', type: 'bool' },
       { key: 'ackCard', type: 'bool', default: true },
       { key: 'cardTemplateId', type: 'string' },
+      // AI 卡片场景模板 id（声明流式变量 + flowStatus 状态变量）。非空即启用「逐字流式 +
+      // flowStatus 状态标签」AI 卡片；留空回退到 cardTemplateId 普通卡片或纯文本。
+      { key: 'aiCardTemplateId', type: 'string' },
+      // AI 卡片模板里那个「流式 Markdown 变量」的名字。留空按钉钉/官方惯例用 'content'；模板若用别名在此填。
+      { key: 'aiCardStreamKey', type: 'string' },
     ],
   },
   feishu: {

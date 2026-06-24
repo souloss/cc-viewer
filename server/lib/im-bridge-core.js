@@ -35,6 +35,13 @@ const IDLE_POLL_INTERVAL_MS = 5_000;     // check every 5s if streaming stopped
 const IDLE_POLL_THRESHOLD = 3;           // 3 consecutive idle ticks (15s) → synthetic turn_end
 const CONNECT_TIMEOUT_MS = 15_000;       // bound adapter.connect() so a hung start can't block others
 const STOP_WORDS = new Set(['/stop', 'stop', '停止', 'esc', '/esc']);
+// ─── 逐字流式（钉钉 AI 卡片）推送节流：每帧计费，故节流 + 帧上限 ───
+// 推送轮询间隔。300ms：数秒级回复约展示 10 帧打字机效果；过大→短/秒回回复在首 tick 前就 finalize、
+// 看不到流式；过小→帧数与计费上升，且建卡本身有网络往返、再低收益有限。测试经 __setStreamTickMsForTests 调低。
+let STREAM_TICK_MS = 300;
+const STREAM_MIN_DELTA = 20;             // 累计增长达 20 字才推一帧（对齐钉钉官方节流，省调用）
+const STREAM_MAX_FRAMES = 25;            // 每回合中途流式帧硬上限；超限停推，finalize 仍落全文
+const STREAM_MAX_CHARS = 20_000;         // 卡片内容字符上限，超出截断
 
 // ─── registry + core-global single-flight ───
 const instances = new Map();             // platformId → instance
@@ -64,6 +71,7 @@ function newInstance(adapter) {
     sendTimes: [],
     store: {},                           // adapter scratch (token cache, send client)
     ackCardPromise: null,                 // Promise<handle|null> for the in-flight ack card
+    streamTimer: null,                    // 逐字流式推送定时器（AI 卡片）；绑当前注入 slot 生命周期
   };
 }
 
@@ -168,10 +176,68 @@ async function finalizeAckCard(inst, target, text, status) {
 
 // ─── activeInjection lifecycle ───
 function clearActiveInjection() {
+  // 先停掉持有 slot 的实例的逐字流式定时器（slot 释放的每条路径都经此：turn-end / /stop / 超时 /
+  // inject-fail / stopBridge），杜绝定时器泄漏与 finalize 后的乱序推送。
+  if (activeInjection) {
+    const owner = instances.get(activeInjection.platformId);
+    if (owner && owner.streamTimer) { clearInterval(owner.streamTimer); owner.streamTimer = null; }
+  }
   activeInjection = null;
   if (activeInjectionTimer) { clearTimeout(activeInjectionTimer); activeInjectionTimer = null; }
   if (idlePollTimer) { clearInterval(idlePollTimer); idlePollTimer = null; }
   idlePollCount = 0;
+}
+
+// slot 仍属本次注入？streamTick 入口与每次 await 后都要重验——slot 可能在 await 期间被 finalize/释放，
+// 重验保证 finalize 永远是最后一次 PUT、定时器也不在易主后继续推。
+function isSlotOwned(inst, since) {
+  return !!activeInjection && activeInjection.platformId === inst.adapter.id && activeInjection.since === since;
+}
+
+/**
+ * 逐字流式推送一帧（钉钉 AI 卡片）。常驻 setInterval 驱动，贯穿本注入 slot 生命周期——**不**随
+ * isStreaming() 抖动停（带工具的回合中间 streamingState 每个 API 调用会 false↔true，停了就断流）。
+ * 全程 best-effort：任何失败都不影响最终 finalize（notifyTurnEnd 用 transcript 权威全文落定）。
+ */
+async function streamTick(inst, since) {
+  // slot 已释放/易主 → 自停（定时器自清）
+  if (!isSlotOwned(inst, since)) {
+    if (inst.streamTimer) { clearInterval(inst.streamTimer); inst.streamTimer = null; }
+    return;
+  }
+  if (inst._streamInFlight) return;          // 单 in-flight：避免乱序 PUT（钉钉靠 guid 排序）
+  if (inst._streamHandle === null) return;   // 已判定不可流式（无句柄 / 非 AI 卡片）
+  const d = inst.bridgeDeps;
+  if (!d || typeof d.getLiveText !== 'function') return;
+  // 解析一次 ack 卡片句柄并缓存：null/非流式 → 永久关停本轮推送，不再每 tick 重复 await。
+  if (inst._streamHandle === undefined) {
+    inst._streamHandle = (await inst.ackCardPromise?.catch(() => null)) ?? null;
+    // 落审计便于诊断：streaming=false 说明 AI 卡片建卡失败/回退 legacy（aiErr 给出钉钉返回的原因）；
+    // liveLen=0 说明文本源没采到（多半 mainAgent 判定或采集开关问题）。
+    audit(inst, 'stream-handle', { streaming: !!inst._streamHandle?.streaming, liveLen: (d.getLiveText?.() || '').length, aiErr: inst.store?.lastAiCardError || undefined });
+    if (!inst._streamHandle?.streaming) { inst._streamHandle = null; return; }
+  }
+  if (inst._streamFrames >= STREAM_MAX_FRAMES) return; // 计费上限：停中途推送，finalize 仍落全文
+  let text = d.getLiveText();
+  if (typeof text !== 'string') return;
+  if (text.length > STREAM_MAX_CHARS) text = text.slice(0, STREAM_MAX_CHARS);
+  if (text.length - (inst._streamPushedLen || 0) < STREAM_MIN_DELTA) return; // 增长不足，省调用
+  inst._streamInFlight = true;
+  const target = activeInjection.target;
+  const cfg = d.getConfig();
+  const ok = await inst.adapter.streamCardText(cfg, target, inst._streamHandle, text, ctxFor(inst)).catch(() => false);
+  inst._streamInFlight = false;
+  // await 后重新校验 slot：期间可能已 finalize/释放 → 本帧作废，不计数（保证 finalize 是最后一次 PUT）。
+  if (!isSlotOwned(inst, since)) return;
+  // 落审计：ok=false 说明 /card/streaming 被拒（多半 Card.Streaming.Write 权限缺失）；ok=true 却看不到
+  // 流式则多半是 AI 卡片模板里流式变量名不叫 content（见 streamFrame 的 key）。
+  audit(inst, 'stream-push', { len: text.length, ok });
+  if (ok) {
+    inst._streamPushedLen = text.length;
+    inst._streamFrames = (inst._streamFrames || 0) + 1;
+    if (inst._streamFrames === STREAM_MAX_FRAMES) audit(inst, 'stream-frame-cap', { conversationId: target?.conversationId, frames: inst._streamFrames });
+    idlePollCount = 0; // 有流式活动 → 重置空闲计数，避免 idlePoll 误判触发合成 turn_end
+  }
 }
 function armActiveInjection(inst, target, since) {
   activeInjection = { platformId: inst.adapter.id, since, target, transcriptPath: null };
@@ -205,6 +271,34 @@ function armActiveInjection(inst, target, since) {
     }
   }, IDLE_POLL_INTERVAL_MS);
   if (typeof idlePollTimer.unref === 'function') idlePollTimer.unref();
+
+  // 逐字流式（钉钉 AI 卡片）：仅当配了 aiCardTemplateId、开了 ack 卡片、且平台具备流式能力（worker
+  // 注入了 getLiveText + 适配器实现 streamCardText）时启动常驻推送定时器。注入轮次开始即重置文本源。
+  const cfg = inst.bridgeDeps?.getConfig?.();
+  if (cfg && cfg.aiCardTemplateId) {
+    const canStream = cfg.ackCard !== false
+      && typeof inst.bridgeDeps.getLiveText === 'function'
+      && typeof inst.adapter.streamCardText === 'function';
+    if (canStream) {
+      inst.bridgeDeps.resetLiveText?.();
+      if (inst.store) inst.store.lastAiCardError = null; // 清上一轮的诊断残留
+      inst._streamPushedLen = 0;
+      inst._streamFrames = 0;
+      inst._streamHandle = undefined; // 首 tick 解析一次后缓存（null = 不可流式）
+      inst._streamInFlight = false;
+      if (inst.streamTimer) clearInterval(inst.streamTimer);
+      inst.streamTimer = setInterval(() => { void streamTick(inst, since); }, STREAM_TICK_MS);
+      if (typeof inst.streamTimer.unref === 'function') inst.streamTimer.unref();
+      audit(inst, 'stream-armed', { conversationId: target?.conversationId });
+    } else {
+      // 配了 aiCardTemplateId 却没起流式：把原因落审计，便于诊断「没有流式输出」。
+      audit(inst, 'stream-skip', {
+        reason: cfg.ackCard === false ? 'ackCardOff'
+          : typeof inst.bridgeDeps?.getLiveText !== 'function' ? 'noGetLiveText(非 worker?)'
+            : 'noStreamCardText',
+      });
+    }
+  }
 }
 
 // ─── small helpers ───
@@ -543,6 +637,22 @@ export async function notifyTurnEnd(sessionId, ts, transcriptPath) {
   const handle = await ackP?.catch(() => null);
   if (handle && typeof inst.adapter.updateAckCard === 'function') {
     const cfg = inst.bridgeDeps.getConfig();
+    if (handle.streaming) {
+      // AI 卡片：整条回复就在卡片内（流式期间已逐字呈现）。finalize 用 transcript 权威全文一次性
+      // 落定 + 状态标签（执行完成），**不分块、不另发消息**——避免把已显示的全文截回首块。
+      let full = text;
+      if (full.length > STREAM_MAX_CHARS) full = full.slice(0, STREAM_MAX_CHARS) + '\n\n' + tr(inst, 'truncated');
+      try {
+        const updated = await inst.adapter.updateAckCard(cfg, target, handle, full, 'done', ctxFor(inst));
+        if (!updated) await sendReply(inst, target, text);
+        audit(inst, 'out', { conversationId: target.conversationId, streaming: true, cardUpdated: !!updated });
+      } catch (e) {
+        inst.lastError = String(e?.message || e);
+        audit(inst, 'card-update-error', { error: inst.lastError });
+        try { await sendReply(inst, target, text); } catch { /* already logged in sendReply */ }
+      }
+      return;
+    }
     let chunks = chunkText(text, cfg.maxChunkChars);
     if (chunks.length > MAX_CHUNKS_PER_TURN) {
       chunks = chunks.slice(0, MAX_CHUNKS_PER_TURN);
@@ -610,6 +720,7 @@ export async function stopBridge(id) {
     inst.ackCardPromise = null;
   }
   try { await inst.adapter.disconnect?.(inst.client, ctxFor(inst)); } catch { /* best-effort */ }
+  if (inst.streamTimer) { clearInterval(inst.streamTimer); inst.streamTimer = null; } // 防御：流式定时器不泄漏
   inst.client = null;
   inst.running = false;
   inst.connected = false;
@@ -667,6 +778,8 @@ export async function stopAll() {
 }
 
 // ─── test seams ───
+export function __setStreamTickMsForTests(ms) { STREAM_TICK_MS = (ms == null ? 300 : ms); }
+
 export function __setMaxQueueForTests(id, n) {
   const inst = instances.get(id);
   if (inst) inst.maxQueueOverride = n;
@@ -681,6 +794,8 @@ export function __resetForTests(id) {
   inst.maxQueueOverride = null;
   inst.seenMsgIds.length = 0; inst.queue.length = 0; inst.sendTimes.length = 0;
   inst.store = {};
+  inst.ackCardPromise = null;
+  if (inst.streamTimer) { clearInterval(inst.streamTimer); inst.streamTimer = null; }
   if (activeInjection && activeInjection.platformId === id) clearActiveInjection();
 }
 

@@ -258,6 +258,137 @@ describe('status + lifecycle', () => {
   });
 });
 
+// ─── 逐字流式（钉钉 AI 卡片）：streamTimer 贯穿 slot 生命周期 + 注入轮次重置 + finalize 权威全文 ───
+function makeStreamFake(id) {
+  const rec = { onInbound: null, pushes: [], finals: [], handle: { outTrackId: 'ot-' + id, streaming: true } };
+  const adapter = {
+    id, i18nNs: 'server.dingtalk', allowListField: 'allowStaffIds',
+    capabilities: {}, rateLimit: { max: 1000, windowMs: 60_000 },
+    hasCreds: () => true, statusFields: () => ({}),
+    async connect(cfg, hooks) { rec.onInbound = hooks.onInbound; return { id }; },
+    async disconnect() {}, ack() {}, async sendOne() {}, async testConnection() { return { ok: true }; },
+    async sendAckCard() { return rec.handle; },
+    async streamCardText(cfg, target, handle, fullText) {
+      rec.inFlight = (rec.inFlight || 0) + 1;
+      rec.maxInFlight = Math.max(rec.maxInFlight || 0, rec.inFlight);
+      if (rec.gate) await rec.gate;          // 单测可经 rec.gate 阻塞一帧，制造 await 期间的并发探测
+      rec.pushes.push(fullText);
+      rec.inFlight--;
+      return true;
+    },
+    async updateAckCard(cfg, target, handle, content, status) { rec.finals.push({ content, status }); return true; },
+  };
+  core.registerAdapter(adapter);
+  return rec;
+}
+const recS = makeStreamFake('imS');
+const waitTicks = () => new Promise((r) => setTimeout(r, 45)); // 多个 8ms tick
+
+describe('DingTalk AI-card streaming (streamTimer)', () => {
+  let liveText, resetCount, sCfg, streamingS;
+  function sDeps() {
+    return {
+      writeToPty: () => {},
+      writeToPtySequential: (chunks, cb) => { if (cb) cb(true); },
+      getPtyState: () => ({ running: true, exitCode: null }),
+      getPtyKind: () => 'claude',
+      getPtySkipPermissions: () => false,
+      isStreaming: () => streamingS,
+      getConfig: () => sCfg,
+      getLiveText: () => liveText,
+      resetLiveText: () => { resetCount++; liveText = ''; },
+    };
+  }
+  const inS = (over = {}) => recS.onInbound({
+    text: over.content ?? 'hi', conversationId: 'c1', senderId: 'u1',
+    msgId: over.msgId ?? 'm' + Math.random(), target: { conversationId: 'c1', senderId: 'u1' },
+  }, null);
+
+  beforeEach(async () => {
+    core.__resetForTests('imS');
+    recS.onInbound = null; recS.pushes = []; recS.finals = [];
+    recS.gate = null; recS.inFlight = 0; recS.maxInFlight = 0;
+    liveText = ''; resetCount = 0; streamingS = false; // 注入时不在 streaming → drainQueue 才会 arm
+    sCfg = { enabled: true, appKey: 's', appSecret: 's', allowStaffIds: [], maxChunkChars: 3800, ackCard: true, aiCardTemplateId: 'ai1' };
+    core.__setStreamTickMsForTests(8);
+    await core.startBridge('imS', sDeps());
+  });
+  after(() => core.__setStreamTickMsForTests(undefined));
+
+  it('resets live text at arm, then pushes only once growth ≥ threshold', async () => {
+    await inS({ msgId: 's1' });
+    assert.equal(resetCount, 1, 'live text reset at injection arm (per-turn, not per-API-call)');
+    liveText = 'x'.repeat(5); await waitTicks();
+    assert.equal(recS.pushes.length, 0, 'no push below the 20-char threshold');
+    liveText = 'y'.repeat(40); await waitTicks();
+    assert.ok(recS.pushes.length >= 1, 'pushes after growth ≥ threshold');
+    assert.equal(recS.pushes.at(-1), 'y'.repeat(40), 'pushes the full accumulated text (isFull)');
+  });
+
+  it('keeps pushing while isStreaming() is false (survives tool-gap flicker)', async () => {
+    await inS({ msgId: 's2' });
+    liveText = 'a'.repeat(40); await waitTicks();
+    const n1 = recS.pushes.length;
+    assert.ok(n1 >= 1);
+    // isStreaming stays false (the tool gap) — the slot-lifetime timer must keep pushing as text grows.
+    liveText = 'a'.repeat(40) + '\n\n' + 'b'.repeat(40); await waitTicks();
+    assert.ok(recS.pushes.length > n1, 'still pushes across the isStreaming() false window');
+  });
+
+  it('finalizes with the authoritative transcript text (not live text) and stops the timer', async () => {
+    await inS({ msgId: 's3' });
+    liveText = 'partial '.repeat(5); await waitTicks();
+    assert.ok(recS.pushes.length >= 1);
+    await core.notifyTurnEnd('s', Date.now(), writeTranscript('FINAL authoritative answer'));
+    assert.equal(recS.finals.length, 1);
+    assert.equal(recS.finals[0].content, 'FINAL authoritative answer');
+    assert.equal(recS.finals[0].status, 'done');
+    const afterFinal = recS.pushes.length;
+    liveText = 'z'.repeat(200); await waitTicks();
+    assert.equal(recS.pushes.length, afterFinal, 'no mid-stream push after finalize releases the slot');
+  });
+
+  it('stops pushing after a /stop releases the slot', async () => {
+    await inS({ msgId: 's4', content: 'task' });
+    liveText = 'q'.repeat(40); await waitTicks();
+    const afterFirst = recS.pushes.length;
+    await inS({ msgId: 's5', content: '/stop' });
+    liveText = 'q'.repeat(40) + 'w'.repeat(200); await waitTicks();
+    assert.equal(recS.pushes.length, afterFirst, 'no push after /stop clears the streamTimer');
+  });
+
+  it('caps mid-stream pushes at STREAM_MAX_FRAMES (billing guard)', async () => {
+    await inS({ msgId: 's6' });
+    let s = '';
+    for (let i = 0; i < 30; i++) { s += 'x'.repeat(25); liveText = s; await new Promise((r) => setTimeout(r, 12)); }
+    await waitTicks();
+    // 30 次足量增长若无上限会推 30 帧；硬上限 25 必须挡住（≤25 才算未回归）。
+    assert.ok(recS.pushes.length <= 25, `mid-stream pushes capped at 25, got ${recS.pushes.length}`);
+    assert.ok(recS.pushes.length >= 10, 'streaming actually drove many frames (approached the cap)');
+  });
+
+  it('finalize truncates transcript beyond STREAM_MAX_CHARS', async () => {
+    await inS({ msgId: 's7' });
+    liveText = 'partial'; await waitTicks();
+    await core.notifyTurnEnd('s', Date.now(), writeTranscript('y'.repeat(25_000)));
+    assert.equal(recS.finals.length, 1);
+    const c = recS.finals[0].content;
+    assert.ok(c.length <= 20_000 + 60, `finalize content truncated to ~20000, got ${c.length}`);
+    assert.match(c, /截断|truncated/i, 'truncation marker appended');
+  });
+
+  it('single in-flight guard: never more than one push concurrently', async () => {
+    let release; recS.gate = new Promise((r) => { release = r; });
+    await inS({ msgId: 's8' });
+    liveText = 'a'.repeat(40); // 超阈值一次；之后保持不变 → 仅首帧合格，凸显 await 期间的并发探测
+    await new Promise((r) => setTimeout(r, 40)); // 多个 tick 在首帧 gated 期间触发，必须被 _streamInFlight 挡住
+    release(); recS.gate = null;
+    await waitTicks();
+    assert.equal(recS.maxInFlight, 1, 'in-flight guard prevents overlapping /card/streaming PUTs');
+    assert.equal(recS.pushes.length, 1, 'text constant after first push → exactly one frame');
+  });
+});
+
 after(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });

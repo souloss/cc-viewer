@@ -41,6 +41,26 @@ export function resetStreamingState() {
   streamingState.chunksReceived = 0;
 }
 
+// ─── IM 逐字流式的文本源 ───
+// 钉钉 AI 卡片流式（server/lib/adapters/dingtalk-adapter.js）需要「对话过程中」的主 agent 增量文本。
+// 复用本拦截器对主 agent SSE 的增量解析，累计 text_delta（跳过 thinking_delta，与 im-bridge-core
+// 的 extractLastAssistantText「只取 text 块」一致），供 IM bridge 节流推送给钉钉 /card/streaming。
+// 关键：按「注入轮次」重置 —— 由 bridge 在 armActiveInjection 时调 resetImLiveText()。**绝不**在
+// resetStreamingState() 内重置：带工具的回合中间 streamingState 会 false↔true（每个 Anthropic API
+// 调用各一次），那样会把半截回复清空，typewriter 跨工具间隙断流。
+// 默认仅 IM worker 进程（CCV_IM_PLATFORM 已设）采集，其它进程零成本、不解析。
+let _imLiveText = '';
+const _imCaptureEnabled = !!process.env.CCV_IM_PLATFORM;
+export function getImLiveText() { return _imLiveText; }
+export function resetImLiveText() { _imLiveText = ''; }
+// 判定一个 SSE event 是否为可见正文 text_delta（跳过 thinking_delta / 工具入参 / 其它），是则返回其
+// 文本片段，否则 null。抽成纯函数：既给下方采集循环复用，也便于单测覆盖「只收 text_delta」规则。
+export function imTextDeltaOf(ev) {
+  return (ev && ev.type === 'content_block_delta'
+    && ev.delta && ev.delta.type === 'text_delta'
+    && typeof ev.delta.text === 'string') ? ev.delta.text : null;
+}
+
 // 缓存从请求 headers 中提取的 API Key 或 Authorization header
 export let _cachedApiKey = null;
 export let _cachedAuthHeader = null;
@@ -882,6 +902,9 @@ export function setupInterceptor() {
           // 实时流式：仅对 mainAgent 且 server live-port 已注入时启用
           let liveStreamEnabled = !!_livePort && requestEntry.mainAgent && !_isTeammate;
           const liveAssembler = liveStreamEnabled ? createStreamAssembler() : null;
+          // IM 逐字采集：独立于前端 live-stream / _livePort，仅 worker 内对主 agent 累计 text_delta。
+          const imCapture = _imCaptureEnabled && requestEntry.mainAgent && !_isTeammate;
+          let imStreamAppended = false; // 本 stream 是否已追加过；跨 API 调用的消息间补一个 \n\n 分隔
           let livePendingBuffer = '';
           let liveChunkSeq = 0;
           let liveLastFlushMs = 0;
@@ -1010,8 +1033,9 @@ export function setupInterceptor() {
                   streamedContentLen += chunk.length;
                   controller.enqueue(value);
 
-                  // 实时流式：增量解析完整的 SSE events 并触发节流 flush
-                  if (liveAssembler && liveStreamEnabled) {
+                  // 实时流式：增量解析完整的 SSE events。前端 live-stream（liveAssembler）与 IM 逐字
+                  // 采集（imCapture）共用同一次 split 解析，避免重复扫描；任一开启即进入。
+                  if ((liveAssembler && liveStreamEnabled) || imCapture) {
                     livePendingBuffer += chunk;
                     let sawBlockStop = false;
                     let idx;
@@ -1027,17 +1051,31 @@ export function setupInterceptor() {
                         : dataLine.substring(5);
                       try {
                         const ev = JSON.parse(jsonStr);
-                        liveAssembler.feed(ev);
-                        if (ev.type === 'content_block_stop') sawBlockStop = true;
+                        if (liveAssembler && liveStreamEnabled) {
+                          liveAssembler.feed(ev);
+                          if (ev.type === 'content_block_stop') sawBlockStop = true;
+                        }
+                        // IM 逐字：只累计可见正文 text_delta（跳过 thinking_delta / 工具入参），与
+                        // extractLastAssistantText 的「只取 text 块」对齐，避免 finalize 时闪烁/重复。
+                        if (imCapture) {
+                          const td = imTextDeltaOf(ev);
+                          if (td !== null) {
+                            if (!imStreamAppended && _imLiveText) _imLiveText += '\n\n'; // 跨 API 调用的消息间分隔
+                            imStreamAppended = true;
+                            _imLiveText += td;
+                          }
+                        }
                       } catch {}
                     }
-                    const now = Date.now();
-                    const overdue = (now - liveLastFlushMs) >= 100;
-                    const bigChunk = (streamedContentLen - liveLastFlushBytes) > 16384;
-                    if (sawBlockStop || overdue || bigChunk) {
-                      liveLastFlushMs = now;
-                      liveLastFlushBytes = streamedContentLen;
-                      liveFlush();
+                    if (liveAssembler && liveStreamEnabled) {
+                      const now = Date.now();
+                      const overdue = (now - liveLastFlushMs) >= 100;
+                      const bigChunk = (streamedContentLen - liveLastFlushBytes) > 16384;
+                      if (sawBlockStop || overdue || bigChunk) {
+                        liveLastFlushMs = now;
+                        liveLastFlushBytes = streamedContentLen;
+                        liveFlush();
+                      }
                     }
                   }
                 }

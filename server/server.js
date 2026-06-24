@@ -71,7 +71,7 @@ function execWithStdin(cmd, args, input, options) {
     child.stdin.end();
   });
 }
-import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort } from './interceptor.js';
+import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
 import { recordInstance, listInstances } from './lib/instance-registry.js';
 import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../findcc.js';
 import { t, getLang, setLang } from './i18n.js';
@@ -1035,6 +1035,10 @@ export async function startViewer() {
                 getPtySkipPermissions: pmb.getPtySkipPermissions,
                 isStreaming: () => streamingState.active,
                 getConfig: () => loadConfig(id),
+                // 钉钉 AI 卡片逐字流式的文本源（仅 worker 注入）：对话过程中读主 agent 累计文本，
+                // 注入轮次开始时重置。其它平台/主 ccv 无此 dep，core 判空即跳过流式。
+                getLiveText: () => getImLiveText(),
+                resetLiveText: () => resetImLiveText(),
               });
             } catch (e) {
               console.error(`[CC Viewer] IM worker startBridge(${id}) failed:`, e?.message || e);

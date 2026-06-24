@@ -16,6 +16,8 @@ const GROUP_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const OTO_SEND_URL = 'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
 const CARD_CREATE_URL = 'https://api.dingtalk.com/v1.0/card/instances';
 const CARD_DELIVER_URL = 'https://api.dingtalk.com/v1.0/card/instances/deliver';
+const CARD_CREATE_AND_DELIVER_URL = 'https://api.dingtalk.com/v1.0/card/instances/createAndDeliver';
+const CARD_STREAMING_URL = 'https://api.dingtalk.com/v1.0/card/streaming';
 
 async function getAccessToken(cfg, ctx) {
   const tc = ctx.store.tokenCache;
@@ -52,6 +54,117 @@ function normalizeInbound(res) {
     // opaque platform extras carried back to sendOne
     target: { conversationId, conversationType, robotCode, senderStaffId },
   };
+}
+
+// AI 卡片模板里「流式 Markdown 变量」的名字：用户可经 aiCardStreamKey 配置；留空按钉钉惯例用 'content'。
+function streamKeyOf(cfg) {
+  const k = cfg && typeof cfg.aiCardStreamKey === 'string' ? cfg.aiCardStreamKey.trim() : '';
+  return k || 'content';
+}
+
+// ─── 卡片投递目标字段（群 / 单聊的 openSpaceId + deliver model）───
+// 单一来源，消除 createAndDeliver(AI)、legacy deliver 两处重复的 conversationType==='2' 分支。
+function cardDeliverFields(target) {
+  const isGroup = String(target.conversationType) === '2';
+  return isGroup
+    ? { userIdType: 1, openSpaceId: 'dtv1.card//IM_GROUP.' + target.conversationId, imGroupOpenDeliverModel: { robotCode: target.robotCode } }
+    : { userIdType: 1, openSpaceId: 'dtv1.card//IM_ROBOT.' + target.senderStaffId, imRobotOpenDeliverModel: { spaceType: 'IM_ROBOT', robotCode: target.robotCode } };
+}
+
+// createAndDeliver（AI 卡片）在 deliver 字段之上还需 OpenSpaceModel(supportForward)。legacy 的 deliver
+// 端点只用 cardDeliverFields（不带 OpenSpaceModel，保持原报文不变）。
+function cardSpaceFields(target) {
+  const isGroup = String(target.conversationType) === '2';
+  return { ...cardDeliverFields(target), [isGroup ? 'imGroupOpenSpaceModel' : 'imRobotOpenSpaceModel']: { supportForward: true } };
+}
+
+// AI 卡片：createAndDeliver 单调用建卡 + 投递（callbackType STREAM、flowStatus=处理中、content 空），
+// 再补一帧空 content「kick」开启流式生命周期（群尤其需要）。返回 { outTrackId, streaming:true }。
+async function createAiCard(cfg, target, ctx) {
+  const token = await getAccessToken(cfg, ctx);
+  const outTrackId = randomUUID();
+  const r = await ctx.fetch(CARD_CREATE_AND_DELIVER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token },
+    body: JSON.stringify({
+      cardTemplateId: cfg.aiCardTemplateId,
+      outTrackId,
+      callbackType: 'STREAM',
+      cardData: { cardParamMap: { [streamKeyOf(cfg)]: '', flowStatus: '1' } }, // cardParamMap 值必须为字符串
+      ...cardSpaceFields(target),
+    }),
+  });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(`ai-card create ${r.status}: ${j.message || j.code || 'failed'}`); }
+  const handle = { outTrackId, streaming: true };
+  // kick：开启流式生命周期。best-effort——权限缺失时 finalize 的 instances PUT 仍能兜底落最终内容。
+  await streamFrame(cfg, handle, '', ctx, {}).catch(() => {});
+  return handle;
+}
+
+// legacy 卡片：create + deliver 两步（沿用原 status+content 模板变量）。无 cardTemplateId 返回 null。
+async function createLegacyCard(cfg, target, statusText, ctx) {
+  if (!cfg.cardTemplateId) return null;
+  const token = await getAccessToken(cfg, ctx);
+  const outTrackId = randomUUID();
+  const headers = { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token };
+  const cr = await ctx.fetch(CARD_CREATE_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      outTrackId,
+      cardTemplateId: cfg.cardTemplateId,
+      cardData: { cardParamMap: { status: statusText, content: '' } },
+    }),
+  });
+  if (!cr.ok) { const j = await cr.json().catch(() => ({})); throw new Error(`card create ${cr.status}: ${j.message || j.code || 'failed'}`); }
+
+  const dr = await ctx.fetch(CARD_DELIVER_URL, { method: 'POST', headers, body: JSON.stringify({ outTrackId, ...cardDeliverFields(target) }) });
+  if (!dr.ok) { const j = await dr.json().catch(() => ({})); throw new Error(`card deliver ${dr.status}: ${j.message || j.code || 'failed'}`); }
+  return { outTrackId };
+}
+
+// 一帧流式更新（PUT /card/streaming）。isFull:true 全量重发（幂等自愈丢帧）；7 字段含 isError。
+async function streamFrame(cfg, handle, fullText, ctx, opts = {}) {
+  try {
+    if (!handle?.outTrackId) return false;
+    const token = await getAccessToken(cfg, ctx);
+    const r = await ctx.fetch(CARD_STREAMING_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token },
+      body: JSON.stringify({
+        outTrackId: handle.outTrackId,
+        guid: randomUUID(),
+        key: streamKeyOf(cfg),
+        content: String(fullText ?? ''),
+        isFull: true,
+        isFinalize: !!opts.finalize,
+        isError: !!opts.error,
+      }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+// 局部更新卡片变量（PUT /card/instances，updateCardDataByKey 只改传入键）。值须全字符串。
+async function putCardInstances(cfg, handle, cardParamMap, ctx) {
+  try {
+    if (!handle?.outTrackId) return false;
+    const token = await getAccessToken(cfg, ctx);
+    const r = await ctx.fetch(CARD_CREATE_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token },
+      body: JSON.stringify({
+        outTrackId: handle.outTrackId,
+        cardData: { cardParamMap },
+        cardUpdateOptions: { updateCardDataByKey: true },
+      }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 const dingtalkAdapter = {
@@ -123,50 +236,40 @@ const dingtalkAdapter = {
   // 触发钉钉风控/限流，反过来阻断模型回复的下发。故 DingTalk 发送者头像在「对话记录」里降级为默认头像
   // （名字仍是真实昵称，不报错、不抢占发送配额）。后续如引入具备通讯录 scope 的凭证再补 resolveSender。
 
+  // ack 卡片：aiCardTemplateId 非空 → AI 卡片（flowStatus 状态标签 + /card/streaming 逐字）；建卡
+  // 失败则降级 legacy 卡片（cardTemplateId 单次更新）；都没有 → 返回 null，core 发纯文本 ack。
   async sendAckCard(cfg, target, statusText, ctx) {
-    if (!cfg.cardTemplateId) return null;
-    const token = await getAccessToken(cfg, ctx);
-    const outTrackId = randomUUID();
-    const headers = { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token };
+    if (cfg.aiCardTemplateId) {
+      try {
+        return await createAiCard(cfg, target, ctx);
+      } catch (e) {
+        // 把失败原因留在 store，供 core 落审计（即便降级 legacy 也能诊断「为什么没流式」）。
+        if (ctx?.store) ctx.store.lastAiCardError = String(e?.message || e);
+        // AI 卡片创建失败：有 legacy 模板则降级单卡片，否则抛给 core 走纯文本。
+        if (!cfg.cardTemplateId) throw e;
+      }
+    }
+    return await createLegacyCard(cfg, target, statusText, ctx);
+  },
 
-    const cr = await ctx.fetch(CARD_CREATE_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        outTrackId,
-        cardTemplateId: cfg.cardTemplateId,
-        cardData: { cardParamMap: { status: statusText, content: '' } },
-      }),
-    });
-    if (!cr.ok) { const j = await cr.json().catch(() => ({})); throw new Error(`card create ${cr.status}: ${j.message || j.code || 'failed'}`); }
-
-    const isGroup = String(target.conversationType) === '2';
-    const deliverBody = isGroup
-      ? {
-          outTrackId,
-          userIdType: 1,
-          openSpaceId: 'dtv1.card//IM_GROUP.' + target.conversationId,
-          imGroupOpenDeliverModel: { robotCode: target.robotCode },
-        }
-      : {
-          outTrackId,
-          userIdType: 1,
-          openSpaceId: 'dtv1.card//IM_ROBOT.' + target.senderStaffId,
-          imRobotOpenDeliverModel: { spaceType: 'IM_ROBOT', robotCode: target.robotCode },
-        };
-
-    const dr = await ctx.fetch(CARD_DELIVER_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(deliverBody),
-    });
-    if (!dr.ok) { const j = await dr.json().catch(() => ({})); throw new Error(`card deliver ${dr.status}: ${j.message || j.code || 'failed'}`); }
-
-    return { outTrackId };
+  // 对话过程中逐字推送（core 的 streamTimer 调用）。仅 AI 卡片句柄有效；best-effort 返回 bool。
+  async streamCardText(cfg, target, handle, fullText, ctx, opts = {}) {
+    if (!handle?.streaming) return false;
+    return streamFrame(cfg, handle, fullText, ctx, opts);
   },
 
   async updateAckCard(cfg, target, handle, content, status, ctx) {
     try {
+      if (handle?.streaming) {
+        const flowStatus = status === 'done' ? '3' : '5'; // 执行完成 / 执行失败（含中断·超时）
+        // 官方 finalize：流式帧 isFinalize:true 收尾。
+        const streamed = await streamFrame(cfg, handle, content, ctx, { finalize: true, error: status !== 'done' });
+        // 再用 /card/instances 落定权威全文 + 状态标签：即便缺 Card.Streaming.Write 权限这步仍生效，
+        // 保证最终内容与 tag 一定渲染、不会卡在「处理中」。
+        const settled = await putCardInstances(cfg, handle, { [streamKeyOf(cfg)]: String(content ?? ''), flowStatus }, ctx);
+        return streamed || settled;
+      }
+      // legacy 卡片：单次 PUT 更新 content。
       const token = await getAccessToken(cfg, ctx);
       const r = await ctx.fetch(CARD_CREATE_URL, {
         method: 'PUT',
