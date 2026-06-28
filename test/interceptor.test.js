@@ -219,17 +219,18 @@ describe('interceptor', () => {
       }), false);
     });
 
-    it('does not filter teammate requests (teammate handling is in interceptor layer)', () => {
-      // Teammate body looks identical to MainAgent — same system prompt, same tools
-      // interceptor-core should NOT filter it; that's the interceptor.js / frontend layer's job
+    it('rejects same-process teammate via TEAMMATE_SYSTEM_RE (body-level, keeps in sync with isMainAgentEntry)', () => {
+      // 同进程 Agent/Task 队友:system prompt 与 MainAgent 几乎一致(同样 You are Claude Code + 工具),
+      // 但带团队协作标记。这类队友不带 --agent-name(interceptor.js 的 _isTeammate 认不出),
+      // 旧逻辑误判为 MainAgent → 流式期开 live-stream、其 thinking 污染主「最新回复」overlay。
+      // 现 interceptor-core 在 body 层即排除(TEAMMATE_SYSTEM_RE),与 isMainAgentEntry / 前端 isMainAgent 三处对齐。
       const teammateBody = makeMainAgentBody({
         system: [
           { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
           { type: 'text', text: '# Agent Teammate Communication\n\nIMPORTANT: You are running as an agent in a team.' },
         ],
       });
-      // interceptor-core treats this as MainAgent (body-level only, no req.teammate field)
-      assert.equal(isMainAgentRequest(teammateBody), true);
+      assert.equal(isMainAgentRequest(teammateBody), false);
     });
 
     // cc_version 2.1.181+：billing header 显式带 cc_is_subagent=true 的子代理（继承完整 CC prompt + Edit/Bash/Agent）

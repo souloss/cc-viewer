@@ -8,6 +8,13 @@ const SUBAGENT_SYSTEM_RE = /(?:command execution|file search|planning) specialis
 // 这类子代理继承完整 "You are Claude Code" prompt + Edit/Bash/Agent 工具，会误中轻量 MainAgent 启发式，故须显式排除。
 // 结尾 \b 锚定：仅匹配 `=true`（其后为 `;` / 空白 / 串尾），避免 `=truex` 之类误匹配。
 const SUBAGENT_BILLING_RE = /cc_is_subagent=true\b/;
+// 同进程 Agent/Task 队友（teammate）：system prompt 注入团队协作标记，但继承完整 "You are Claude Code"
+// prompt + Edit/Bash/Task 工具，且不带 --agent-name 进程参数（_isTeammate 认不出），会误中下方 MainAgent
+// 启发式 → 流式期间被当 mainAgent 开 live-stream，其 thinking 污染主「最新回复」overlay。须显式排除。
+// KEEP IN SYNC: server/lib/kv-cache-analyzer.js + src/utils/contentFilter.js（三处判据必须一致）。
+// 两处服务端实现(本文件 + kv-cache-analyzer)由 test/interceptor-core-mainagent.test.js 互校防漂移；
+// 前端 contentFilter 那份由 test/content-filter-unit.test.js 单测覆盖。
+const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
 
 export function getSystemText(body) {
   const system = body?.system;
@@ -22,6 +29,8 @@ export function isMainAgentRequest(body) {
   if (!body?.system || !Array.isArray(body?.tools)) return false;
 
   const sysText = getSystemText(body);
+  // 同进程队友 ⇒ 非 MainAgent（与最终重建 isMainAgentEntry 判据对齐，修流式期 teammate thinking 污染主 overlay）。
+  if (TEAMMATE_SYSTEM_RE.test(sysText)) return false;
   // cc_is_subagent=true ⇒ 子代理，绝非 MainAgent（cc_version 2.1.181+）。从源头让新日志的 mainAgent 字段为 false。
   if (SUBAGENT_BILLING_RE.test(sysText)) return false;
   if (!sysText.includes('You are Claude Code')) return false;

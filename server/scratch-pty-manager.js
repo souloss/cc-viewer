@@ -3,7 +3,7 @@ import { dirname, join, basename } from 'node:path';
 import { chmodSync, statSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
-import { prepareEmbeddedShellSpawn } from './lib/terminal-env.js';
+import { prepareEmbeddedShellSpawn, applyClaudeAltScreenPref } from './lib/terminal-env.js';
 import { killPtyTree } from './lib/term-signals.js';
 import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-slice.js';
 
@@ -137,6 +137,9 @@ export async function spawnScratch(id) {
     }
     delete env.ANTHROPIC_BASE_URL;
     env.CLAUDE_CODE_DISABLE_MOUSE ??= '1';
+    // 默认让 scratch 里手敲的 claude 也回到经典流式渲染、终端可滚历史;想保留全屏设
+    // CCV_KEEP_CLAUDE_FULLSCREEN=1 opt-out。CCV_* 已被上方剥离，opt-out 靠 sourceEnv(父进程 env)检测。
+    applyClaudeAltScreenPref(env);
     const shellSpawn = prepareEmbeddedShellSpawn(shell, env);
 
     s.lastExitCode = null;

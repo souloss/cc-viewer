@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.327 (2026-06-28)
+
+- fix(terminal): 启动 claude 默认注入 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 恢复终端可滚 scrollback(修新版 Claude Code v2.1.89+ 全屏渲染致嵌入式终端只剩一屏);主终端/shell 回退/scratch 三处生效,`CCV_KEEP_CLAUDE_FULLSCREEN=1` opt-out,尊重用户显式值(含 `0` 开全屏);配套 terminal-env 单测
+
+- fix(stream): 修复 SSE 流式期间同进程 Agent/Task 队友(teammate)的 thinking 被误显示进 mainAgent「最新回复」live overlay(最终重建判定正确、仅流式异常)——`isMainAgentRequest`(流式 live-stream 开关用)补齐 `TEAMMATE_SYSTEM_RE`(running as an agent in a team / Agent Teammate Communication)排除,与最终重建 `isMainAgentEntry`、前端 `isMainAgent` 三处判据对齐;队友请求不再开启 live-stream 故不再污染主 overlay。新旧 Claude Code 均兼容(旧版独立进程队友仍由 `_isTeammate` 拦截)
+- test(stream): 新增 interceptor-core-mainagent 单测——队友标记两种短语+大小写→非 main、真·主代理(标准/deferred-tools)不误伤、cc_is_subagent 词界锚定/native teammate/specialist 防回归,及 `isMainAgentRequest` 与 `isMainAgentEntry` 两处服务端判据一致性守卫(防漂移);前端 contentFilter 那份在 content-filter-unit 新增直接守卫(proxy 队友 system 含标记、无 teammate 字段 → `isMainAgent`=false)
+
 ## 1.6.326 (2026-06-25)
 
 - feat(im/feishu,wecom): 飞书 / 企业微信回复新增「AI 卡片逐字流式」对标钉钉，新增通用开关 `aiCard`（默认关，opt-in）。飞书走 CardKit v1：建卡（`streaming_mode`）→ 引用 `card_id` 发 interactive 消息 → `cardElement.content` 逐字覆写正文（飞书自动 diff 出打字机）→ `card.settings` 关流+更新预览摘要，结束以 transcript 权威全文落定；缺 `cardkit:card:write` scope 或建卡失败自动回退到 1.0 占位卡片。企业微信走智能机器人长连接 stream 被动回复：入站帧 `req_id` 透传（挂进 `normalizeInbound` 的 target）→ `replyStream` 即时 ack 开流 / 逐帧 / `finish=true` 收尾，`replyStreamNonBlocking` 跳帧防积压，无 frame 回退 proactive 文本。核心流式总开关由钉钉专属 `aiCardTemplateId` 泛化为可选 `adapter.streamEnabled(cfg)`（适配器未定义则回落 `!!aiCardTemplateId`，钉钉零回归）；起流式前额外校验适配器具备 `updateAckCard`（杜绝能逐字推却无法 finalize）、飞书关流失败落诊断；`ui.im.aiCard`(+Help) 18 语言

@@ -132,6 +132,18 @@ describe('isMainAgent', () => {
     assert.equal(CF.isMainAgent(req), false);
   });
 
+  it('proxy 队友(system 含 TEAMMATE 标记、无 req.teammate 字段)即便像主代理也排除', () => {
+    // 守卫 isMainAgent→isTeammate(contentFilter.js:167)委派:body-level 队友(同进程 Agent/Task,
+    // 走 TEAMMATE_SYSTEM_RE 而非 req.teammate 字段)即便带 "You are Claude Code" + Edit/Bash/Task
+    // 也不算主代理。若删掉该委派,本例会落到下方旧架构启发式(同 203-208 用例)返回 true → 静默回归
+    // (正是流式 teammate thinking 污染主「最新回复」overlay 的 bug 类)。这是「三处判据对齐」前端那份的直接守卫。
+    const req = mkReq({
+      system: MAIN_SYSTEM + '\nAgent Teammate Communication',
+      tools: [{ name: 'Edit' }, { name: 'Bash' }, { name: 'Task' }, { name: 'a' }, { name: 'b' }, { name: 'c' }],
+    });
+    assert.equal(CF.isMainAgent(req), false);
+  });
+
   it('req.mainAgent 标记 + 非 subagent system → true', () => {
     const req = mkReq({ mainAgent: true, system: MAIN_SYSTEM });
     assert.equal(CF.isMainAgent(req), true);

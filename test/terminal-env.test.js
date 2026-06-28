@@ -8,6 +8,8 @@ import {
   KEEP_CLAUDE_NO_FLICKER_ENV,
   prepareEmbeddedShellSpawn,
   stripClaudeNoFlickerUnlessOptedIn,
+  KEEP_CLAUDE_FULLSCREEN_ENV,
+  applyClaudeAltScreenPref,
 } from '../server/lib/terminal-env.js';
 
 const tmpDirs = [];
@@ -23,6 +25,44 @@ function makeTmpDir() {
   tmpDirs.push(dir);
   return dir;
 }
+
+describe('terminal-env: CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN default-on/opt-out', () => {
+  it('默认注入 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1(未 opt-out)', () => {
+    const env = {};
+    applyClaudeAltScreenPref(env, {});
+    assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, '1');
+  });
+
+  it('sourceEnv 里 opt-out(CCV_KEEP_CLAUDE_FULLSCREEN=1)→ 不注入', () => {
+    const env = {};
+    applyClaudeAltScreenPref(env, { [KEEP_CLAUDE_FULLSCREEN_ENV]: '1' });
+    assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, undefined);
+  });
+
+  it('env 里 opt-out(继承自 {...process.env})→ 不注入', () => {
+    const env = { [KEEP_CLAUDE_FULLSCREEN_ENV]: '1' };
+    applyClaudeAltScreenPref(env, {});
+    assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, undefined);
+  });
+
+  it('剥离 cc-viewer 内部 opt-out 开关，不泄漏给子进程', () => {
+    const env = { [KEEP_CLAUDE_FULLSCREEN_ENV]: '1' };
+    applyClaudeAltScreenPref(env, {});
+    assert.equal(env[KEEP_CLAUDE_FULLSCREEN_ENV], undefined);
+  });
+
+  it('尊重用户显式 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN(含显式 "0" 主动开全屏，不覆盖)', () => {
+    const env = { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '0' };
+    applyClaudeAltScreenPref(env, {});
+    assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, '0');
+  });
+
+  it('opt-out 值非 "1" 不触发(只认精确 "1"，仍默认注入)', () => {
+    const env = {};
+    applyClaudeAltScreenPref(env, { [KEEP_CLAUDE_FULLSCREEN_ENV]: 'true' });
+    assert.equal(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, '1');
+  });
+});
 
 describe('terminal-env: CLAUDE_CODE_NO_FLICKER handling', () => {
   it('strips inherited CLAUDE_CODE_NO_FLICKER by default', () => {

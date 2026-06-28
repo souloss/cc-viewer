@@ -16,6 +16,25 @@ export function stripClaudeNoFlickerUnlessOptedIn(env, sourceEnv = process.env) 
   return env;
 }
 
+// 新版 Claude Code(v2.1.89+)默认全屏渲染(整屏原地重绘)→ 嵌入式 xterm 攒不出 scrollback、
+// 终端只剩一屏、上滚不到历史(claude 自身行为，cc-viewer 剥离 NO_FLICKER 也无济于事)。
+// cc-viewer 默认向 claude 注入官方开关 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1，使其回到经典
+// 流式渲染、终端恢复可滚历史(与默认剥离 NO_FLICKER 同款取舍:保 scrollback)。想保留全屏无闪烁
+// 渲染的用户 opt-out:设 CCV_KEEP_CLAUDE_FULLSCREEN=1；亦尊重用户显式 export 的
+// CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN(含显式 '0' 主动开全屏)。
+export const KEEP_CLAUDE_FULLSCREEN_ENV = 'CCV_KEEP_CLAUDE_FULLSCREEN';
+
+export function applyClaudeAltScreenPref(env, sourceEnv = process.env) {
+  if (!env) return env;
+  const keepFullscreen = env[KEEP_CLAUDE_FULLSCREEN_ENV] === '1' || sourceEnv?.[KEEP_CLAUDE_FULLSCREEN_ENV] === '1';
+  if (!keepFullscreen && env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN == null) {
+    env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = '1';
+  }
+  // 不把 cc-viewer 内部开关泄漏给子进程(对齐 _spawnClaudeImpl 对 CCV_ 短路开关的剥离)。
+  delete env[KEEP_CLAUDE_FULLSCREEN_ENV];
+  return env;
+}
+
 function ensureWrapperFile(dir, fileName, content) {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, fileName);

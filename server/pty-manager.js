@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { chmodSync, statSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
-import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn } from './lib/terminal-env.js';
+import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn, applyClaudeAltScreenPref } from './lib/terminal-env.js';
 import { killPtyTree } from './lib/term-signals.js';
 import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-slice.js';
 
@@ -172,6 +172,10 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // Claude Code NO_FLICKER 会让嵌入式 xterm 走 alt-screen 并丢失 scrollback。
   // cc-viewer 默认剥离继承值；确实需要时可显式设 CCV_KEEP_CLAUDE_CODE_NO_FLICKER=1。
   stripClaudeNoFlickerUnlessOptedIn(env);
+  // 新版 Claude Code 默认全屏渲染(整屏原地重绘)→ 终端只剩一屏、上滚不到历史。
+  // cc-viewer 默认注入 CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 让 claude 回经典流式渲染、终端可滚历史;
+  // 想保留全屏无闪烁渲染的用户设 CCV_KEEP_CLAUDE_FULLSCREEN=1 opt-out。
+  applyClaudeAltScreenPref(env);
 
   // Resolve real Node.js path (Electron's process.execPath is the Electron binary)
   let nodePath = process.execPath;
@@ -435,6 +439,9 @@ async function _spawnShellImpl() {
   delete shellEnv.CCVIEWER_INTERNAL_TOKEN;
   // 交互 shell 里手动敲 claude 时也禁鼠标，理由同 spawnClaude。
   shellEnv.CLAUDE_CODE_DISABLE_MOUSE ??= '1';
+  // 默认让 shell 内手敲的 claude 也回到经典流式渲染(终端可滚历史)，理由同 spawnClaude;
+  // CCV_KEEP_CLAUDE_FULLSCREEN=1 可 opt-out。
+  applyClaudeAltScreenPref(shellEnv);
   const shellSpawn = prepareEmbeddedShellSpawn(shell, shellEnv);
 
   ptyProcess = pty.spawn(shellSpawn.command, shellSpawn.args, {
