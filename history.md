@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.328 (2026-06-29)
+
+- feat(偏好/专家设置): 偏好设置新增「专家设置」卡 + 「系统文本修改」模态(文本框 + 追加/覆盖 switch)，写当前工作区的 CC_SYSTEM.md(覆盖) / CC_APPEND_SYSTEM.md(追加)，两模式互斥、空文本即关闭、卡标题 (?) 功能说明、下次启动 claude 生效(GET/POST `/api/expert/system-text`，目录服务端解析、不收客户端路径)；`ui.expert.*` 18 语言
+- test(expert): 新增 system-prompt-files 读写 helper 单测 + `/api/expert/system-text` 路由单测
+- feat(终端): ccv 启动 claude 前若工作目录存在 `CC_SYSTEM.md` / `CC_APPEND_SYSTEM.md`(非空)则自动追加 `--system-prompt-file` / `--append-system-prompt-file`(两者独立生效、用户已手动传同义 flag 时跳过对应项、注入时终端打印一行提示、`CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` 整体关闭、claude/fork 不识别该 flag 时 onExit 检测 unknown option 自愈跳过)
+- test(终端): 新增 system-prompt-files 单测(存在/缺失/空文件跳过/两者顺序/手动 flag 优先/opt-out/目录非文件/含空格路径)
+- fix(专家设置): 系统文本写入改「先删反向文件再写目标」消除两份并存中间态；`/api/expert/system-text` 500 改返回通用错误码(原始 fs 错误只落服务端日志，不外泄路径)
+- fix(前端): 系统文本模态 fetch 加 cancelled 守卫，关闭/卸载后不再 setState；openMemoryDir execFile 加错误日志回调
+- test: 新增 `--system-prompt-file`/`--append-system-prompt-file` 拒绝自愈单测(去 flag 重启、无关崩溃不重试)、新增 UI key `ui.memoryOpenDir`/`ui.proxy.editProxy` 18 语言守卫；api-expert 测试改导入文件名常量
+
 ## 1.6.327 (2026-06-28)
 
 - fix(terminal): 启动 claude 默认注入 `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` 恢复终端可滚 scrollback(修新版 Claude Code v2.1.89+ 全屏渲染致嵌入式终端只剩一屏);主终端/shell 回退/scratch 三处生效,`CCV_KEEP_CLAUDE_FULLSCREEN=1` opt-out,尊重用户显式值(含 `0` 开全屏);配套 terminal-env 单测

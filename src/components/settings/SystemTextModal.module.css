@@ -1,0 +1,23 @@
+.modeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ccv-text-secondary, #888);
+  line-height: 1.6;
+}
+
+.dirLine {
+  word-break: break-all;
+}
+
+.warn {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ccv-warning, #d4810a);
+}

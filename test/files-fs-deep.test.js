@@ -20,7 +20,7 @@ import {
   mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync,
   symlinkSync, statSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-files-fs-deep-'));
@@ -392,6 +392,16 @@ describe('files-fs-deep', { concurrency: false }, () => {
         assert.equal(res.status, 200);
         assert.equal(res.data.ok, true);
         assert.equal(res.data.dir, projectDir);
+      } finally { restorePlatform(); }
+    });
+
+    it('/api/open-memory-dir 200 (linux xdg-open, no GUI) — dir 落在 .../memory', async () => {
+      setPlatform('linux');
+      try {
+        const res = await callBody(handlerFor('/api/open-memory-dir', 'POST'), {});
+        assert.equal(res.status, 200);
+        assert.equal(res.data.ok, true);
+        assert.ok(res.data.dir.endsWith(`${sep}memory`), `expected dir to end with ${sep}memory, got ${res.data.dir}`);
       } finally { restorePlatform(); }
     });
   });

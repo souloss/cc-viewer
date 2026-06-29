@@ -1,5 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   spawnClaude,
   spawnShell,
@@ -18,6 +21,8 @@ import {
   _clearThinkingDisplayRejectedPaths,
   _isThinkingDisplayRejected,
   _markThinkingDisplayRejected,
+  _clearSystemPromptFileRejectedPaths,
+  _isSystemPromptFileRejected,
 } from '../server/pty-manager.js';
 
 // ─── getPtyPid / getPtyState / getCurrentWorkspace (no PTY running) ───
@@ -420,6 +425,75 @@ describe('pty-manager: spawnClaude integration', () => {
     await new Promise(r => setTimeout(r, 30)); // 短暂额外等待确保不会有第二次 spawn
 
     assert.equal(spawned.length, 1, 'user-provided flag → no auto-retry');
+  });
+
+  // ─── system-prompt-file (CC_SYSTEM.md / CC_APPEND_SYSTEM.md) 自愈，镜像 --thinking-display ───
+  it('retries without --system-prompt-file when claude rejects it (CC_SYSTEM.md present)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-sysfile-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash("error: unknown option '--system-prompt-file'\n"));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-sysfile');
+      await waitUntil(() => spawned.length >= 2);
+    } finally {
+      console.error = origError;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 2, 'initial + retry');
+    assert.ok(spawned[0].args.includes('--system-prompt-file'), 'first spawn injects the flag');
+    assert.ok(!spawned[1].args.includes('--system-prompt-file'), 'retry strips the flag');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-sysfile'), true, 'path marked as rejecting');
+  });
+
+  it('retries on --append-system-prompt-file rejection (double-quoted, CC_APPEND_SYSTEM.md present)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-appendfile-'));
+    writeFileSync(join(dir, 'CC_APPEND_SYSTEM.md'), 'APPEND PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash('error: unknown option "--append-system-prompt-file"\n'));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-appendfile');
+      await waitUntil(() => spawned.length >= 2);
+    } finally {
+      console.error = origError;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 2);
+    assert.ok(spawned[0].args.includes('--append-system-prompt-file'), 'first spawn injects append flag');
+    assert.ok(!spawned[1].args.includes('--append-system-prompt-file'), 'retry strips append flag');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-appendfile'), true);
+  });
+
+  it('does not retry for system-prompt-file when crash is unrelated', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-sysfile-unrelated-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash('error: some other failure\n'));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-sysfile-unrelated');
+      await waitUntil(() => spawned[0] != null);
+      await new Promise(r => setTimeout(r, 30)); // 确认不会有第二次 spawn
+    } finally {
+      console.error = origError;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 1, 'no retry for unrelated crash');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-sysfile-unrelated'), false);
   });
 });
 

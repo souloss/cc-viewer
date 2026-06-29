@@ -9,6 +9,7 @@ import { renderMarkdown } from '../../utils/markdown';
 import { isMobile } from '../../env';
 import ConceptHelp from '../common/ConceptHelp';
 import ToolsHelp from '../common/ToolsHelp';
+import OpenFolderIcon from '../common/OpenFolderIcon';
 import { parseMemoryLink } from '../../utils/memoryLinkParser';
 import appConfig from '../../config.json';
 import styles from './CachePopoverContent.module.css';
@@ -485,7 +486,8 @@ export default function CachePopoverContent({
         )}
         <div className={`${styles.cacheSection} ${styles.cacheSectionBordered}`}>
           <div className={styles.cacheSectionHeader}>
-            <div className={styles.cacheSectionLabel}>
+            <div className={`${styles.cacheSectionLabel} ${styles.memoryLabelWithIcon}`}>
+              <OpenFolderIcon apiEndpoint={apiUrl('/api/open-memory-dir')} title={t('ui.memoryOpenDir')} size={14} />
               {t('ui.persistentMemory')}{memoryCount !== null ? ` (${memoryCount})` : ''}
             </div>
             {onRefreshMemory && (() => {

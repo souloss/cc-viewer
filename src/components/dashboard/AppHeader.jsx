@@ -29,6 +29,7 @@ import ProjectPrefsManagerModal from '../settings/ProjectPrefsManagerModal';
 import PluginModal from '../settings/PluginModal';
 import ProcessModal from '../settings/ProcessModal';
 import ProxyModal from '../settings/ProxyModal';
+import SystemTextModal from '../settings/SystemTextModal';
 import VoicePackSettings from '../settings/VoicePackSettings';
 import ProjectAliasEditor from '../settings/ProjectAliasEditor';
 import MessagingModal from '../settings/MessagingModal';
@@ -95,7 +96,7 @@ class AppHeader extends React.Component {
 
   constructor(props) {
     super(props);
-    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(), proxyModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, projectPrefsModalOpen: false, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
+    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(), proxyModalVisible: false, systemTextModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, projectPrefsModalOpen: false, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
       // 文件系统权威的 skill 列表（/api/skills 返回）；live-tail 下作为 popover chip 和管理弹窗的共享数据源。
       // null=未加载 / false=失败 / [] 或 Array=加载结果。workspace 切换由 componentDidUpdate + seq 控制。
       _fsSkills: null,
@@ -2176,6 +2177,20 @@ class AppHeader extends React.Component {
               </div>
             );
           })()}
+          <div className={styles.settingsGroupBox}>
+            <div className={styles.settingsGroupTitle}>
+              {t('ui.expert.title')}
+              <Tooltip title={t('ui.expert.help')}>
+                <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+              </Tooltip>
+            </div>
+            <div className={styles.settingsItem}>
+              <span className={styles.settingsLabel}>{t('ui.expert.systemText')}</span>
+              <Button size="small" onClick={() => this.setState({ systemTextModalVisible: true })}>
+                {t('ui.expert.systemText.btn')}
+              </Button>
+            </div>
+          </div>
         </Drawer>
         <Drawer
           title={<span>{t('ui.globalSettings')} <ConceptHelp doc="GlobalSettings" /></span>}
@@ -2244,6 +2259,10 @@ class AppHeader extends React.Component {
           activeProxyId={this.props.activeProxyId}
           defaultConfig={this.props.defaultConfig}
           onProxyProfileChange={this.props.onProxyProfileChange}
+        />
+        <SystemTextModal
+          open={this.state.systemTextModalVisible}
+          onClose={() => this.setState({ systemTextModalVisible: false })}
         />
         <MessagingModal
           open={this.state.messagingModalVisible}

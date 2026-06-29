@@ -25,3 +25,7 @@ tmp/
 
 # 本地 agent 指令镜像（CLAUDE.md 的副本，不入库）
 AGENTS.md
+
+# 工作区 system prompt sentinel（运行时由专家设置/CCV 写入工作目录，不入库）
+CC_SYSTEM.md
+CC_APPEND_SYSTEM.md

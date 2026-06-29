@@ -29,6 +29,7 @@ import { filesContentRoutes } from './routes/files-content.js';
 import { workflowJournalRoutes } from './routes/workflow-journal.js';
 import { filesFsRoutes } from './routes/files-fs.js';
 import { workspacesRoutes } from './routes/workspaces.js';
+import { expertRoutes } from './routes/expert.js';
 import { eventsRoutes } from './routes/events.js';
 import { askPermRoutes } from './routes/ask-perm.js';
 import { teamRoutes } from './routes/team.js';
@@ -594,6 +595,7 @@ const _routes = [
   ...workflowJournalRoutes,
   ...filesFsRoutes,
   ...workspacesRoutes,
+  ...expertRoutes,
   ...eventsRoutes,
   ...askPermRoutes,
   ...teamRoutes,

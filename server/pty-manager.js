@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn, applyClaudeAltScreenPref } from './lib/terminal-env.js';
 import { killPtyTree } from './lib/term-signals.js';
 import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-slice.js';
+import { buildSystemPromptFileArgs } from './lib/system-prompt-files.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -82,6 +83,16 @@ function flushBatch(force = false) {
   }
 }
 
+// 向嵌入式终端注入一行合成提示(非 claude 输出)。append 到 outputBuffer 让新接入/重连客户端也能
+// 从快照看到(server.js 的 data-resync 走 getOutputBuffer)，再实时广播给当前 dataListeners。
+function emitSpawnNotice(line) {
+  const chunk = `\x1b[2m${line}\x1b[0m\r\n`;
+  outputBuffer += chunk;
+  for (const cb of dataListeners) {
+    try { cb(SYNC_BEGIN + chunk + SYNC_END); } catch { }
+  }
+}
+
 // 走 createRequire().resolve 而非 join(__dirname, '..', 'node_modules', ...) ——
 // pnpm / yarn workspace 把 node-pty hoist 到上级 node_modules 时相对路径会找不到，
 // 静默 chmod 失败 → 运行 PTY 时 EACCES，且全程无 log 难排查。
@@ -122,6 +133,14 @@ export function withDefaultThinkingDisplay(args) {
 // 标记到本集合，下次 spawn 直接跳过注入——完全基于实际运行反馈，不依赖版本号或品牌。
 const _thinkingDisplayRejectedPaths = new Set();
 
+// 启动目录里的 CC_SYSTEM.md / CC_APPEND_SYSTEM.md 自动注入 --system-prompt-file/--append-system-prompt-file。
+// 若目标 claude(或三方 fork/wrapper)不识别该 flag，onExit 检测 "unknown option" 后把 claudePath 记入此集，
+// 下次 spawn 跳过注入并去 flag 重启(对齐 _thinkingDisplayRejectedPaths 自愈)。
+const _systemPromptFileRejectedPaths = new Set();
+
+// 内部重启(-c 重试 / flag 自愈)时抑制一次注入提示，避免终端重复打印同一行。
+let _suppressNextSpawnNotice = false;
+
 // 仅用于测试/内部：清空拒绝集
 export function _clearThinkingDisplayRejectedPaths() {
   _thinkingDisplayRejectedPaths.clear();
@@ -135,6 +154,16 @@ export function _isThinkingDisplayRejected(claudePath) {
 // 仅用于测试：强制把路径加入拒绝集，绕过第一次 crash
 export function _markThinkingDisplayRejected(claudePath) {
   _thinkingDisplayRejectedPaths.add(claudePath);
+}
+
+// 仅用于测试/内部：清空 system-prompt-file 拒绝集
+export function _clearSystemPromptFileRejectedPaths() {
+  _systemPromptFileRejectedPaths.clear();
+}
+
+// 仅用于测试：查询路径是否已被标记为不支持 --system-prompt-file
+export function _isSystemPromptFileRejected(claudePath) {
+  return _systemPromptFileRejectedPaths.has(claudePath);
 }
 
 export async function spawnClaude(proxyPort, cwd, extraArgs = [], claudePath = null, isNpmVersion = false, serverPort = null, serverProtocol = 'http', internalToken = null) {
@@ -246,13 +275,20 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
     && process.env.CCV_SKIP_THINKING_DISPLAY !== '1';
   const finalExtraArgs = shouldInjectThinkingDisplay ? withDefaultThinkingDisplay(extraArgs) : extraArgs;
 
+  // 启动目录存在 CC_SYSTEM.md / CC_APPEND_SYSTEM.md(非空)时，自动追加
+  // --system-prompt-file / --append-system-prompt-file(两者独立、用户已传同义 flag 时跳过对应项)。
+  // 注：currentWorkspacePath 在下方才赋值，这里用 cwd 参数判定启动目录。
+  let sysPrompt = buildSystemPromptFileArgs(cwd || process.cwd(), finalExtraArgs);
+  if (_systemPromptFileRejectedPaths.has(claudePath)) sysPrompt = { args: [], loaded: [] };
+  const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
+
   let command = claudePath;
-  let args = ['--settings', settingsJson, ...finalExtraArgs];
+  let args = ['--settings', settingsJson, ...launchArgs];
 
   // 如果是 npm 版本（cli.js），需要使用 node 来运行
   if (isNpmVersion && claudePath.endsWith('.js')) {
     command = nodePath;
-    args = [claudePath, '--settings', settingsJson, ...finalExtraArgs];
+    args = [claudePath, '--settings', settingsJson, ...launchArgs];
   }
 
   lastExitCode = null;
@@ -270,6 +306,12 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   ptyKind = 'claude';
   // --allow-dangerously-skip-permissions only enables a later toggle, so it must NOT count.
   ptySkipPermissions = extraArgs.includes('--dangerously-skip-permissions');
+
+  // 注入了 system prompt 文件时向终端打印一行提示(可见性/安全)；内部重启已抑制以免重复。
+  if (sysPrompt.loaded.length && !_suppressNextSpawnNotice) {
+    emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt`);
+  }
+  _suppressNextSpawnNotice = false;
 
   ptyProcess.onData((data) => {
     outputBuffer += data;
@@ -299,6 +341,7 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
     if (hasContinue && exitCode !== 0 && outputBuffer.includes('No conversation found')) {
       console.error('[CC Viewer] -c failed (no conversation), retrying without -c');
       const retryArgs = extraArgs.filter(a => a !== '-c' && a !== '--continue');
+      _suppressNextSpawnNotice = true;
       spawnClaude(proxyPort, cwd, retryArgs, claudePath, isNpmVersion, serverPort, serverProtocol, internalToken);
       return;
     }
@@ -315,6 +358,19 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
     if (flagRejected) {
       console.error('[CC Viewer] claude rejected --thinking-display, marking as unsupported and retrying without flag');
       _thinkingDisplayRejectedPaths.add(claudePath);
+      _suppressNextSpawnNotice = true;
+      spawnClaude(proxyPort, cwd, extraArgs, claudePath, isNpmVersion, serverPort, serverProtocol, internalToken);
+      return;
+    }
+
+    // 事后兜底：claude(或三方 fork/wrapper)不识别 --system-prompt-file/--append-system-prompt-file 而崩溃时，
+    // 记下该 claudePath、跳过注入并重启一次，避免自动注入把会话拖崩(对齐上面的 --thinking-display 自愈)。
+    const sysFileRejected = sysPrompt.loaded.length > 0 && exitCode !== 0
+      && /unknown option ['"]--(append-)?system-prompt-file/i.test(outputBuffer);
+    if (sysFileRejected) {
+      console.error('[CC Viewer] claude rejected --system-prompt-file, skipping CC_SYSTEM.md/CC_APPEND_SYSTEM.md and retrying');
+      _systemPromptFileRejectedPaths.add(claudePath);
+      _suppressNextSpawnNotice = true;
       spawnClaude(proxyPort, cwd, extraArgs, claudePath, isNpmVersion, serverPort, serverProtocol, internalToken);
       return;
     }

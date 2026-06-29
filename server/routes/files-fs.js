@@ -868,6 +868,21 @@ function openProjectDir(req, res) {
   res.end(JSON.stringify({ ok: true, dir }));
 }
 
+function openMemoryDir(req, res) {
+  // memory 目录推导与 files-content.js projectMemory(cwd→encoded→memory)保持一致；若一方改动需同步。
+  // 仅打开目录、不读文件，故无需 projectMemory 内的 realpath/traversal 校验。
+  const cwd = (process.env.CCV_PROJECT_DIR || process.cwd()).replace(/[/\\]+$/, '');
+  const encoded = cwd.replace(/[^a-zA-Z0-9-]/g, '-');
+  const dir = join(getClaudeConfigDir(), 'projects', encoded, 'memory');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+  execFile(cmd, [dir], { windowsHide: true }, (err) => {
+    if (err) console.error('[CC Viewer] openMemoryDir failed:', err.message);
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, dir }));
+}
+
 function editorOpen(req, res, parsedUrl, isLocal, deps) {
   let body = '';
   req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
@@ -953,6 +968,7 @@ export const filesFsRoutes = [
   { method: 'POST', match: 'exact', path: '/api/open-log-dir', handler: openLogDir },
   { method: 'POST', match: 'exact', path: '/api/open-profile-dir', handler: openProfileDir },
   { method: 'POST', match: 'exact', path: '/api/open-project-dir', handler: openProjectDir },
+  { method: 'POST', match: 'exact', path: '/api/open-memory-dir', handler: openMemoryDir },
   { method: 'POST', match: 'exact', path: '/api/editor-open', handler: editorOpen },
   { method: 'GET', match: 'prefix', path: '/api/editor-status', handler: editorStatus },
   { method: 'POST', match: 'exact', path: '/api/editor-done', handler: editorDone },

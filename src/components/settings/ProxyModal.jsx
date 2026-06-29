@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Modal, Button, Input, Radio, Select, Tag, message } from 'antd';
-import { EditOutlined, DeleteOutlined, CheckOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
-import { apiUrl } from '../../utils/apiUrl';
 import { isMobile } from '../../env';
-import OpenFolderIcon from '../common/OpenFolderIcon';
 import ConceptHelp from '../common/ConceptHelp';
 import styles from './ProxyModal.module.css';
 import appStyles from '../../App.module.css';
@@ -119,8 +117,7 @@ export default function ProxyModal({
 
   const titleNode = (
     <span>
-      <OpenFolderIcon apiEndpoint={apiUrl('/api/open-profile-dir')} title={t('ui.proxy.openConfigDir')} size={16} />
-      {' '}{t('ui.proxySwitch')}{' '}
+      {t('ui.proxySwitch')}{' '}
       <ConceptHelp doc="ProxySwitch" zIndex={1100} />
     </span>
   );
@@ -168,47 +165,50 @@ export default function ProxyModal({
           ))}
         </div>
 
-        {/* 编辑/新增表单 */}
-        {editingProxy && (
-          <div className={styles.proxyEditForm}>
-            <div className={styles.proxyEditRow}>
-              <label>{t('ui.proxy.name')} <span className={styles.proxyRequired}>*</span></label>
-              <Input size="small" value={editForm.name} onChange={e => updateField('name', e.target.value)} />
-            </div>
-            <div className={styles.proxyEditRow}>
-              <label>{t('ui.proxy.baseURL')} <span className={styles.proxyRequired}>*</span></label>
-              <Input size="small" value={editForm.baseURL} onChange={e => updateField('baseURL', e.target.value)} placeholder="https://api.example.com" />
-            </div>
-            <div className={styles.proxyEditRow}>
-              <label>{t('ui.proxy.apiKey')} <span className={styles.proxyRequired}>*</span></label>
-              <Input.Password size="small" value={editForm.apiKey} onChange={e => updateField('apiKey', e.target.value)} placeholder="sk-..." />
-            </div>
-            <div className={styles.proxyEditDivider} />
-            <div className={styles.proxyEditRow}>
-              <label>{t('ui.proxy.models')}</label>
-              <Input size="small" value={editForm.models} onChange={e => updateField('models', e.target.value)} placeholder="model-1, model-2" />
-            </div>
-            <div className={styles.proxyEditRow}>
-              <label>{t('ui.proxy.activeModel')}</label>
-              <Select size="small" className={styles.fullWidthSelect} value={editForm.activeModel || undefined} onChange={v => updateField('activeModel', v)} placeholder={t('ui.proxy.activeModel')}>
-                {(editForm.models || '').split(',').map(m => m.trim()).filter(Boolean).map(m => (
-                  <Select.Option key={m} value={m}>{m}</Select.Option>
-                ))}
-              </Select>
-            </div>
-            <div className={styles.proxyEditBtns}>
-              <Button size="small" icon={<CheckOutlined />} type="primary" onClick={handleSave}>{t('ui.proxy.save')}</Button>
-              <Button size="small" icon={<CloseOutlined />} onClick={handleCancelEdit}>{t('ui.proxy.cancel')}</Button>
-            </div>
-          </div>
-        )}
-
-        {!editingProxy && (
-          <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 12 }} onClick={handleStartNew}>
-            {t('ui.proxy.addProxy')}
-          </Button>
-        )}
+        <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 12 }} onClick={handleStartNew}>
+          {t('ui.proxy.addProxy')}
+        </Button>
       </div>
+  );
+
+  // 编辑/新增表单 —— 二级弹窗(独立 Modal,浮于主弹窗之上),不再内联挤在列表下方。
+  // 受控:open 绑定 editingProxy;父关时由 useEffect 联动重置 editingProxy → 一并关闭。
+  const editModal = (
+    <Modal
+      title={editingProxy === '__new__' ? t('ui.proxy.addProxy') : t('ui.proxy.editProxy')}
+      open={editingProxy !== null}
+      onCancel={handleCancelEdit}
+      onOk={handleSave}
+      okText={t('ui.proxy.save')}
+      cancelText={t('ui.proxy.cancel')}
+      styles={{ body: isMobile ? { zoom: 0.6 } : {} }}
+    >
+      <div className={styles.proxyEditRow}>
+        <label>{t('ui.proxy.name')} <span className={styles.proxyRequired}>*</span></label>
+        <Input size="small" value={editForm.name} onChange={e => updateField('name', e.target.value)} />
+      </div>
+      <div className={styles.proxyEditRow}>
+        <label>{t('ui.proxy.baseURL')} <span className={styles.proxyRequired}>*</span></label>
+        <Input size="small" value={editForm.baseURL} onChange={e => updateField('baseURL', e.target.value)} placeholder="https://api.example.com" />
+      </div>
+      <div className={styles.proxyEditRow}>
+        <label>{t('ui.proxy.apiKey')} <span className={styles.proxyRequired}>*</span></label>
+        <Input.Password size="small" value={editForm.apiKey} onChange={e => updateField('apiKey', e.target.value)} placeholder="sk-..." />
+      </div>
+      <div className={styles.proxyEditDivider} />
+      <div className={styles.proxyEditRow}>
+        <label>{t('ui.proxy.models')}</label>
+        <Input size="small" value={editForm.models} onChange={e => updateField('models', e.target.value)} placeholder="model-1, model-2" />
+      </div>
+      <div className={styles.proxyEditRow}>
+        <label>{t('ui.proxy.activeModel')}</label>
+        <Select size="small" className={styles.fullWidthSelect} value={editForm.activeModel || undefined} onChange={v => updateField('activeModel', v)} placeholder={t('ui.proxy.activeModel')}>
+          {(editForm.models || '').split(',').map(m => m.trim()).filter(Boolean).map(m => (
+            <Select.Option key={m} value={m}>{m}</Select.Option>
+          ))}
+        </Select>
+      </div>
+    </Modal>
   );
 
   const deleteConfirmModal = (
@@ -218,6 +218,8 @@ export default function ProxyModal({
       open={deleteConfirmTarget !== null}
       onCancel={handleDeleteCancel}
       onOk={handleDeleteConfirm}
+      okText={t('ui.common.confirmYes')}
+      cancelText={t('ui.common.confirmCancel')}
       okType="danger"
       styles={{ body: isMobile ? { zoom: 0.6 } : {} }}
     >
@@ -239,6 +241,7 @@ export default function ProxyModal({
             </div>
           </div>
         </div>
+        {editModal}
         {deleteConfirmModal}
       </>
     );
@@ -256,6 +259,7 @@ export default function ProxyModal({
       >
         {bodyNode}
       </Modal>
+      {editModal}
       {deleteConfirmModal}
     </>
   );
