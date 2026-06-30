@@ -1,5 +1,11 @@
 <img height="200" width="1500" alt="CC-Viewer" src="https://github.com/user-attachments/assets/abec0513-1d56-4244-b7ed-9382b6c09049" />
 
+As the author's account has been disabled by Claude Code, updates to the repository are paused for a few weeks.
+
+The author is taking this opportunity to work on a multimodal project.
+
+If there are any critical bugs requiring fixes, please submit them via the issues section; they can still be addressed.
+
 # CC-Viewer
 
 Based on Claude Code, a Vibe Coding tool that distills and accumulates real development experience:
@@ -153,11 +159,13 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 * Compatible with Claude Code Router (CCR) and other proxy scenarios — falls back to matching requests by API path pattern
 
 <a href="https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
- </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
+
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
+
+    ![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left)
+  </picture>
 </a>
 
 ## License
