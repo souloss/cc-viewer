@@ -30,6 +30,8 @@ const KEYS = [
   'ui.expert.systemText.btn',
   'ui.expert.systemText.append',
   'ui.expert.systemText.override',
+  'ui.expert.systemText.overrideWarn',
+  'ui.expert.systemText.preview',
   'ui.expert.systemText.placeholder',
   'ui.expert.systemText.dirHint',
   'ui.expert.systemText.note',

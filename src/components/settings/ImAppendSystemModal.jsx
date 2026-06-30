@@ -69,34 +69,35 @@ export default function ImAppendSystemModal({ open, platform, onClose }) {
       okButtonProps={{ disabled: loading }}
       width={680}
       destroyOnClose
-      title={_tr('ui.im.persona', null, 'Model personality')}
+      title={(
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span>{_tr('ui.im.persona', null, 'Model personality')}</span>
+          <Popconfirm
+            title={_tr('ui.im.restoreDefaultConfirm', null, 'Replace the current text with the default preset? (takes effect after you save)')}
+            okText={_tr('ui.ok', null, 'OK')}
+            cancelText={_tr('ui.cancel', null, 'Cancel')}
+            onConfirm={restoreDefault}
+            placement="bottomLeft"
+            disabled={saving || restoring || loading}
+          >
+            <Button size="small" type="link" loading={restoring} disabled={saving || loading} style={{ padding: 0, height: 'auto', fontWeight: 400 }}>
+              {_tr('ui.im.restoreDefault', null, 'Restore default')}
+            </Button>
+          </Popconfirm>
+        </div>
+      )}
       styles={{ content: { background: 'var(--bg-elevated)' }, header: { background: 'var(--bg-elevated)' } }}
     >
       {loading ? (
         <div style={{ textAlign: 'center', padding: '40px 0' }}><Spin /></div>
       ) : (
-        <>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-            <Popconfirm
-              title={_tr('ui.im.restoreDefaultConfirm', null, 'Replace the current text with the default preset? (takes effect after you save)')}
-              okText={_tr('ui.ok', null, 'OK')}
-              cancelText={_tr('ui.cancel', null, 'Cancel')}
-              onConfirm={restoreDefault}
-              disabled={saving || restoring}
-            >
-              <Button size="small" type="link" loading={restoring} disabled={saving}>
-                {_tr('ui.im.restoreDefault', null, 'Restore default')}
-              </Button>
-            </Popconfirm>
-          </div>
-          <Input.TextArea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            autoSize={{ minRows: 16, maxRows: 28 }}
-            spellCheck={false}
-            style={{ fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 13 }}
-          />
-        </>
+        <Input.TextArea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          autoSize={{ minRows: 16, maxRows: 28 }}
+          spellCheck={false}
+          style={{ fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 13 }}
+        />
       )}
     </Modal>
   );

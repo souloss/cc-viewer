@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.330 (2026-06-30)
+
+- feat(专家/系统文本修改): 模态加宽(620→900, 移动端 `min(900px,92vw)` 不溢出)、编辑框加高；「追加/覆盖」行最右新增 markdown 预览开关(开=用 `renderMarkdown` 直接渲染预览、关=编辑)；切到「覆盖」时开关后显示「谨慎操作」警示文案(主题变量 `--color-warning`)；底部提示「下次启动 claude 时生效」改为「下次启动 ccv 时生效」；偏好「专家设置」卡的 (?) 帮助图标从卡标题移到「系统文本修改」标签后；`ui.expert.systemText.overrideWarn` / `.preview` 18 语言 + note 18 语言改写
+- feat(im/模型性格): 对话框标题栏新增「恢复默认」按钮(Popconfirm 移到 Modal title，`loading` 参与 disabled 守卫)
+- test(专家): expert-i18n 补 2 个新 key 的 18 语言 guard
+
 ## 1.6.329 (2026-06-29)
 
 - feat(im): IM「模型性格定义」从工作目录 `CLAUDE.md` 改用 `CC_APPEND_SYSTEM.md`——启动 claude 时注入为 `--append-system-prompt-file`(作为追加系统提示，比旧的 CLAUDE.md 项目记忆更难被来信指令绕过)；worker 启动时一次性把遗留 `CLAUDE.md` 迁为 `CC_APPEND_SYSTEM.md`(幂等：目标有内容则不动 CLAUDE.md、迁移=rename 移动内容不丢、符号链接/目录/空文件守卫)；旧 claude 不支持该 flag 时沿用 onExit 自愈(此时无人格回退)

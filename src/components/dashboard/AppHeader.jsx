@@ -2180,12 +2180,14 @@ class AppHeader extends React.Component {
           <div className={styles.settingsGroupBox}>
             <div className={styles.settingsGroupTitle}>
               {t('ui.expert.title')}
-              <Tooltip title={t('ui.expert.help')}>
-                <QuestionCircleOutlined className={styles.settingsHelpIcon} />
-              </Tooltip>
             </div>
             <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>{t('ui.expert.systemText')}</span>
+              <span className={styles.settingsLabel}>
+                {t('ui.expert.systemText')}
+                <Tooltip title={t('ui.expert.help')}>
+                  <QuestionCircleOutlined className={styles.settingsHelpIcon} />
+                </Tooltip>
+              </span>
               <Button size="small" onClick={() => this.setState({ systemTextModalVisible: true })}>
                 {t('ui.expert.systemText.btn')}
               </Button>

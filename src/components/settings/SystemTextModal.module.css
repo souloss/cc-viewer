@@ -1,8 +1,47 @@
 .modeRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 10px;
+}
+
+.modeLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.modeRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 「覆盖」模式下的谨慎操作提醒——主题警示色、紧跟开关之后 */
+.overrideWarn {
+  font-size: 12px;
+  color: var(--color-warning, #d4810a);
+}
+
+.previewLabel {
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+}
+
+/* markdown 预览容器：高度随视口、超长可滚动（与编辑框等价占位，非逐行对齐） */
+.previewBox {
+  border: 1px solid var(--border-secondary, #d9d9d9);
+  border-radius: 8px;
+  padding: 8px 14px;
+  min-height: 320px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.previewEmpty {
+  font-size: 13px;
+  color: var(--text-secondary, #888);
 }
 
 .hint {
