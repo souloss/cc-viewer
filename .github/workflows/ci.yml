@@ -17,13 +17,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # 24:测试基建用到 node:module registerHooks(同步 hooks,Node 22.15+)
+          # 24: test infrastructure uses node:module registerHooks (sync hooks, Node 22.15+)
           node-version: 24
-      # -logger shell hook 测试需要真实 zsh(ubuntu runner 默认没有)
+      # -logger shell hook tests need real zsh (not included in ubuntu runner by default)
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - run: npm install --no-fund --no-audit --ignore-scripts
-      # --ignore-scripts(供应链防护,保留)会跳过原生编译;cli/PTY 测试需要 node-pty,定向重建
+      # --ignore-scripts (supply-chain hardening; retained) skips native compilation;
+      # cli/PTY tests need node-pty, so rebuild it explicitly
       - run: npm rebuild node-pty
-      # 静态服务/SSR 注入测试需要真实 dist/
+      # Static serving / SSR injection tests need real dist/
       - run: npm run build
       - run: npm test

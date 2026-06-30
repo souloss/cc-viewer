@@ -17,11 +17,12 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-          # Windows 镜像已全面滚到 VS2026(windows-2025 也不再带 VS2022),旧 node-gyp 11.x
-          # 识别不了 VS2026 → "Could not find any Visual Studio installation"。
-          # 根治在 package.json overrides 强制 node-gyp ^12.1.0(12.1 起支持 VS2026,
-          # @electron/rebuild 自带的 ^11.2 够不到,必须 override)。镜像继续钉 windows-2025
-          # 避免 windows-latest 滚动引入新变量。
+          # Windows images have fully rolled to VS2026 (windows-2025 no longer ships VS2022).
+          # Old node-gyp 11.x doesn't recognize VS2026 → "Could not find any Visual Studio
+          # installation". Fix: force node-gyp ^12.1.0 via package.json overrides (12.1+
+          # supports VS2026; @electron/rebuild's bundled ^11.2 can't reach it, so an override
+          # is required). Keep the image pinned to windows-2025 to avoid windows-latest
+          # introducing new variables.
           - os: windows-2025
             platform: win
           - os: ubuntu-latest
@@ -43,9 +44,12 @@ jobs:
 
       - name: Build Electron (mac)
         if: matrix.platform == 'mac'
-        # Apple 公证(notarytool)在「开发者协议过期/未签署」时返回 HTTP 403，与代码无关。容错处理：
-        # 公证失败只让本步骤红叉、跳过 mac 产物，不阻断整条发布链——win/linux 产物、GitHub Release、
-        # Homebrew bump 照常完成。协议在 developer.apple.com 重新签署后，mac 自动恢复正常公证并上传。
+        # Apple notarization (notarytool) returns HTTP 403 when the Developer Agreement has
+        # expired or is unsigned — unrelated to code. Tolerate the failure: mark only this step
+        # as failed and skip the mac artifact, but do not block the entire release pipeline —
+        # win/linux artifacts, GitHub Release, and Homebrew bump proceed as normal. Once the
+        # agreement is re-signed at developer.apple.com, mac notarization and upload resume
+        # automatically.
         continue-on-error: true
         timeout-minutes: 60
         run: npx electron-builder --mac --publish never
@@ -98,23 +102,26 @@ jobs:
         run: find artifacts -type f | head -20
 
       - name: Create GitHub Release
-        # 下游的 Homebrew bump 由 bump-homebrew job 以 reusable workflow 链式调用(见下),
-        # 同一 run 内执行,不依赖 release:published 事件 → 用默认 GITHUB_TOKEN 建 Release 即可,无需 PAT。
+        # The downstream Homebrew bump is handled by the bump-homebrew job via reusable
+        # workflow chained call (see below), within the same run — no dependency on the
+        # release:published event. Use the default GITHUB_TOKEN to create the Release; no PAT needed.
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # 发版后自动 bump Homebrew tap formula(reusable workflow,复用 HOMEBREW_TAP_TOKEN)。
+  # Post-release automatic Homebrew tap formula bump (reusable workflow, uses HOMEBREW_TAP_TOKEN).
   bump-homebrew:
     needs: publish
-    # 显式判 needs.publish.result:自定义 if 会丢掉隐式 success() 门,
-    # 否则 publish 失败时该 job 仍会跑(给不存在的 release 去 bump)。
+    # Explicit needs.publish.result: a custom if would drop the implicit success() gate,
+    # causing this job to run even when publish fails (bumping a non-existent release).
     if: ${{ needs.publish.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
     uses: ./.github/workflows/bump-homebrew.yml
     with:
-      version: ${{ github.ref_name }}   # vX.Y.Z;被调用方剥前导 v
-    # 最小权限:只显式传被调方需要的 HOMEBREW_TAP_TOKEN,不用 secrets: inherit 灌全部 secrets。
+      version: ${{ github.ref_name }}   # vX.Y.Z; the callee strips the leading 'v'
+    # Minimal permissions: only pass HOMEBREW_TAP_TOKEN explicitly (the only secret the
+    # callee needs); avoid secrets: inherit which would dump all caller secrets
+    # (CSC_*/APPLE_* etc.) into the child workflow.
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

@@ -1,9 +1,10 @@
 name: Bump Homebrew Formula
 
-# 触发：作为 reusable workflow 被 release.yml 在发版(tag 推送)后链式调用（workflow_call）。
-#   —— 不靠 release:published 事件：由默认 GITHUB_TOKEN 创建的 Release 不会触发其它 workflow（GitHub 防递归），
-#      同一 run 内链式调用可绕开该限制，且无需 PAT。
-# 备份：手动触发，可显式指定版本号（用于补救 / dry-run）。
+# Trigger: called as a reusable workflow by release.yml after a release (tag push), via workflow_call.
+#   — Not triggered by release:published: a Release created with the default GITHUB_TOKEN does not
+#     fire other workflows (GitHub anti-recursion guard). Chaining within the same run bypasses this
+#     limitation without needing a PAT.
+# Backup: manual trigger, with an explicit version parameter (for recovery / dry-run).
 on:
   workflow_call:
     inputs:
@@ -11,15 +12,17 @@ on:
         description: 'Version to bump (e.g. 1.6.278)'
         required: true
         type: string
-    # 最小权限:只显式接收跨仓写 tap 所需的 HOMEBREW_TAP_TOKEN,不用 secrets: inherit
-    # 把 caller 的全部 secrets(CSC_*/APPLE_* 等)都灌进来。GITHUB_TOKEN 由平台自动提供。
+    # Minimal permissions: only accept HOMEBREW_TAP_TOKEN (the cross-repo write token needed by
+    # the tap repo) explicitly; avoid secrets: inherit which would dump all caller secrets
+    # (CSC_*/APPLE_* etc.) into this workflow. GITHUB_TOKEN is provided automatically by the platform.
     secrets:
       HOMEBREW_TAP_TOKEN:
         required: true
   workflow_dispatch:
     inputs:
       version:
-        # required:true 让 UI 在派发前强制填写(本 workflow 无 latest-tag 回落,空值会直接报错)。
+        # required:true forces the UI to prompt for input before dispatching (this workflow has no
+        # latest-tag fallback; an empty value would error out directly).
         description: 'Version to bump (e.g., 1.6.225)'
         required: true
         type: string
@@ -33,9 +36,11 @@ jobs:
     steps:
       - name: Resolve version
         id: ver
-        # SECURITY: ${{ inputs.version }} 必须经 env: 注入,不得直接拼进 run: 脚本——后者会让恶意输入
-        # （仅 collaborator 可触发，但仍是标准 antipattern）在 semver 校验前就被 shell 解释。
-        # 版本来源统一为 inputs.version（workflow_call 与 workflow_dispatch 共用 inputs 上下文）。
+        # SECURITY: ${{ inputs.version }} must be injected via env: and never directly interpolated
+        # into the run: script — the latter would allow malicious input (collaborator-only trigger,
+        # but still a standard anti-pattern) to be interpreted by the shell before semver validation.
+        # Version source is unified as inputs.version (workflow_call and workflow_dispatch share the
+        # inputs context).
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -44,8 +49,8 @@ jobs:
             echo "Cannot resolve version: inputs.version is empty" >&2
             exit 1
           fi
-          VER="${INPUT_VERSION#v}"   # caller 传 github.ref_name=vX.Y.Z 时剥前导 v
-          # 校验版本号严格 semver patch 格式（再次防御：确保所有后续步骤拿到的 VER 是干净的）
+          VER="${INPUT_VERSION#v}"   # strip leading 'v' when caller passes github.ref_name=vX.Y.Z
+          # Validate strict semver patch format (defense-in-depth: ensures VER is clean for all downstream steps)
           if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid version: $VER" >&2
             exit 1
@@ -58,7 +63,7 @@ jobs:
           VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          # CDN 传播最长 ~5min;每 30s 重试,共 10 次 = 5min
+          # CDN propagation takes up to ~5min; retry every 30s, 10 attempts = 5min
           for i in $(seq 1 10); do
             if curl -fsSL "https://registry.npmjs.org/cc-viewer/${VER}" >/dev/null 2>&1; then
               echo "✓ npm has cc-viewer@${VER}"
@@ -101,8 +106,9 @@ jobs:
             echo "$FORMULA not found in tap repo" >&2
             exit 1
           fi
-          # 仅替换 url 与 sha256 行；其它内容（depends_on / install / test 块）由维护者管理。
-          # python 通过 sys.argv 拿 env 注入的 URL/SHA，不让 Action 表达式直接拼进 shell 行。
+          # Only replace url and sha256 lines; other content (depends_on / install / test blocks)
+          # is managed by the maintainer. Python receives URL/SHA via sys.argv from env injection,
+          # keeping Action expressions out of the shell command line.
           python3 - "$FORMULA" "$URL" "$SHA" <<'PY'
           import re, sys
           path, url, sha = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -135,16 +141,18 @@ jobs:
           delete-branch: true
 
       - name: Auto-merge PR
-        # 只在 created / updated 分支跑（none / closed 时跳过，避免对错误 PR 号操作）。
-        # 跨仓 token 用 HOMEBREW_TAP_TOKEN（与 Create PR 同源），需在 tap 仓 settings →
-        # general → Pull Requests 启用 Allow merge commits（已是默认）。
+        # Only run on created/updated actions (skip on none/closed to avoid operating on an
+        # invalid PR number). Cross-repo token uses HOMEBREW_TAP_TOKEN (same source as Create PR);
+        # the tap repo must have Allow merge commits enabled under Settings → General → Pull
+        # Requests (it's the default).
         if: steps.cpr.outputs.pull-request-operation == 'created' || steps.cpr.outputs.pull-request-operation == 'updated'
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PR_NUM: ${{ steps.cpr.outputs.pull-request-number }}
         run: |
           set -euo pipefail
-          # 数字校验防注入（peter-evans action 输出可信，但本仓 hardening 风格一致）
+          # Numeric validation for injection defense (peter-evans action output is trusted,
+          # but consistent with this repo's hardening style)
           if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
             echo "Invalid PR number: $PR_NUM" >&2
             exit 1
