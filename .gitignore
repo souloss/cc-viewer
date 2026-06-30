@@ -12,7 +12,7 @@ coverage
 .omc/
 tmp/
 
-# 签名相关敏感文件
+# Sensitive signing-related files
 *.p12
 *.cer
 *.certSigningRequest
@@ -23,12 +23,12 @@ tmp/
 .env.*
 !.env.example
 
-# 本地 agent 指令镜像（CLAUDE.md 的副本，不入库）
+# Local agent instruction mirror (copy of CLAUDE.md, kept out of repo)
 AGENTS.md
 
-# 工作区 system prompt sentinel（运行时由专家设置/CCV 写入工作目录，不入库）
+# Workspace system prompt sentinels (written at runtime by expert settings / CCV, kept out of repo)
 CC_SYSTEM.md
 CC_APPEND_SYSTEM.md
 
-# Claude Code 反编译产物（从官方 bun --compile 二进制抽取的主 JS bundle，仅供查证术语/实现，不入库）
+# Claude Code decompiled artifacts (main JS bundle extracted from official bun --compile binary, reference only, kept out of repo)
 claude-code-*.cli.js

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.331 (2026-06-30)
+
+- refactor(root): translate inline documentation to English across core modules — migrate all JS/CSS comment blocks and ignore-file annotations from Chinese to English for consistent contributor-facing documentation; drop the mirrored zh section in CONTRIBUTING.md in favor of a single English version
+- fix(readme): update star-history link to use canonical hash-based URL format
+
 ## 1.6.330 (2026-06-30)
 
 - feat(专家/系统文本修改): 模态加宽(620→900, 移动端 `min(900px,92vw)` 不溢出)、编辑框加高；「追加/覆盖」行最右新增 markdown 预览开关(开=用 `renderMarkdown` 直接渲染预览、关=编辑)；切到「覆盖」时开关后显示「谨慎操作」警示文案(主题变量 `--color-warning`)；底部提示「下次启动 claude 时生效」改为「下次启动 ccv 时生效」；偏好「专家设置」卡的 (?) 帮助图标从卡标题移到「系统文本修改」标签后；`ui.expert.systemText.overrideWarn` / `.preview` 18 语言 + note 18 语言改写

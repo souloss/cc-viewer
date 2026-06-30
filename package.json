@@ -32,7 +32,10 @@
     "electron:check-sign": "./scripts/check-sign-config.sh"
   },
   "keywords": [
-    "claude code"
+    "claude code",
+    "devtools",
+    "logging",
+    "proxy"
   ],
   "contributors": [
     {

@@ -151,7 +151,7 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 * Each request inlines Token usage stats (input/output tokens, cache creation/read, hit rate)
 * Compatible with Claude Code Router (CCR) and other proxy scenarios — falls back to matching requests by API path pattern
 
-<a href="https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left">
+<a href="https://star-history.com/#weiesky/cc-viewer&Date">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
 

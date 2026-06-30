@@ -15,16 +15,19 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 export default defineConfig(() => {
   const port = getBackendPort();
   return {
-    // CCV_BASE_PATH: 部署基础路径（构建期决定 dist 资源引用风格）。
-    //   未设置 / '' → '' 相对路径（默认）——产出 ./assets/...，配合运行时 <base> 标签，
-    //                  一份 dist 同时支持根路径部署与反向代理子路径部署（无需源码重编）。
-    //   '/prefix/' → 构建期硬编码前缀（资源固定指向该子路径）。
-    //   '/' → 绝对路径（旧默认的逃生舱；需要 /assets/... 绝对引用时用 CCV_BASE_PATH=/ 构建）。
-    // 注意：不复用 server/lib/base-path.js 的 normalizeBasePath——构建期 base 与运行时
-    // 语义不同（这里 '/' 才是绝对、未设/'' 是相对；运行时则 '/' 与未设都表示"无前缀"）。
+    // CCV_BASE_PATH: deployment base path (determines dist asset reference style at build time).
+    //   unset / '' → '' relative (default) — outputs ./assets/...; combined with runtime <base>
+    //                  tag, a single dist supports both root deployment and reverse-proxy sub-path
+    //                  deployment without source rebuild.
+    //   '/prefix/' → build-time hardcoded prefix (assets pinned to this sub-path).
+    //   '/' → absolute (escape hatch for the old default; set CCV_BASE_PATH=/ when absolute
+    //         /assets/... references are needed).
+    // Note: server/lib/base-path.js's normalizeBasePath is not reused here — build-time `base`
+    // has different semantics from runtime (here '/' means absolute and unset/'' means relative;
+    // at runtime both '/' and unset mean "no prefix").
     base: (() => {
       const v = process.env.CCV_BASE_PATH;
-      if (v === undefined) return '';          // 默认相对路径（要绝对路径用 CCV_BASE_PATH=/）
+      if (v === undefined) return '';          // default: relative (use CCV_BASE_PATH=/ for absolute)
       if (v === '') return '';                 // relative paths, no trailing slash fixup
       return v.replace(/\/?$/, '/');           // ensure trailing slash
     })(),
@@ -34,16 +37,17 @@ export default defineConfig(() => {
     },
     build: {
       outDir: 'dist',
-      // 本地排查性能 / 异常时打开：CCV_SOURCEMAP=1 npm run build（或直接 npm run build:sourcemap）。
-      // 默认关 —— 体积 + 安全考虑（不希望 .map 跟 npm 包一起发布；package.json files 已加
-      // `!dist/**/*.map` 兜底）。生成 .map 后 Chrome DevTools 会自动加载，性能 trace
-      // 里 antd / cc-viewer 的栈帧能从 dk/ck 之类还原到可读名 + 真实源码位置。
+      // Enable for local perf / debugging: CCV_SOURCEMAP=1 npm run build (or npm run build:sourcemap).
+      // Disabled by default — size + security (don't ship .map with npm; package.json files already
+      // includes `!dist/**/*.map` as a safety net). When .map files exist, Chrome DevTools auto-loads
+      // them, making antd/cc-viewer stack frames readable (dk/ck → real names + source positions).
       sourcemap: process.env.CCV_SOURCEMAP === '1',
-      // xterm.js 6.0.0 的 InputHandler.requestMode 被 identifier mangler 误处理
-      // 导致生产构建抛 ReferenceError（issue #5800）。Vite 默认的 esbuild minify
-      // 无法细粒度关闭 identifier mangling（顶层 esbuild 选项只作用于 transform
-      // 阶段，不传给 minify），切到 terser + mangle:false 才能真正绕过。体积
-      // 比 esbuild 默认大 15-25% gzip，等 xterm 6.1 稳定版修复后可切回 esbuild。
+      // xterm.js 6.0.0's InputHandler.requestMode was mis-handled by the identifier mangler,
+      // causing a ReferenceError in production builds (issue #5800). Vite's default esbuild
+      // minify can't selectively disable identifier mangling (top-level esbuild options only
+      // apply to the transform phase, not minify). Switching to terser + mangle:false is
+      // the reliable workaround. Gzip size is 15-25% larger than esbuild default; revert to
+      // esbuild once xterm 6.1 stable ships with a fix.
       minify: 'terser',
       terserOptions: {
         mangle: false,
@@ -51,8 +55,8 @@ export default defineConfig(() => {
       },
       rollupOptions: {
         output: {
-          // 拆分 vendor chunk，避免 antd/highlight/virtuoso/xterm/codemirror 等被合并
-          // 到一个 3MB+ 的单块里（会拖慢 V8 parse、放大 GC 压力、破坏缓存粒度）。
+          // Split vendor chunks to avoid bundling antd/highlight/virtuoso/xterm/codemirror
+          // into a single 3MB+ block (slows V8 parse, increases GC pressure, breaks cache granularity).
           manualChunks: {
             'vendor-react':      ['react', 'react-dom'],
             'vendor-antd':       ['antd'],
@@ -84,8 +88,8 @@ export default defineConfig(() => {
               '@codemirror/lang-xml',
               '@codemirror/lang-yaml',
             ],
-            // MDXEditor 仅在打开 .md 文件且 GUI 模式时通过 React.lazy 加载，
-            // 单独成 chunk 避免拖累首屏 + 与 vendor-codemirror 区分。
+            // MDXEditor is loaded via React.lazy only when opening .md files in GUI mode;
+            // separate chunk to avoid blocking first-screen load and to distinguish from vendor-codemirror.
             'vendor-mdxeditor': ['@mdxeditor/editor'],
           },
         },

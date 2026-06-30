@@ -6,3 +6,4 @@ Before publishing to npm, check if any new top-level files (e.g. `cli.js` bin en
 When adding node_modules dependencies, be sure to distinguish between devDependencies and dependencies.
 When submitting code to GitHub or npm, always consult the user. Unless the user explicitly prompts you to submit, you should always ask the user before submitting. Don't auto-commit/push/publish — always ask first
 Do not increment the version number arbitrarily; you should only update it when running `npm publish`.
+Use English for all code comments, commit messages, and inline documentation — avoid mixing languages in the same codebase.

@@ -7,12 +7,14 @@ import { threadId } from 'node:worker_threads';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-// cc-viewer 同级 node_modules/。生产 npm install 时是真 node_modules；
-// `npm link` / git clone dev 场景下可能算错位置，由 getGlobalNodeModulesDir() 兜底。
-// 自己计算而非 import 自 server/_paths.js，避免 root 文件反向依赖 server 内部模块。
+// cc-viewer's sibling node_modules/. In production (npm install), this is the real
+// node_modules directory; under `npm link` / git clone dev setups the path may resolve
+// incorrectly, and getGlobalNodeModulesDir() serves as the fallback.
+// Computed inline rather than imported from server/_paths.js, to avoid root files
+// forming a reverse dependency on internal server modules.
 const NODE_MODULES = resolve(__dirname, '..');
 
-// ============ 配置区（第三方适配只需修改此处）============
+// ============ Configuration (third-party adapters only need to modify this section) ============
 
 /**
  * Resolve Claude Code config directory.
@@ -26,14 +28,15 @@ export function getClaudeConfigDir() {
     const raw = envDir.trim();
     return raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : resolve(raw);
   }
-  // ████████ 测试隔离铁闸 L1b —— 绝对不可移除(2026-06-06 数据事故防再犯)████████
-  // CCV_LOG_DIR=tmp 只重定向 LOG_DIR,管不到本函数:updater.js 的 CACHE_DIR=
-  // join(getClaudeConfigDir(),'cc-viewer') 在测试里直指真实 ~/.claude/cc-viewer,
-  // branch-lib-updater.test.js 的 rmSync(CACHE_DIR,{recursive}) 曾因此把用户 40GB
-  // 历史日志整树删除(2026-06-06 第 1/4 次事故确证真凶)。settings.json、ensure-hooks、
-  // ~/.claude/* 展开全部派生于此 —— 测试态(node:test 注入 NODE_TEST_CONTEXT)未显式
-  // 设 CLAUDE_CONFIG_DIR 时,一律走进程私有临时目录,绝不解析到真实 ~/.claude。
-  // 单测:test/logdir-test-guard.test.js。
+  // ████████ Test isolation barrier L1b — DO NOT REMOVE (prevents data-loss regressions, 2026-06-06) ████████
+  // CCV_LOG_DIR=tmp only redirects LOG_DIR; it does not cover this function: updater.js's
+  // CACHE_DIR = join(getClaudeConfigDir(),'cc-viewer') resolves to the real ~/.claude/cc-viewer
+  // in tests, and branch-lib-updater.test.js's rmSync(CACHE_DIR,{recursive}) once destroyed a
+  // user's 40 GB log history because of this (confirmed root cause in 2026-06-06 incident 1/4).
+  // settings.json, ensure-hooks, ~/.claude/* expansion all derive from this function — when in
+  // test mode (node:test injects NODE_TEST_CONTEXT) without an explicit CLAUDE_CONFIG_DIR, always
+  // use a process-private temp directory; never resolve to the real ~/.claude.
+  // Unit test: test/logdir-test-guard.test.js.
   if (process.env.NODE_TEST_CONTEXT) {
     return join(tmpdir(), 'cc-viewer-test', `guard-cfg-${process.pid}-${threadId}`);
   }
@@ -45,54 +48,58 @@ function resolveLogDir() {
   const envDir = process.env.CCV_LOG_DIR;
   if (typeof envDir === 'string' && envDir.trim()) {
     const raw = envDir.trim();
-    // 允许通过 'tmp' 或 'temp' 关键字使用系统临时目录（常用于测试）
+    // Allow 'tmp' or 'temp' keyword to use system temp directory (common in tests)
     if (raw === 'tmp' || raw === 'temp') {
       return join(tmpdir(), 'cc-viewer-test', `${process.pid}-${threadId}`);
     }
     const expanded = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
     return resolve(expanded);
   }
-  // 测试隔离铁闸:node:test 环境(NODE_TEST_CONTEXT 由测试 runner 自动注入,spread env
-  // 的子进程会继承)下若未显式设 CCV_LOG_DIR,绝不解析到真实用户目录——强制进程私有临时
-  // 目录。2026-06-06 事故:无 env 的测试探针把真实 ~/.claude/cc-viewer 当 LOG_DIR,
-  // 清理逻辑将用户数据整树删除。任何测试运行不允许触碰在用的文件体系和本地存储。
+  // Test isolation barrier: in node:test environment (NODE_TEST_CONTEXT is auto-injected by the
+  // test runner and inherited by spawned child processes via spread env), if CCV_LOG_DIR is not
+  // explicitly set, never resolve to the real user directory — force a process-private temp
+  // directory. 2026-06-06 incident: a test probe with no env guard treated the real
+  // ~/.claude/cc-viewer as LOG_DIR, and cleanup logic wiped the entire user data tree.
+  // No test run is allowed to touch the live filesystem or local storage.
   if (process.env.NODE_TEST_CONTEXT) {
     return join(tmpdir(), 'cc-viewer-test', `guard-${process.pid}-${threadId}`);
   }
   return join(getClaudeConfigDir(), 'cc-viewer');
 }
 
-// 日志存储根目录（所有项目日志、偏好设置均存放于此）
-// 使用 let 以支持运行时通过 setLogDir() 修改（ES module live binding）
+// Log storage root directory (all project logs and preferences are stored here)
+// Uses `let` to support runtime modification via setLogDir() (ES module live binding)
 export let LOG_DIR = resolveLogDir();
 
 /**
- * 运行时修改日志存储根目录。
- * 支持 ~/... 展开。所有通过 `import { LOG_DIR }` 引用的模块会自动看到新值。
+ * Runtime modification of the log storage root directory.
+ * Supports ~/... expansion. All modules that reference `LOG_DIR` via `import { LOG_DIR }`
+ * will automatically see the updated value.
  */
 export function setLogDir(dir) {
   if (!dir || typeof dir !== 'string') return;
   const raw = dir.trim();
   if (!raw) return;
   const resolved = resolve(raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw);
-  // 安全：限制在 home 目录或 /tmp 下，防止写入系统目录
+  // Security: restrict to home directory or /tmp to prevent writes to system directories
   const home = homedir();
   if (!resolved.startsWith(home) && !resolved.startsWith('/tmp/')) return;
   LOG_DIR = resolved;
-  // workspace registry 文件位置随 LOG_DIR 变化,allowlist 缓存(含 registered workspaces)需失效。
-  // lazy import 避免循环依赖(file-access-policy 依赖 findcc 和 workspace-registry)。
+  // workspace registry file location changes with LOG_DIR; the allowlist cache (including
+  // registered workspaces) must be invalidated. Lazy import to avoid circular dependency
+  // (file-access-policy depends on findcc and workspace-registry).
   import('./server/lib/file-access-policy.js')
     .then(m => m.bumpWorkspacesVersion?.())
-    .catch(() => { /* CLI-only 入口可能未加载 policy 模块,无副作用即可 */ });
+    .catch(() => { /* CLI-only entry points may not have the policy module loaded; side-effect free */ });
 }
 
-// npm 包名候选列表（按优先级排列）
+// npm package name candidates (priority order)
 export const PACKAGES = ['@anthropic-ai/claude-code', '@ali/claude-code'];
 
-// npm 包内的入口文件（相对于包根目录）
+// Entry files within each npm package (relative to package root)
 export const CLI_ENTRY = 'cli.js';
 
-// native 二进制候选路径（~ 会在运行时展开为 homedir()）
+// Native binary name candidates (~ will be expanded to homedir() at runtime)
 const NATIVE_CANDIDATES = [
   '~/.claude/local/claude',
   '/usr/local/bin/claude',
@@ -100,27 +107,30 @@ const NATIVE_CANDIDATES = [
   '/opt/homebrew/bin/claude',
 ];
 
-// 用于 which/command -v 查找的命令名
+// Command names used for which/command -v lookup
 export const BINARY_NAME = 'claude';
 
-// 注入到 @anthropic-ai/claude-code/cli.js 顶部的 import 语句。
-// EXTERNAL CONTRACT: 走 bare specifier 经 package.json `exports` 解析 ——
-// 物理路径再改不用动这里；同步改 cli.js::removeCliJsInjection 的老 marker 迁移逻辑。
+// The import statement injected at the top of @anthropic-ai/claude-code/cli.js.
+// EXTERNAL CONTRACT: uses bare specifier resolved via package.json `exports` —
+// the physical path can change without touching this line; keep in sync with
+// cli.js::removeCliJsInjection's legacy marker migration logic.
 export const INJECT_IMPORT = "import 'cc-viewer/interceptor.js';";
 
-// 历史使用过的 INJECT_IMPORT 形式，用于卸载/重装时清理旧 marker。
-// 任何变更 INJECT_IMPORT 时都要把旧值加进来，否则老用户升级时新版本看不到老 marker
-// → 注入幂等失败，老注入残留 + 新注入失败 = 双重坏。
+// Historical INJECT_IMPORT forms, used for cleaning up old markers during uninstall/reinstall.
+// Whenever INJECT_IMPORT changes, add the old value here — otherwise existing users upgrading
+// won't have the old marker recognized by the new version, causing stale injection residue
+// plus new injection failure = double damage.
 //
-// Prune 策略：每条记录添加时的版本；当某条 legacy 添加后已过 4 个 major release
-// （即用户至少有机会跑 `ccv -logger` 多次自动 rewrite），可考虑删除。
-// 删除前检查 npm registry 还在使用旧版本的下载量。
+// Prune policy: each entry records the version when it was added. When a legacy entry has
+// been present for 4+ major releases (i.e. users have had at least several opportunities to
+// run `ccv -logger` for auto-rewrite), it can be considered for removal. Before deleting,
+// check whether the old version still has download volume on the npm registry.
 export const LEGACY_INJECT_IMPORTS = [
   // added in 1.6.273 — relative path form before bare-specifier migration
   "import '../../cc-viewer/interceptor.js';",
 ];
 
-// ============ 导出函数 ============
+// ============ Exported functions ============
 
 export function getGlobalNodeModulesDir() {
   try {
@@ -131,7 +141,7 @@ export function getGlobalNodeModulesDir() {
 }
 
 export function resolveCliPath() {
-  // 候选基础目录：本地 node_modules（cc-viewer 的同级）+ 全局 node_modules
+  // Candidate base directories: local node_modules (cc-viewer's sibling) + global node_modules
   const baseDirs = [NODE_MODULES];
   const globalRoot = getGlobalNodeModulesDir();
   if (globalRoot && globalRoot !== NODE_MODULES) {

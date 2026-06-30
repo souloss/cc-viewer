@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Windows NTFS + Defender 使每次异步 I/O 开销更大，默认 4 线程不够用
+// Windows NTFS + Defender increase per-async-IO overhead; default 4 threads aren't enough
 if (process.platform === 'win32' && !process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '16';
 }
@@ -19,8 +19,8 @@ import { createHardenedCleanup, installWinKeypressFallback } from './server/lib/
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
-// 注入 marker 常量定义在 server/lib/cli-inject.js（便于单元测试）；
-// 本文件仅 re-export 给 helper 与 hook 使用，保持现有行为。
+// Injection marker constants are defined in server/lib/cli-inject.js (for testability);
+// This file only re-exports them for use by helpers and hooks, preserving existing behavior.
 const INJECT_START = _INJECT_START;
 const INJECT_END = _INJECT_END;
 const INJECT_BLOCK = _buildInjectBlock(INJECT_IMPORT);
@@ -31,9 +31,9 @@ const SHELL_HOOK_END = '# <<< CC-Viewer Auto-Inject <<<';
 
 const cliPath = resolveCliPath();
 
-// 统一的"claude 找不到"错误提示：区分"Claude Code 2.x wrapper 装了但原生二进制
-// 没 ready（--ignore-scripts / --omit=optional / 某些 pnpm 配置）"和"claude 根本
-// 没装"两种情况，给出针对性的修复指引。
+// Unified "claude not found" error message: distinguishes between "Claude Code 2.x wrapper
+// installed but native binary not ready (--ignore-scripts / --omit=optional / certain pnpm
+// configurations)" and "claude not installed at all," giving targeted fix guidance.
 function reportClaudeNotFound(cliPathHint) {
   const globalRoot = getGlobalNodeModulesDir();
   if (hasClaude2xWrapper(globalRoot)) {
