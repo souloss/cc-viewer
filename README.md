@@ -10,13 +10,6 @@ If there are any critical bugs requiring fixes, please submit them via the issue
 
 Based on Claude Code, a Vibe Coding tool that distills and accumulates real development experience:
 
-1. Raise your capability ceiling: run /ultraPlan and /ultraReview locally, while avoiding fully exposing your project code to Claude's cloud;
-2. Multi-device compatibility: code on mobile devices (within your LAN), the web version adapts to all kinds of scenarios, easy to embed into browser extensions or OS split-screen, and native installers are provided;
-3. Complete log tracing: full Claude Code payload interception and analysis — ideal for logging, troubleshooting, learning, and reverse engineering;
-4. Shared learning and experience: lots of learning material and development know-how are baked in (see the "?" icons throughout the system);
-5. Native experience preserved: only enhances Claude Code's capabilities without making any substantive changes to the core, keeping the native experience intact;
-6. Third-party model support: compatible with deepseek-v4-\*, GLM 5.1, Kimi K2.6, with cc-switch built in so you can hot-swap third-party tools at any time;
-
 <img width="860" alt="cc-viewer — deploy once, share with every device" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-share.svg" />
 
 English | [简体中文](./docs/README.zh.md) | [繁體中文](./docs/README.zh-TW.md) | [한국어](./docs/README.ko.md) | [日本語](./docs/README.ja.md) | [Deutsch](./docs/README.de.md) | [Español](./docs/README.es.md) | [Français](./docs/README.fr.md) | [Italiano](./docs/README.it.md) | [Dansk](./docs/README.da.md) | [Polski](./docs/README.pl.md) | [Русский](./docs/README.ru.md) | [العربية](./docs/README.ar.md) | [Norsk](./docs/README.no.md) | [Português (Brasil)](./docs/README.pt-BR.md) | [ไทย](./docs/README.th.md) | [Türkçe](./docs/README.tr.md) | [Українська](./docs/README.uk.md)
@@ -164,7 +157,7 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 
     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
 
-    ![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left)
+    ![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer\&type=date\&legend=top-left)
   </picture>
 </a>
 
