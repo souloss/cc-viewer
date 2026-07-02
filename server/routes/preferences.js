@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../../findcc.js';
 import { PROFILE_PATH, _defaultConfig, getActiveProfileId, setActiveProfileForWorkspace, _loadProxyProfile } from '../interceptor.js';
+import { migrateProxyProfileList } from '../lib/interceptor-core.js';
 import { setLang } from '../i18n.js';
 import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manager.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
@@ -219,7 +220,19 @@ function claudeSettingsPost(req, res, parsedUrl, isLocal, deps) {
 
 function proxyProfilesGet(req, res, parsedUrl, isLocal, deps) {
   try {
-    const data = existsSync(PROFILE_PATH) ? JSON.parse(readFileSync(PROFILE_PATH, 'utf-8')) : deps.defaultProxyProfiles;
+    let data = existsSync(PROFILE_PATH) ? JSON.parse(readFileSync(PROFILE_PATH, 'utf-8')) : deps.defaultProxyProfiles;
+    // 旧配置一次性迁移（models/activeModel → ANTHROPIC_MODEL）；有变更则回写磁盘并刷新 active profile。
+    if (Array.isArray(data.profiles)) {
+      const { profiles: migrated, changed } = migrateProxyProfileList(data.profiles);
+      if (changed) {
+        data = { ...data, profiles: migrated };
+        try {
+          mkdirSync(dirname(PROFILE_PATH), { recursive: true });
+          writeFileSync(PROFILE_PATH, JSON.stringify(data, null, 2), { mode: 0o600 });
+          _loadProxyProfile();
+        } catch { /* 迁移落盘失败不阻塞 GET；下次仍会尝试 */ }
+      }
+    }
     // 用 interceptor.getActiveProfileId() 返回 effective active（workspace > profile.json.active > 'max'）
     const effectiveActive = getActiveProfileId();
     // 本机(127.0.0.1)= admin：下发明文 profile.apiKey 供本人在编辑表单(👁 折叠)里查阅/复制；已授权

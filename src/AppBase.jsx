@@ -11,7 +11,7 @@ import { SettingsContext } from './contexts/SettingsContext';
 import { formatTokenCount, filterRelevantRequests, isRelevantRequest, appendCacheLossMap, extractCachedContent } from './utils/helpers';
 import { snapToPreset, stepPreset } from './utils/displayScaleHelper';
 import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
-import { isMainAgent, isPostClearCheckpoint } from './utils/contentFilter';
+import { isMainAgent, isPostClearCheckpoint, isCompactContinuation } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
 import { publish as publishWorkflowUpdate } from './utils/workflowStore';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
@@ -471,23 +471,24 @@ class AppBase extends React.Component {
     this._maintainPinState(prevState);
   }
 
-  // 维护 pin：开关刚打开 → 强制重锁最新；尚未锁定（pin 为空）→ 惰性锁到最新；
-  // 切项目重 hydrate；pin 变化持久化。锁定后由 _flushPendingEntries 跟随本窗口实时新会话推进。
+  // 维护 pin：过滤开启时始终把 pin 跟随到「当前会话」（= 最新会话的稳定 id）；切项目重 hydrate；
+  // pin 变化持久化。「当前会话」以日志最新条目所属会话为准，不依赖界面 /clear 交互 —— 从新终端
+  // (如 Ghostty)启动的会话，重载/实时都能自动切过去（配合 _flushPendingEntries 的实时推进）。
   _maintainPinState(prevState) {
     const effOnly = this._effectiveOnlyCurrentSession();
-    const turnedOn = effOnly && !this._prevOnlyCurrent;
     this._prevOnlyCurrent = effOnly;
 
-    // _isHydratingPin：服务端 pin 的 GET 在途时，不要 lazy-lock（否则会抢在真值返回前误锁到最新）。
+    // _isHydratingPin：服务端 pin 的 GET 在途时，不要抢先推进（否则会在真值返回前误锁到最新）。
     if (effOnly && !this._isHydratingPin) {
       const sessions = this.state.mainAgentSessions;
       const last = sessions && sessions.length ? sessions[sessions.length - 1] : null;
       const latestId = getSessionStableId(last) || this._currentSessionId || null;
-      // turnedOn：开关刚打开，强制重锁到当前最新（即便已有 stale pin）。
-      // pin == null：初次加载 / 切项目清空后，惰性锁到最新（pin 非空后不再覆盖，由实时新会话推进）。
+      // 始终跟随最新会话（不再只在「开关刚打开 / pin 为空」时锁一次）：这样即便持久化的 pin
+      // 指向旧会话（cc-viewer 关闭期间新终端已启动，重开后 batch 重载出新会话），也会自动切到
+      // 最新会话。因为没有「手动锁定任意旧会话」的 UI，「当前会话」恒等于最新会话，此推进安全。
       // 不变式：切项目那一拍这里的乐观锁不会被持久化——下面同一趟的 _hydratePin() 会同步置
       // _isHydratingPin=true，把下一拍 persist 分支挡掉（由 hydrate 的服务端真值收口），故无需在此回写。
-      if (latestId && (turnedOn || this.state.pinnedSessionTs == null) && this.state.pinnedSessionTs !== latestId) {
+      if (latestId && this.state.pinnedSessionTs !== latestId) {
         this.setState({ pinnedSessionTs: latestId });
       }
     }
@@ -880,8 +881,9 @@ class AppBase extends React.Component {
               const pTail = p.apiKey.slice(-4);
               if (dcTail !== pTail) return false;
             }
-            // model 匹配
-            if (dc.model && p.activeModel && dc.model !== p.activeModel) return false;
+            // model 匹配（主模型优先，回退老 activeModel）
+            const pModel = p.ANTHROPIC_MODEL || p.activeModel;
+            if (dc.model && pModel && dc.model !== pModel) return false;
             return true;
           });
           if (match) {
@@ -1795,11 +1797,19 @@ class AppBase extends React.Component {
           const prevCount = prevMessages.length;
 
           const userId = entry.body.metadata?.user_id || null;
-          const sameUser = userId !== null && lastSession?.userId === userId;
-          // /clear 后首个 checkpoint：同 device 下 sameUser 永远 true，会让 isNewSession 失效，
+          // /clear 后首个 checkpoint：同 device 下 user_id 永远相同，会让 isNewSession 失效，
           // 导致 L1058 的 inheritance 把旧 session 的 _timestamp 灌到新 /clear 后的 msg 上。
           const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
-          const isNewSession = postClearCheckpoint || (!sameUser && prevCount > 0 && messages.length < prevCount * 0.5 && (prevCount - messages.length) > 4);
+          // 大幅缩短信号：新 checkpoint 的 messages 数骤降 —— 可能是 /compact 续写，也可能是
+          // 从新终端(如 Ghostty)启动的全新会话。同机器多终端 user_id 完全相同，sameUser 恒 true，
+          // 故【不能】再用 !sameUser 去 gate（那会把「新终端会话」误当同会话续写，pin 卡在旧会话
+          // → [对话] 显示混乱，正是本次修复的 bug）。改用 isCompactContinuation 精确排除 /compact：
+          //   - /compact 续写：msg[0] 是 summary → 命中 → 属同会话延续，不切；
+          //   - 新终端会话：msg[0] 是用户真实首个输入 → 不命中 → 触发新会话切换。
+          // 与 batch 路径(_processOneEntry)对齐：那边本就未 gate sameUser；此处补 /compact 守卫后
+          // 两路径对「新终端会话」判定一致（live 识别，重载也识别）。
+          const bigDrop = prevCount > 0 && messages.length < prevCount * 0.5 && (prevCount - messages.length) > 4;
+          const isNewSession = postClearCheckpoint || (bigDrop && !isCompactContinuation(entry));
 
           // SSE 实时流每条 entry 都是完整 request+response，不存在"中间态"；
           // 历史代码曾在此处 `if (isTransient) continue` 跳过极短 entry 防中间态污染，

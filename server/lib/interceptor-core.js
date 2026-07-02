@@ -504,3 +504,110 @@ export function replaceTopLevelModel(jsonStr, oldModel, newModel) {
   const replaced = needle.slice(0, needle.length - oldVal.length) + JSON.stringify(newModel);
   return jsonStr.slice(0, idx) + replaced + jsonStr.slice(idx + needle.length);
 }
+
+// proxy profile hot-switch 模型解析：按 request body 里 model 的家族名映射到 profile 的对应字段。
+// 家族用**大小写不敏感子串**匹配（/opus/i 等），只认这几个已知家族单词——
+// 因此 claude-opus-4-8、未来的 claude-opus-5 等任何版本都命中同一家族，版本升级无需重配。
+// 字段直接沿用 Claude Code 的环境变量名以保持一致：
+//   ANTHROPIC_MODEL              —— 主模型；body.model 含 "fable" / "mythos" 时映射到它
+//   ANTHROPIC_DEFAULT_OPUS_MODEL   —— body.model 含 "opus"
+//   ANTHROPIC_DEFAULT_SONNET_MODEL —— 含 "sonnet"
+//   ANTHROPIC_DEFAULT_HAIKU_MODEL  —— 含 "haiku"
+// 家族字段留空 = 该家族不改写（透传原始 model）。
+// 未识别家族（既不是 opus/sonnet/haiku 也不是 fable/mythos）不做兜底替换，原样透传。
+// 兼容旧数据：profile 未设任何新字段但有 activeModel（老结构）时，回退为旧的整体替换语义。
+// 返回目标模型字符串；无需改写（无目标 / 目标同旧值 / 入参非法 / 未识别家族）时返回 null。
+export function resolveProfileModel(oldModel, profile) {
+  if (typeof oldModel !== 'string' || !oldModel || !profile || typeof profile !== 'object') return null;
+  const opus = typeof profile.ANTHROPIC_DEFAULT_OPUS_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_OPUS_MODEL.trim() : '';
+  const sonnet = typeof profile.ANTHROPIC_DEFAULT_SONNET_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_SONNET_MODEL.trim() : '';
+  const haiku = typeof profile.ANTHROPIC_DEFAULT_HAIKU_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_HAIKU_MODEL.trim() : '';
+  const primary = typeof profile.ANTHROPIC_MODEL === 'string' ? profile.ANTHROPIC_MODEL.trim() : '';
+  const hasNew = !!(primary || opus || sonnet || haiku);
+
+  let target = '';
+  if (hasNew) {
+    if (/opus/i.test(oldModel)) target = opus;
+    else if (/sonnet/i.test(oldModel)) target = sonnet;
+    else if (/haiku/i.test(oldModel)) target = haiku;
+    else if (/fable/i.test(oldModel) || /mythos/i.test(oldModel)) target = primary; // 显式家族 → 主模型
+    // 未识别家族：target 保持 ''，下方返回 null（不替换、原样透传）
+  } else if (typeof profile.activeModel === 'string') {
+    target = profile.activeModel.trim(); // 旧数据整体替换语义
+  }
+
+  if (!target || target === oldModel) return null;
+  return target;
+}
+
+// 旧配置迁移：老 profile 用 { models:[], activeModel } 做整体替换（不分家族，所有请求都换成
+// activeModel）。新方案改用 ANTHROPIC_MODEL + 三个家族字段。为**忠实保留**旧的整体替换语义，
+// 把 activeModel 填入全部四个模型字段（仅填空缺项，不覆盖用户已设值），这样 opus/sonnet/haiku/
+// fable 各家族都仍命中同一模型；用户之后可在 UI 里按需拆分。丢弃遗留的 models / activeModel。
+// 幂等：无遗留字段时原样返回、changed=false。纯函数，不落盘；调用方决定是否持久化。
+export function migrateProxyProfile(p) {
+  if (!p || typeof p !== 'object') return { profile: p, changed: false };
+  const hasLegacy = ('activeModel' in p) || ('models' in p);
+  if (!hasLegacy) return { profile: p, changed: false };
+  const { models: _drop1, activeModel, ...rest } = p;
+  const out = { ...rest };
+  const am = typeof activeModel === 'string' ? activeModel.trim() : '';
+  if (am) {
+    // 保留整体替换：四个字段都回填 activeModel（已有值不动）
+    for (const k of ['ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']) {
+      if (!out[k]) out[k] = am;
+    }
+  }
+  return { profile: out, changed: true };
+}
+
+// 迁移整份 profiles 列表；返回 { profiles, changed }（任一 profile 变更即 changed=true）。
+export function migrateProxyProfileList(profiles) {
+  if (!Array.isArray(profiles)) return { profiles, changed: false };
+  let changed = false;
+  const migrated = profiles.map(p => {
+    const r = migrateProxyProfile(p);
+    if (r.changed) changed = true;
+    return r.profile;
+  });
+  return { profiles: migrated, changed };
+}
+
+// proxy profile hot-switch 支持强制 output_config.effort（对应 CLAUDE_CODE_EFFORT_LEVEL）。
+// 与 replaceTopLevelModel 同源思路：常见路径（body 里没有 output_config）走定向前插，
+// 避免对多 MB wire body 做 JSON.parse + 全量 re-stringify（-c 重启后 checkpoint 可达数十 MB）。
+//   - 前插：在顶层对象开括号 `{` 之后插入 `"output_config":{"effort":"<v>"}`（后跟逗号，除非对象为空）。
+//     顶层永远以 `{` 开头，插入后仍是合法 JSON；且 JSON 重复键"后者胜"，但此路径仅在
+//     调用方确认 body 无 output_config 时启用，不会产生重复键。
+//   - 合并：body 已有 output_config（罕见，如 CLI 传了 --effort）时回退整体 parse/stringify，
+//     把 effort 并入既有对象。此路径 O(n) 但极少触发，可接受。
+// effort 值域受限（low/medium/high/xhigh/max），非法值 → null（调用方跳过注入）。
+const _VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+export function injectOutputConfigEffort(jsonStr, effort, hasOutputConfig) {
+  if (typeof jsonStr !== 'string' || !jsonStr) return null;
+  if (typeof effort !== 'string' || !_VALID_EFFORTS.has(effort)) return null;
+  if (hasOutputConfig) {
+    // 已有 output_config：整体 parse/stringify 合并，保留既有子字段
+    try {
+      const obj = JSON.parse(jsonStr);
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+      if (!obj.output_config || typeof obj.output_config !== 'object' || Array.isArray(obj.output_config)) {
+        obj.output_config = {};
+      }
+      obj.output_config.effort = effort;
+      return JSON.stringify(obj);
+    } catch { return null; }
+  }
+  // 无 output_config：定向前插
+  const i = jsonStr.indexOf('{');
+  if (i === -1) return null;
+  // 顶层必须是对象：`{` 之前只允许空白，排除顶层数组（如 `[{...}]`）等把首个 `{` 误当顶层的情形。
+  // 与合并路径的 Array.isArray 守卫对称。真实 /v1/messages body 恒为顶层对象。
+  if (/\S/.test(jsonStr.slice(0, i))) return null;
+  // 探测开括号后的首个非空白字符：若是 `}`（空对象）则不追加逗号，避免尾逗号非法 JSON
+  const after = jsonStr.slice(i + 1);
+  const m = after.match(/^\s*(\S)/);
+  const needsComma = !!(m && m[1] !== '}');
+  const insert = `"output_config":{"effort":${JSON.stringify(effort)}}` + (needsComma ? ',' : '');
+  return jsonStr.slice(0, i + 1) + insert + jsonStr.slice(i + 1);
+}

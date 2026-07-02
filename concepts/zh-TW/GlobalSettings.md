@@ -163,10 +163,13 @@ claude() { ... }
 | `active` | 当前激活的配置 ID（`"max"` = 直连，无代理） |
 | `id` | 唯一标识 |
 | `name` | 显示名称 |
-| `baseURL` | 代理 API 地址（替换请求 origin） |
-| `apiKey` | 代理 API 密钥（替换认证头） |
-| `models` | 可用模型列表 |
-| `activeModel` | 当前选中的模型 |
+| `baseURL` | 代理 API 位址（替換請求 origin） |
+| `apiKey` | 代理 API 金鑰（替換認證標頭） |
+| `ANTHROPIC_MODEL` | 主模型（fable/mythos 家族映射到此） |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | opus 家族對應的模型（擴充） |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | sonnet 家族對應的模型（擴充） |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | haiku 家族對應的模型（擴充） |
+| `effort` | 強制的 `output_config.effort` 等級 |
 
 ## 九、插件系统
 

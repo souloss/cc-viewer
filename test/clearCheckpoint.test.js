@@ -4,7 +4,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPostClearCheckpoint } from '../src/utils/clearCheckpoint.js';
+import { isPostClearCheckpoint, isCompactContinuation } from '../src/utils/clearCheckpoint.js';
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -234,5 +234,69 @@ describe('isPostClearCheckpoint — real-world fixture parity (cc-viewer_2026042
     // 前置 session 是 deepseek 的 33 条
     assert.equal(isPostClearCheckpoint(realLikeEntry, 33), true,
       'L351 真实结构必须被识别为 post-/clear checkpoint');
+  });
+});
+
+// ─── isCompactContinuation ──────────────────────────────────────────────────
+// 区分「大幅缩短的 checkpoint」是 /compact 续写(同会话延续) 还是全新终端会话。
+// 同机器多终端 user_id 完全相同，无法据此区分，故靠 msg[0] 的 CLI 合成 summary 开头判定。
+
+describe('isCompactContinuation', () => {
+  const AUTO_COMPACT = 'This session is being continued from a previous conversation that ran out of context. The summary below...';
+  const MANUAL_COMPACT = 'Your task is to create a detailed summary of the conversation so far, paying close attention to...';
+
+  it('true — auto-compact continuation (array content)', () => {
+    const entry = { body: { messages: [userMsg([textBlock(AUTO_COMPACT)])] } };
+    assert.equal(isCompactContinuation(entry), true);
+  });
+
+  it('true — manual /compact summary prompt (array content)', () => {
+    const entry = { body: { messages: [userMsg([textBlock(MANUAL_COMPACT)])] } };
+    assert.equal(isCompactContinuation(entry), true);
+  });
+
+  it('true — string content form', () => {
+    const entry = { body: { messages: [{ role: 'user', content: AUTO_COMPACT }] } };
+    assert.equal(isCompactContinuation(entry), true);
+  });
+
+  it('true — leading whitespace before marker is tolerated', () => {
+    const entry = { body: { messages: [userMsg([textBlock('\n\n  ' + AUTO_COMPACT)])] } };
+    assert.equal(isCompactContinuation(entry), true);
+  });
+
+  it('true — marker split across multiple text blocks (concatenated)', () => {
+    const entry = { body: { messages: [userMsg([
+      textBlock('This session is being continued '),
+      textBlock('from a previous conversation ...'),
+    ])] } };
+    assert.equal(isCompactContinuation(entry), true);
+  });
+
+  it('false — fresh terminal session: genuine user first message', () => {
+    const entry = { body: { messages: [userMsg([textBlock('帮我看下这个 bug')])] } };
+    assert.equal(isCompactContinuation(entry), false);
+  });
+
+  it('false — marker appears mid-text, not at the start', () => {
+    const entry = { body: { messages: [userMsg([textBlock('note: This session is being continued from a previous conversation')])] } };
+    assert.equal(isCompactContinuation(entry), false);
+  });
+
+  it('false — /clear checkpoint (has clear marker, not a compact summary)', () => {
+    const entry = { body: { messages: [userMsg([textBlock(CLEAR_MARKER)])] } };
+    assert.equal(isCompactContinuation(entry), false);
+  });
+
+  it('false — msg[0] is not a user message', () => {
+    const entry = { body: { messages: [{ role: 'assistant', content: [textBlock(AUTO_COMPACT)] }] } };
+    assert.equal(isCompactContinuation(entry), false);
+  });
+
+  it('false — empty / missing messages', () => {
+    assert.equal(isCompactContinuation({ body: { messages: [] } }), false);
+    assert.equal(isCompactContinuation({ body: {} }), false);
+    assert.equal(isCompactContinuation(null), false);
+    assert.equal(isCompactContinuation(undefined), false);
   });
 });

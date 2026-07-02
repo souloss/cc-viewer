@@ -1,7 +1,15 @@
 # Changelog
 
-## 1.6.331 (2026-06-30)
+## 1.6.331 (2026-07-02)
 
+- fix(AskUserQuestion): 修复多问题 ask 弹窗在流式装配期空白（body 只由流式重建的 tool_use 块 portal 填充、大 payload 未到 content_block_stop 时 questions 为空）——新增 `resolveAskQuestions` 兜底，对当前 pending 的那条 ask 用权威 `pendingAsk.questions`，历史块/已完整块不变
+- test(AskUserQuestion): 新增 `resolveAskQuestions` 单测（streamed 空/更短用权威、历史块与非 owner 沿用 streamed、权威不更长不缩水、非法入参不抛）
+- fix(仅展示当前会话): 从新终端(如 Ghostty)启动的会话现在能被自动识别为「当前会话」，不再依赖界面 /clear 交互——实时链路的新会话判据去掉 `!sameUser` 门（同机器多终端 user_id 恒相同会永远失效），改用 `isCompactContinuation` 精确排除 /compact 续写；`_maintainPinState` 改为始终跟随最新会话，覆盖「cc-viewer 关闭期间新终端已启动、重开后」的场景
+- test(仅展示当前会话): 新增 `isCompactContinuation` 单测（auto/manual compact 命中、真实用户输入/中段命中/空输入不命中等）
+- feat(代理热切换): profile 新增 effort 配置（下拉 low/medium/high/xhigh/max，默认 max），命中的请求向 body 注入 `output_config.effort`（无 output_config 走定向前插避免解析巨型 body、已有则整体合并；排除 count_tokens/heartbeat）；`ui.proxy.effort` / `ui.proxy.effortDefault` 18 语言
+- feat(代理热切换): 模型配置由单一 activeModel 改为按 body.model 家族映射——ANTHROPIC_MODEL(fable/mythos/主模型) + 扩展项 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL；家族用大小写不敏感子串匹配、留空不改写、未识别家族透传；编辑表单平铺为 4 个输入框；旧 models/activeModel 数据在 GET 时自动迁移到 ANTHROPIC_MODEL；`ui.proxy.modelMapHint` 18 语言
+- fix(代理热切换): model 替换段误用 if 块级 `body` 变量（越界 ReferenceError 被 catch 吞，设了 model 时不改写且 proxyProfile 不记录）——改用函数级 requestEntry.body
+- test(代理热切换): 新增 `injectOutputConfigEffort` / `resolveProfileModel` / `migrateProxyProfile` 单测；interceptor-profile 补家族映射/留空透传/旧数据回退用例
 - refactor(root): translate inline documentation to English across core modules — migrate all JS/CSS comment blocks and ignore-file annotations from Chinese to English for consistent contributor-facing documentation; drop the mirrored zh section in CONTRIBUTING.md in favor of a single English version
 - fix(readme): update star-history link to use canonical hash-based URL format
 

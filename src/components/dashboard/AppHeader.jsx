@@ -28,7 +28,7 @@ import SkillsManagerModal from '../settings/SkillsManagerModal';
 import ProjectPrefsManagerModal from '../settings/ProjectPrefsManagerModal';
 import PluginModal from '../settings/PluginModal';
 import ProcessModal from '../settings/ProcessModal';
-import ProxyModal from '../settings/ProxyModal';
+import ProxyModal, { profileDisplayModel } from '../settings/ProxyModal';
 import SystemTextModal from '../settings/SystemTextModal';
 import VoicePackSettings from '../settings/VoicePackSettings';
 import ProjectAliasEditor from '../settings/ProjectAliasEditor';
@@ -245,7 +245,7 @@ class AppHeader extends React.Component {
     let proxy = null;
     if (activeProxyId && activeProxyId !== 'max') {
       const p = (proxyProfiles || []).find(x => x.id === activeProxyId);
-      if (p) proxy = { label: `${p.name}${p.activeModel ? ` · ${p.activeModel}` : ''}` };
+      if (p) proxy = { label: `${p.name}${profileDisplayModel(p) ? ` · ${profileDisplayModel(p)}` : ''}` };
     }
     const showThemeBlock = viewMode === 'chat' && cliMode && !isLocalLog && !!this.state.localUrl;
     const im = IM_PLATFORMS
@@ -1723,7 +1723,7 @@ class AppHeader extends React.Component {
             return p ? (
               <Tag className={styles.proxyProfileTag} onClick={() => this.setState({ proxyModalVisible: true })}>
                 <SwapOutlined className={styles.proxySwapIcon} />
-                {p.name}{p.activeModel ? ` · ${p.activeModel}` : ''}
+                {p.name}{profileDisplayModel(p) ? ` · ${profileDisplayModel(p)}` : ''}
               </Tag>
             ) : null;
           })()}

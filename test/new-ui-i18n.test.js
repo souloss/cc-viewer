@@ -26,6 +26,9 @@ function localeBlockOf(key) {
 const KEYS = [
   'ui.memoryOpenDir',   // 持久记忆「打开目录」按钮 (server/routes/files-fs.js openMemoryDir)
   'ui.proxy.editProxy', // 代理设置「编辑」独立 Modal 标题 (ProxyModal.jsx)
+  'ui.proxy.effort',        // 代理热切换 effort 下拉标签 (ProxyModal.jsx)
+  'ui.proxy.effortDefault', // 代理热切换 effort「默认不强制」选项 (ProxyModal.jsx)
+  'ui.proxy.modelMapHint',  // 代理热切换 扩展模型字段说明 (ProxyModal.jsx)
 ];
 
 describe('new UI key i18n coverage', () => {

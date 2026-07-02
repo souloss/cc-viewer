@@ -12,12 +12,37 @@ import MobileDrawerCloseButton from '../mobile/MobileDrawerCloseButton';
 // 风格:半受控(proxyProfiles/activeProxyId 是父级跨组件共享数据 → props 注入;
 // editingProxy/editForm 仅本 modal 用 → 内部 state)。受控风格判定原则见 PluginModal.jsx 头注释。
 // 不持有 proxy 数据本身（来自 AppBase state，通过 props 注入）；
-// 只持有交互 state：editingProxy（'__new__' / id / null）+ editForm 5-field 对象。
+// 只持有交互 state：editingProxy（'__new__' / id / null）+ editForm（name/baseURL/apiKey/effort + 4 个模型字段）。
 // open false→true / true→false 双向重置 editingProxy 与 editForm,避免重开残留上次表单。
 //
 // 删除确认改为受控 Modal（deleteConfirmTarget state）替代 Modal.confirm —— 后者 portal 到 body
 // 不受父 modal 关闭联动控制 (defensive review P2-2),且在 mobile zoom:0.6 容器下不缩放。
-const EMPTY_FORM = { name: '', baseURL: '', apiKey: '', models: '', activeModel: '' };
+const EMPTY_FORM = {
+  name: '', baseURL: '', apiKey: '', effort: 'max',
+  // 模型字段直接沿用 Claude Code 环境变量名；ANTHROPIC_MODEL=主模型(fable/mythos/未识别家族)，
+  // 其余三项为扩展配置(按 body.model 家族 opus/sonnet/haiku 匹配替换)。空 = 该家族不改写。
+  ANTHROPIC_MODEL: '',
+  ANTHROPIC_DEFAULT_OPUS_MODEL: '',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: '',
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: '',
+};
+
+// output_config.effort 可选值（对应 CLAUDE_CODE_EFFORT_LEVEL）；空串 = 不注入，透传原始请求。
+const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// 扩展模型字段（env 变量名直接作为 label）。ANTHROPIC_MODEL 单列在前，非扩展项。
+const EXTENDED_MODEL_FIELDS = ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+
+// profile 行/标签展示的代表模型：主模型优先，其次任一扩展家族字段，再回退老 activeModel（旧数据）。
+export function profileDisplayModel(p) {
+  if (!p) return '';
+  return p.ANTHROPIC_MODEL
+    || p.ANTHROPIC_DEFAULT_OPUS_MODEL
+    || p.ANTHROPIC_DEFAULT_SONNET_MODEL
+    || p.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    || p.activeModel
+    || '';
+}
 
 export default function ProxyModal({
   open,
@@ -43,7 +68,7 @@ export default function ProxyModal({
   const profiles = proxyProfiles || [];
   const activeId = activeProxyId || 'max';
 
-  // setEditForm 必须用 prev callback,否则 5 字段会被单字段更新覆盖丢字段
+  // setEditForm 必须用 prev callback,否则多字段会被单字段更新覆盖丢字段
   const updateField = (field, value) => {
     setEditForm(prev => ({ ...prev, [field]: value }));
   };
@@ -54,8 +79,12 @@ export default function ProxyModal({
       name: p.name || '',
       baseURL: p.baseURL || '',
       apiKey: p.apiKey || '',
-      models: (p.models || []).join(', '),
-      activeModel: p.activeModel || '',
+      effort: p.effort || '',
+      // 旧数据迁移：老 profile 只有 activeModel（整体替换）→ 预填到 ANTHROPIC_MODEL
+      ANTHROPIC_MODEL: p.ANTHROPIC_MODEL || p.activeModel || '',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: p.ANTHROPIC_DEFAULT_OPUS_MODEL || '',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: p.ANTHROPIC_DEFAULT_SONNET_MODEL || '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: p.ANTHROPIC_DEFAULT_HAIKU_MODEL || '',
     });
   };
 
@@ -96,20 +125,23 @@ export default function ProxyModal({
       message.warning(t('ui.proxy.requiredFields'));
       return;
     }
-    const models = (editForm.models || '').split(',').map(m => m.trim()).filter(Boolean);
     const updated = {
       id: editingProxy === '__new__' ? `proxy_${Date.now()}` : editingProxy,
       name: editForm.name.trim(),
       baseURL: editForm.baseURL.trim(),
       apiKey: editForm.apiKey.trim(),
-      models,
-      activeModel: editForm.activeModel || models[0] || '',
+      effort: editForm.effort || '',
+      ANTHROPIC_MODEL: (editForm.ANTHROPIC_MODEL || '').trim(),
+      ANTHROPIC_DEFAULT_OPUS_MODEL: (editForm.ANTHROPIC_DEFAULT_OPUS_MODEL || '').trim(),
+      ANTHROPIC_DEFAULT_SONNET_MODEL: (editForm.ANTHROPIC_DEFAULT_SONNET_MODEL || '').trim(),
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: (editForm.ANTHROPIC_DEFAULT_HAIKU_MODEL || '').trim(),
     };
     let newProfiles;
     if (editingProxy === '__new__') {
       newProfiles = [...profiles, updated];
     } else {
-      newProfiles = profiles.map(p => p.id === editingProxy ? { ...p, ...updated, id: p.id } : p);
+      // 直接以 updated 覆盖（不 spread 旧 p）—— 顺带清掉老 models/activeModel 遗留字段
+      newProfiles = profiles.map(p => p.id === editingProxy ? { ...updated, id: p.id } : p);
     }
     onProxyProfileChange({ active: activeId, profiles: newProfiles });
     setEditingProxy(null);
@@ -150,7 +182,8 @@ export default function ProxyModal({
                   {p.id !== 'max' && p.baseURL && (
                     <div className={styles.proxyItemDetail}>
                       {(() => { try { return new URL(p.baseURL).host; } catch { return p.baseURL; } })()}
-                      {p.activeModel ? ` · ${p.activeModel}` : (p.models?.length ? ` · ${p.models[0]}` : '')}
+                      {profileDisplayModel(p) ? ` · ${profileDisplayModel(p)}` : ''}
+                      {p.effort ? ` · effort: ${p.effort}` : ''}
                     </div>
                   )}
                 </div>
@@ -197,14 +230,22 @@ export default function ProxyModal({
       </div>
       <div className={styles.proxyEditDivider} />
       <div className={styles.proxyEditRow}>
-        <label>{t('ui.proxy.models')}</label>
-        <Input size="small" value={editForm.models} onChange={e => updateField('models', e.target.value)} placeholder="model-1, model-2" />
+        <label>ANTHROPIC_MODEL</label>
+        <Input size="small" value={editForm.ANTHROPIC_MODEL} onChange={e => updateField('ANTHROPIC_MODEL', e.target.value)} placeholder="model_name" />
       </div>
+      <div className={styles.proxyEditHint}>{t('ui.proxy.modelMapHint')}</div>
+      {EXTENDED_MODEL_FIELDS.map(f => (
+        <div className={styles.proxyEditRow} key={f}>
+          <label>{f}</label>
+          <Input size="small" value={editForm[f]} onChange={e => updateField(f, e.target.value)} placeholder="model_name" />
+        </div>
+      ))}
       <div className={styles.proxyEditRow}>
-        <label>{t('ui.proxy.activeModel')}</label>
-        <Select size="small" className={styles.fullWidthSelect} value={editForm.activeModel || undefined} onChange={v => updateField('activeModel', v)} placeholder={t('ui.proxy.activeModel')}>
-          {(editForm.models || '').split(',').map(m => m.trim()).filter(Boolean).map(m => (
-            <Select.Option key={m} value={m}>{m}</Select.Option>
+        <label>{t('ui.proxy.effort')}</label>
+        <Select size="small" className={styles.fullWidthSelect} value={editForm.effort || ''} onChange={v => updateField('effort', v)} allowClear onClear={() => updateField('effort', '')}>
+          <Select.Option value="">{t('ui.proxy.effortDefault')}</Select.Option>
+          {EFFORT_OPTIONS.map(e => (
+            <Select.Option key={e} value={e}>{`effort: ${e}`}</Select.Option>
           ))}
         </Select>
       </div>

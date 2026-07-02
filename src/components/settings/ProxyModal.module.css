@@ -115,6 +115,13 @@
   margin-left: 2px;
 }
 
+.proxyEditHint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+  margin: -2px 0 8px;
+}
+
 .proxyEditDivider {
   border-top: 1px dashed var(--border-secondary);
   margin: 10px 0 8px;

@@ -165,8 +165,11 @@ claude() { ... }
 | `name` | 显示名称 |
 | `baseURL` | 代理 API 地址（替换请求 origin） |
 | `apiKey` | 代理 API 密钥（替换认证头） |
-| `models` | 可用模型列表 |
-| `activeModel` | 当前选中的模型 |
+| `ANTHROPIC_MODEL` | 기본 모델(fable/mythos 계열이 여기로 매핑됨) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | opus 계열용 모델(확장) |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | sonnet 계열용 모델(확장) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | haiku 계열용 모델(확장) |
+| `effort` | 강제 적용할 `output_config.effort` 레벨 |
 
 ## 九、插件系统
 

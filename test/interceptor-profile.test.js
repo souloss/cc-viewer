@@ -4,7 +4,7 @@
  * 覆盖目标（setupInterceptor + 模块级状态机）：
  *   - _loadProxyProfile / getActiveProfileId / setActiveProfileForWorkspace（workspace + profile.json 双写）
  *   - proxy 请求改写：URL origin 替换（含 /v1 路径去重）、x-api-key / authorization 注入、
- *     以及 model 改写路径的**当前工作区行为**（见下方 BUG pin）
+ *     以及 model 家族改写（opus/sonnet/haiku → 对应字段，其余 → ANTHROPIC_MODEL，旧 activeModel 回退）
  *   - initForWorkspace（复用最近日志 / 新建）、resetWorkspace
  *   - resolveResumeChoice（continue / new 两分支）
  *   - delta storage：首条 mainAgent → checkpoint；append → delta 切片；in-place 末位替换 → 强制 checkpoint
@@ -12,12 +12,9 @@
  * 同 interceptor-fetch.test.js：CCV_PROXY_MODE=1 跳过自执行；手动 setupInterceptor()；
  * CCV_SYNC_WRITES=1 同步写盘便于断言。profile.json 写到 mod.PROFILE_PATH（与模块内常量一致）。
  *
- * === BUG pin（当前工作区行为，不改源码，仅锁定）===
- * interceptor.js L789 `body?.model` 中的 `body` 在 L554 是 `if/try` 块级作用域变量，
- * 到 L789（proxy 改写段）已离开作用域 → ReferenceError，被 L812 `catch {}` 吞掉。
- * 后果：当 _activeProfile.activeModel 被设置时，整个 proxy 改写 try 块在 model 段抛出，
- * 导致 (a) 上游 body 的 model **不会**被替换；(b) requestEntry.proxyProfile / proxyUrl
- * **不会**被写入（赋值在 catch 之后未执行）。本文件按此现状断言。
+ * 历史注记：model 改写段曾误用 if 块级 body 变量（越界 ReferenceError 被 catch 吞掉，导致
+ * 设了 activeModel 时 model 不替换、proxyProfile/proxyUrl 不记录）。现改用函数级 requestEntry.body
+ * 读旧值，该 BUG 已修复；下方用例断言修复后的正确行为。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -191,21 +188,54 @@ describe('proxy 请求改写（通过真实 fetch hook）', () => {
     assert.equal(lastFetchArgs[1].headers['x-api-key'], 'sk-force');
   });
 
-  it('BUG pin：activeModel 设置时 model 段抛 ReferenceError(body) → model 不替换 + proxyProfile 未记录', async () => {
+  it('legacy activeModel 设置时：model 被整体替换 + proxyProfile/proxyUrl 正常记录（BUG 已修）', async () => {
     writeProfile({ active: 'p1', profiles: [
       { id: 'p1', name: 'WithModel', baseURL: 'https://m.example.com', apiKey: 'sk-m', activeModel: 'TARGET-MODEL' },
     ] });
     mod._loadProxyProfile();
     await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-x', messages: [] });
-    // URL 仍被改写（URL 段在 model 段之前执行，未受影响）
+    // URL 被改写
     assert.equal(lastFetchArgs[0], 'https://m.example.com/v1/messages');
-    // 但 model 未被替换为 TARGET-MODEL（model 段抛错）
+    // model 被替换为 activeModel（旧数据回退语义）
     const upstreamBody = JSON.parse(lastFetchArgs[1].body);
-    assert.equal(upstreamBody.model, 'claude-x', 'BUG: model 未替换（body 越界引用抛错）');
-    // proxyProfile / proxyUrl 赋值在 catch 之后，未执行
+    assert.equal(upstreamBody.model, 'TARGET-MODEL');
+    // proxyProfile / proxyUrl 正常记录
     const entry = lastCompletedOf(mod.LOG_FILE);
-    assert.equal(entry.proxyProfile, undefined, 'BUG: proxyProfile 因抛错未记录');
-    assert.equal(entry.proxyUrl, undefined, 'BUG: proxyUrl 因抛错未记录');
+    assert.equal(entry.proxyProfile, 'WithModel');
+    assert.equal(entry.proxyUrl, 'https://m.example.com/v1/messages');
+  });
+
+  it('家族映射：opus/sonnet/haiku 各命中对应字段，未识别家族(fable)→ANTHROPIC_MODEL', async () => {
+    writeProfile({ active: 'p1', profiles: [
+      { id: 'p1', name: 'Fam', baseURL: 'https://m.example.com', apiKey: 'sk-m',
+        ANTHROPIC_MODEL: 'PRIMARY', ANTHROPIC_DEFAULT_OPUS_MODEL: 'OPUS-T',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'SONNET-T', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'HAIKU-T' },
+    ] });
+    mod._loadProxyProfile();
+    const cases = [
+      ['claude-opus-4-8', 'OPUS-T'],
+      ['claude-sonnet-4-6', 'SONNET-T'],
+      ['claude-3-5-haiku-20241022', 'HAIKU-T'],
+      ['claude-fable-5', 'PRIMARY'],
+    ];
+    for (const [wire, expected] of cases) {
+      await postJson('https://api.anthropic.com/v1/messages', { model: wire, messages: [] });
+      assert.equal(JSON.parse(lastFetchArgs[1].body).model, expected, `${wire} → ${expected}`);
+    }
+  });
+
+  it('家族字段留空 → 该家族不替换（透传原始 model）', async () => {
+    writeProfile({ active: 'p1', profiles: [
+      { id: 'p1', name: 'PartialFam', baseURL: 'https://m.example.com', apiKey: 'sk-m',
+        ANTHROPIC_MODEL: 'PRIMARY', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'HAIKU-T' },
+    ] });
+    mod._loadProxyProfile();
+    // opus 家族无字段 → 但有 ANTHROPIC_MODEL？不：家族命中 opus 走 opus 字段(空)→ 不替换
+    await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-8', messages: [] });
+    assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'claude-opus-4-8', 'opus 字段空 → 不替换');
+    // haiku 家族有字段 → 替换
+    await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-3-5-haiku', messages: [] });
+    assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'HAIKU-T');
   });
 
   it('恢复：清掉 activeProfile 后请求不再改写', async () => {

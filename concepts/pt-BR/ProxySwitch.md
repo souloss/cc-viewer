@@ -1,32 +1,38 @@
-# Hot-Switch Proxy
+# Proxy de Troca Rápida
 
-## Overview
+## Visão Geral
 
-Hot-Switch Proxy lets you dynamically redirect API requests to a different endpoint without restarting Claude Code. This is useful when using third-party API proxy services.
+O Proxy de Troca Rápida permite redirecionar dinamicamente as requisições de API para um endpoint diferente sem reiniciar o Claude Code. Isso é útil ao usar serviços de proxy de API de terceiros.
 
-> ⚠️ Do not use this feature if you are a Claude Max subscriber.
+> ⚠️ Não use este recurso se você for assinante do Claude Max.
 
-## Fields
+## Campos
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| **Name** | ✅ | Display name for this proxy, used to identify it |
-| **Base URL** | ✅ | Base URL of the API service (e.g. `https://api.example.com`). The original request origin will be replaced |
-| **API Key** | ✅ | API key for the proxy service, replaces the original authentication |
-| **Models** | ❌ | Comma-separated list of models supported by this proxy (e.g. `model-a, model-b`) |
-| **Active Model** | ❌ | Select the active model from the list. The `model` field in requests will be replaced |
+| Campo | Obrigatório | Descrição |
+|-------|-------------|-----------|
+| **Name** | ✅ | Nome de exibição deste proxy, usado para identificá-lo |
+| **Base URL** | ✅ | URL base do serviço de API (ex. `https://api.example.com`). A origem original da requisição será substituída |
+| **API Key** | ✅ | Chave de API do serviço de proxy, substitui a autenticação original |
+| **ANTHROPIC_MODEL** | ❌ | Modelo primário. Requisições cujo modelo pertence à família `fable` / `mythos` são reescritas para este |
+| **ANTHROPIC_DEFAULT_OPUS_MODEL** | ❌ | Estendido: requisições cujo modelo contém `opus` são reescritas para este |
+| **ANTHROPIC_DEFAULT_SONNET_MODEL** | ❌ | Estendido: requisições cujo modelo contém `sonnet` são reescritas para este |
+| **ANTHROPIC_DEFAULT_HAIKU_MODEL** | ❌ | Estendido: requisições cujo modelo contém `haiku` são reescritas para este |
+| **Effort Level** | ❌ | Injeta `output_config.effort` (`low`/`medium`/`high`/`xhigh`/`max`) no corpo da requisição. Deixe como "Default" para ignorar |
 
-## How It Works
+A correspondência de modelo é um teste de substring sem distinção entre maiúsculas e minúsculas no campo `model` da requisição, de modo que qualquer versão (ex. `claude-opus-4-8`, um futuro `claude-opus-5`) mapeia para a mesma família sem reconfiguração. Um campo de família vazio significa que essa família permanece inalterada; uma família não reconhecida passa sem modificação.
 
-When a proxy is active, `server/interceptor.js` performs the following before each API request:
+## Como Funciona
 
-1. **URL Rewrite** — Replaces the request origin with the proxy's Base URL
-2. **Auth Replace** — Replaces `x-api-key` or `Authorization` header with the proxy's API Key
-3. **Model Replace** — If an active model is set, replaces the `model` field in the request body
+Quando um proxy está ativo, o `server/interceptor.js` executa o seguinte antes de cada requisição de API:
 
-## Config File
+1. **URL Rewrite** — Substitui a origem da requisição pela Base URL do proxy
+2. **Auth Replace** — Substitui o cabeçalho `x-api-key` ou `Authorization` pela API Key do proxy
+3. **Model Replace** — Reescreve o campo `model` do corpo da requisição por família (opus/sonnet/haiku → o campo correspondente; fable/mythos → `ANTHROPIC_MODEL`)
+4. **Effort Inject** — Se um nível de effort estiver definido, injeta `output_config.effort` (ignorado para requisições `count_tokens` / heartbeat)
 
-Configuration is stored at `~/.claude/cc-viewer/profile.json`. Click the folder icon in the title to open the directory:
+## Arquivo de Configuração
+
+A configuração é armazenada em `~/.claude/cc-viewer/profile.json`. Clique no ícone de pasta no título para abrir o diretório:
 
 ```json
 {
@@ -38,13 +44,17 @@ Configuration is stored at `~/.claude/cc-viewer/profile.json`. Click the folder 
       "name": "My Proxy",
       "baseURL": "https://api.example.com",
       "apiKey": "sk-xxx",
-      "models": ["model-a", "model-b"],
-      "activeModel": "model-a"
+      "ANTHROPIC_MODEL": "model-primary",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "model-opus",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "model-sonnet",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model-haiku",
+      "effort": "max"
     }
   ]
 }
 ```
 
-- `active` — ID of the current profile. Set to `"max"` for direct connection (no proxy)
-- `profiles` — Profile list. `id: "max"` is built-in and cannot be deleted
-- Changes take effect within ~1.5 seconds (monitored via `fs.watchFile`), no restart needed
+- `active` — ID do perfil atual. Defina como `"max"` para conexão direta (sem proxy)
+- `profiles` — Lista de perfis. `id: "max"` é integrado e não pode ser excluído
+- Perfis legados que usam `models` / `activeModel` são migrados automaticamente para `ANTHROPIC_MODEL` no carregamento
+- As alterações entram em vigor em ~1,5 segundos (monitorado via `fs.watchFile`), sem necessidade de reiniciar

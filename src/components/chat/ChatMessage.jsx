@@ -17,7 +17,7 @@ import { apiUrl } from '../../utils/apiUrl';
 import { findUserImageRefs } from '../../utils/userImageRefs';
 import { isMobile, isIOS, isPad } from '../../env';
 import AskQuestionForm from './AskQuestionForm';
-import { hasOptionDescription } from '../../utils/askOptionDesc';
+import { hasOptionDescription, resolveAskQuestions } from '../../utils/askOptionDesc';
 import { ApprovalPortalContext } from './ApprovalPortalContext';
 import { shouldPortalAskForm } from '../../utils/askPortalMatcher';
 import { SettingsContext } from '../../contexts/SettingsContext';
@@ -181,6 +181,7 @@ class ChatMessage extends React.Component {
       p.planApprovalMap !== n.planApprovalMap || p.latestPlanContent !== n.latestPlanContent ||
       p.ptyPrompt !== n.ptyPrompt || p.cliMode !== n.cliMode ||
       p.lastPendingAskId !== n.lastPendingAskId || p.lastPendingPlanId !== n.lastPendingPlanId ||
+      p.pendingAsk !== n.pendingAsk ||
       p.activePlanPrompt !== n.activePlanPrompt || p.activeDangerousPrompt !== n.activeDangerousPrompt ||
       p.activePtyPlanId !== n.activePtyPlanId ||
       p.requestIndex !== n.requestIndex || p.cacheTotalTokens !== n.cacheTotalTokens || p.label !== n.label || p.isTeammate !== n.isTeammate ||
@@ -536,7 +537,9 @@ class ChatMessage extends React.Component {
   }
 
   _renderTool_AskQuestion(tu, inp) {
-      const questions = Array.isArray(inp.questions) ? inp.questions : [];
+      // streamed 块的 questions 在流式装配未完成时可能为空/不全；对「当前 pending」那条 ask 用
+      // 权威 pendingAsk.questions 兜底，避免大 payload（多问题）弹窗空白。详见 resolveAskQuestions。
+      const questions = resolveAskQuestions(inp.questions, tu.id, this.props.lastPendingAskId, this.props.pendingAsk);
       const { askAnswerMap, toolResultMap } = this.props;
       const selectedAnswers = askAnswerMap?.[tu.id] || {};
       // 四态：cancelled / rejected / answered / pending

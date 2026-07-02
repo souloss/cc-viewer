@@ -16,7 +16,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel } from './lib/interceptor-core.js';
+import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel } from './lib/interceptor-core.js';
 
 
 
@@ -77,7 +77,7 @@ export let _cachedHaikuModel = null;
 //     切换 active 只影响当前 ccv 进程的 workspace，不污染其他实例。
 // profile.json 存放在 LOG_DIR 下，受 --log-dir / CCV_LOG_DIR 影响
 const PROFILE_PATH = join(LOG_DIR, 'profile.json');
-let _activeProfile = null; // { id, name, baseURL?, apiKey?, models?, activeModel? }
+let _activeProfile = null; // { id, name, baseURL?, apiKey?, effort?, ANTHROPIC_MODEL?, ANTHROPIC_DEFAULT_OPUS_MODEL?, ANTHROPIC_DEFAULT_SONNET_MODEL?, ANTHROPIC_DEFAULT_HAIKU_MODEL?, activeModel?(legacy) }
 
 // 启动时捕获的原始配置（首次 API 请求时记录，不可变）
 let _defaultConfig = null; // { origin, authType, model }
@@ -838,31 +838,45 @@ export function setupInterceptor() {
             }
           }
         }
-        // 3. Model 替换 —— 避免对整条 wire body（-c 重启后全量 checkpoint 可达数十 MB）
-        //    二次 JSON.parse + 全量 re-stringify：用 L557 已解析的 body 读旧值，对原始
-        //    字符串做有界定向替换（唯一非歧义匹配才生效）；定位失败回退旧 parse 路径，
-        //    最坏退化为现状。注意不能复用 requestEntry.body 重建 wire —— delta 路径
-        //    （上方 needsCheckpoint=false 分支）已把它的 messages 改成增量切片。
-        if (_activeProfile.activeModel && _fetchOpts?.body) {
-          const _oldModel = (body && typeof body === 'object') ? body.model : undefined;
-          if (_oldModel === _activeProfile.activeModel) {
-            // 已是目标 model，跳过（旧路径会原样 re-stringify，对上游等价）
+        // 3. Model 替换 —— 按 body.model 家族名解析目标（opus/sonnet/haiku 各自字段，
+        //    fable/mythos/未识别 → ANTHROPIC_MODEL；旧数据回退 activeModel 整体替换）。
+        //    避免对整条 wire body（-c 重启后全量 checkpoint 可达数十 MB）二次 JSON.parse +
+        //    全量 re-stringify：用 requestEntry.body 读旧值（函数级作用域；行 606 的 body 是
+        //    if 块级变量，此处已越界——历史 BUG），对原始字符串做有界定向替换（唯一非歧义匹配
+        //    才生效）；定位失败回退旧 parse 路径。注意只读 .model：delta 路径只改 .messages，
+        //    不能整体复用 requestEntry.body 重建 wire。
+        const _rb = requestEntry.body;
+        const _oldModel = (_rb && typeof _rb === 'object' && typeof _rb.model === 'string') ? _rb.model : undefined;
+        const _targetModel = _oldModel ? resolveProfileModel(_oldModel, _activeProfile) : null;
+        if (_targetModel && _fetchOpts?.body) {
+          const _replaced = (typeof _fetchOpts.body === 'string')
+            ? replaceTopLevelModel(_fetchOpts.body, _oldModel, _targetModel)
+            : null;
+          if (_replaced !== null) {
+            _fetchOpts = { ..._fetchOpts, body: _replaced };
           } else {
-            const _replaced = (typeof _fetchOpts.body === 'string' && typeof _oldModel === 'string')
-              ? replaceTopLevelModel(_fetchOpts.body, _oldModel, _activeProfile.activeModel)
-              : null;
-            if (_replaced !== null) {
-              _fetchOpts = { ..._fetchOpts, body: _replaced };
-            } else {
-              try {
-                const _b = JSON.parse(_fetchOpts.body);
-                if (_b.model) {
-                  _b.model = _activeProfile.activeModel;
-                  _fetchOpts = { ..._fetchOpts, body: JSON.stringify(_b) };
-                }
-              } catch { }
-            }
+            try {
+              const _b = JSON.parse(_fetchOpts.body);
+              if (_b.model) {
+                _b.model = _targetModel;
+                _fetchOpts = { ..._fetchOpts, body: JSON.stringify(_b) };
+              }
+            } catch { }
           }
+        }
+        // 4. Effort 注入 —— 强制 output_config.effort（对应 CLAUDE_CODE_EFFORT_LEVEL）。
+        //    在 model 替换之后执行，操作 _fetchOpts.body 的最新形态；仅当 profile 显式设置了
+        //    合法 effort 才注入。排除 count_tokens / heartbeat：这些端点可能拒绝未知字段（400），
+        //    且 output_config 对它们无意义。hasOutputConfig 优先用 requestEntry.body（函数级作用域，
+        //    行 606 的 body 在此已越界）判定；解析失败退化为截断字符串时，回退到对 wire 串扫描
+        //    "output_config"（避免误走前插路径产生重复键 → JSON "后者胜" 把注入的 effort 丢掉）。
+        if (_activeProfile.effort && typeof _fetchOpts?.body === 'string' &&
+            !requestEntry.isCountTokens && !requestEntry.isHeartbeat) {
+          const _hasOutputConfig = (_rb && typeof _rb === 'object')
+            ? (!!_rb.output_config && typeof _rb.output_config === 'object')
+            : _fetchOpts.body.includes('"output_config"');
+          const _injected = injectOutputConfigEffort(_fetchOpts.body, _activeProfile.effort, _hasOutputConfig);
+          if (_injected !== null) _fetchOpts = { ..._fetchOpts, body: _injected };
         }
         // 记录 proxy 信息到日志条目
         requestEntry.proxyProfile = _activeProfile.name;

@@ -165,8 +165,11 @@ claude() { ... }
 | `name` | 显示名称 |
 | `baseURL` | 代理 API 地址（替换请求 origin） |
 | `apiKey` | 代理 API 密钥（替换认证头） |
-| `models` | 可用模型列表 |
-| `activeModel` | 当前选中的模型 |
+| `ANTHROPIC_MODEL` | プライマリモデル（fable/mythos ファミリーはここにマッピング） |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | opus ファミリー向けのモデル（拡張） |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | sonnet ファミリー向けのモデル（拡張） |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | haiku ファミリー向けのモデル（拡張） |
+| `effort` | 強制する `output_config.effort` レベル |
 
 ## 九、插件系统
 

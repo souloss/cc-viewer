@@ -168,8 +168,11 @@ Stored in `<log_dir>/profile.json`, managed via the "Proxy Switch" panel in the 
 | `name` | Display name |
 | `baseURL` | Proxy API address (replaces request origin) |
 | `apiKey` | Proxy API key (replaces auth headers) |
-| `models` | Available model list |
-| `activeModel` | Currently selected model |
+| `ANTHROPIC_MODEL` | Primary model (fable/mythos family maps here) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | Model for the opus family (extended) |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model for the sonnet family (extended) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Model for the haiku family (extended) |
+| `effort` | Forced `output_config.effort` level |
 
 ## 9. Plugin System
 
