@@ -10,6 +10,7 @@
 - feat(代理热切换): 模型配置由单一 activeModel 改为按 body.model 家族映射——ANTHROPIC_MODEL(fable/mythos/主模型) + 扩展项 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL；家族用大小写不敏感子串匹配、留空不改写、未识别家族透传；编辑表单平铺为 4 个输入框；旧 models/activeModel 数据在 GET 时自动迁移到 ANTHROPIC_MODEL；`ui.proxy.modelMapHint` 18 语言
 - fix(代理热切换): model 替换段误用 if 块级 `body` 变量（越界 ReferenceError 被 catch 吞，设了 model 时不改写且 proxyProfile 不记录）——改用函数级 requestEntry.body
 - test(代理热切换): 新增 `injectOutputConfigEffort` / `resolveProfileModel` / `migrateProxyProfile` 单测；interceptor-profile 补家族映射/留空透传/旧数据回退用例
+- docs(svg): add `docs/cc-viewer-proxy.svg` — animated SMIL explainer of the wire-level capture pipeline (patched `globalThis.fetch` tee: one response copy passes through to the CLI untouched, one is archived to `~/.claude/cc-viewer/<project>/*.jsonl`) and of packet decomposition into Tools → System Prompt → Messages panels (cache-prefix order); highlights that the full system prompt and tool JSON-Schemas exist only on the wire, not in local transcripts; standalone asset in the visual language of `cc-viewer-share.svg`, not yet embedded in any README
 - refactor(root): translate inline documentation to English across core modules — migrate all JS/CSS comment blocks and ignore-file annotations from Chinese to English for consistent contributor-facing documentation; drop the mirrored zh section in CONTRIBUTING.md in favor of a single English version
 - fix(readme): update star-history link to use canonical hash-based URL format
 
