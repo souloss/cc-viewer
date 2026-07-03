@@ -898,3 +898,55 @@ describe('internEntryBigFields with messages tool_result intern', () => {
     assert.equal(out, entry, 'no work → no clone');
   });
 });
+
+// ─── _compactContinuation stamping ───────────────────────────────────────────
+// The slimmer empties body.messages of superseded entries, after which
+// isCompactContinuation() can no longer detect a /compact summary. Both slimmers
+// stamp entry._compactContinuation while the messages are still present, so
+// isSessionBoundary (clearCheckpoint.js) can trust the flag on slimmed entries.
+
+describe('_compactContinuation stamping', () => {
+  const COMPACT_TEXT = 'This session is being continued from a previous conversation that ran out of context.';
+
+  function compactEntry(msgCount) {
+    const e = makeMainAgent(msgCount);
+    e.body.messages[0] = { role: 'user', content: [{ type: 'text', text: COMPACT_TEXT }] };
+    return e;
+  }
+
+  it('batch slimmer stamps true on compact continuations, false on plain entries', () => {
+    const slimmer = createEntrySlimmer(isMainAgent);
+    const entries = [];
+    const e1 = makeMainAgent(30);
+    slimmer.process(e1, entries, 0); entries.push(e1);
+    const e2 = compactEntry(10);
+    slimmer.process(e2, entries, 1); entries.push(e2);
+    assert.equal(e1._compactContinuation, false);
+    assert.equal(e2._compactContinuation, true);
+  });
+
+  it('batch slimmer: flag survives after the entry is slimmed by a follow-up', () => {
+    const slimmer = createEntrySlimmer(isMainAgent);
+    const entries = [];
+    const e1 = makeMainAgent(30);
+    slimmer.process(e1, entries, 0); entries.push(e1);
+    const e2 = compactEntry(10);
+    slimmer.process(e2, entries, 1); entries.push(e2);
+    const e3 = makeMainAgent(12);
+    slimmer.process(e3, entries, 2); entries.push(e3);
+    assert.equal(e2._slimmed, true, 'follow-up entry must slim the compact entry');
+    assert.equal(e2.body.messages.length, 0, 'messages emptied by the slim pass');
+    assert.equal(e2._compactContinuation, true, 'flag stamped before messages were emptied');
+  });
+
+  it('incremental slimmer stamps the flag too (warm-cache re-ingest path)', () => {
+    const slimmer = createIncrementalSlimmer(isMainAgent);
+    const requests = [];
+    const e1 = makeMainAgent(30);
+    slimmer.processEntry(e1, requests, 0); requests.push(e1);
+    const e2 = compactEntry(10);
+    slimmer.processEntry(e2, requests, 1); requests.push(e2);
+    assert.equal(e2._compactContinuation, true);
+    assert.equal(e1._compactContinuation, false);
+  });
+});

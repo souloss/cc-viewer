@@ -11,14 +11,14 @@ import { SettingsContext } from './contexts/SettingsContext';
 import { formatTokenCount, filterRelevantRequests, isRelevantRequest, appendCacheLossMap, extractCachedContent } from './utils/helpers';
 import { snapToPreset, stepPreset } from './utils/displayScaleHelper';
 import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
-import { isMainAgent, isPostClearCheckpoint, isCompactContinuation } from './utils/contentFilter';
+import { isMainAgent, isSessionBoundary } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
 import { publish as publishWorkflowUpdate } from './utils/workflowStore';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
 import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries } from './utils/entryCache';
-import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace, getSessionStableId, resolveDisplaySessions } from './utils/sessionManager';
+import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace, getSessionStableId, resolveDisplaySessions, getLatestSessionByActivity, resolveHydratedPin, runPinHydration, applyBatchEntryTimestamps } from './utils/sessionManager';
 import { mergeMainAgentSessions as _mergeMainAgentSessions, isMergeBlockedEntry } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
 import { createEntrySlimmer, createIncrementalSlimmer, restoreSlimmedEntry, internEntryBigFields } from './utils/entry-slim.js';
@@ -183,10 +183,11 @@ class AppBase extends React.Component {
     // pin 竞态守卫（_maintainPinState/_hydratePin/session_pin SSE 用）：
     //  _isHydratingPin   — 服务端 pin 的 GET 在途；期间禁 lazy-lock + 禁 persist，防抢在真值返回前误锁/回写。
     //  _applyingRemotePin — 正在采纳服务端值（hydrate/SSE）；期间禁 persist，防把服务端值当本地改动回 POST（防回环）。
-    //  _prevOnlyCurrent  — 上一次「仅展示当前会话」的生效值，用于识别开关「刚打开」需强制重锁最新。
+    //  _hydratePinSeq    — monotonic token per hydrate round; a GET that resolves after a
+    //                      newer hydrate started (project switch, another reconnect) is discarded.
     this._isHydratingPin = false;
     this._applyingRemotePin = false;
-    this._prevOnlyCurrent = false;
+    this._hydratePinSeq = 0;
     // 跟踪上一次 mainAgent entry 的 timestamp，给新增 assistant msg 赋 _generatedTs（生成时 ts）。
     // 解决 bubble 时间标签晚一拍的 bug：assistant 响应是上一次 API 调用产出的，
     // 被这次 API 调用带进 body.messages，旧逻辑统一赋 entry.timestamp 导致显示成"下一次 ts"。
@@ -419,6 +420,14 @@ class AppBase extends React.Component {
     return s;
   }
 
+  // Single definition of "the current session's stable id" — used by follow-latest
+  // (_maintainPinState), hydrate adoption (_hydratePin), and the session_pin SSE
+  // listener. Keep all three on this helper so the derivation can never drift
+  // between the paths again (that divergence class is the bug this fixes).
+  _derivedLatestId() {
+    return getSessionStableId(getLatestSessionByActivity(this.state.mainAgentSessions));
+  }
+
   // 一次性清理旧版浏览器本地 pin（ccv_pinnedSession_<项目>）。pin 已改服务端存储，这些键不再使用，
   // 历史上每访问一个项目就攒一个、永不回收。mount 时调用一次即可。
   _cleanupLegacyPinKeys() {
@@ -449,21 +458,35 @@ class AppBase extends React.Component {
   // 从服务端读回 pin（刷新/切项目/重连后恢复）。异步：hydrate 在途时置 _isHydratingPin，
   // 抑制 _maintainPinState 的 lazy-lock / persist，避免抢在 GET 返回前误锁并 POST 覆盖服务端真值。
   // 采纳服务端值时置 _applyingRemotePin，避免被 persist 分支当成本地改动回写。
+  //
+  // Orchestration lives in runPinHydration (sessionManager.js) so the race-sensitive
+  // ordering is unit-tested: a stale server pin loses to the locally derived latest
+  // when the toggle is on (resolveHydratedPin); a superseded GET (newer hydrate
+  // started meanwhile) is discarded without touching the gate; and after settling,
+  // the gate is cleared BEFORE _maintainPinState(null) re-runs follow-latest — so a
+  // reconnect on an idle stream self-heals instead of sticking to a stale pin.
   _hydratePin() {
     if (this._isLocalLog) return;
+    const seq = ++this._hydratePinSeq;
     this._isHydratingPin = true;
-    fetch(apiUrl('/api/session-pin'))
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        const raw = data && data.pinnedSessionId;
-        const val = (typeof raw === 'string' && raw) ? raw : null;
-        if (val !== this.state.pinnedSessionTs) {
-          this._applyingRemotePin = true;
-          this.setState({ pinnedSessionTs: val }, () => { this._applyingRemotePin = false; });
-        }
-      })
-      .catch(() => {})
-      .finally(() => { this._isHydratingPin = false; });
+    runPinHydration({
+      fetchPin: () => fetch(apiUrl('/api/session-pin'))
+        .then(res => res.ok ? res.json() : null)
+        .then(data => data && data.pinnedSessionId),
+      // Unmount counts as supersession: a GET resolving after teardown must not
+      // setState (adopt/self-heal) or clear a gate nobody owns anymore.
+      isCurrent: () => seq === this._hydratePinSeq && !this._unmounted,
+      getDerived: () => this._derivedLatestId(),
+      effOnly: () => this._effectiveOnlyCurrentSession(),
+      getLocalPin: () => this.state.pinnedSessionTs,
+      adopt: (val) => {
+        this._applyingRemotePin = true;
+        this.setState({ pinnedSessionTs: val }, () => { this._applyingRemotePin = false; });
+      },
+      persistLocal: () => this._persistPin(),
+      clearGate: () => { this._isHydratingPin = false; },
+      selfHeal: () => this._maintainPinState(null),
+    });
   }
 
   // App / Mobile 子类的 componentDidUpdate 都 `super.componentDidUpdate(...)`，故 pin 维护集中在此。
@@ -476,13 +499,14 @@ class AppBase extends React.Component {
   // (如 Ghostty)启动的会话，重载/实时都能自动切过去（配合 _flushPendingEntries 的实时推进）。
   _maintainPinState(prevState) {
     const effOnly = this._effectiveOnlyCurrentSession();
-    this._prevOnlyCurrent = effOnly;
 
     // _isHydratingPin：服务端 pin 的 GET 在途时，不要抢先推进（否则会在真值返回前误锁到最新）。
     if (effOnly && !this._isHydratingPin) {
-      const sessions = this.state.mainAgentSessions;
-      const last = sessions && sessions.length ? sessions[sessions.length - 1] : null;
-      const latestId = getSessionStableId(last) || this._currentSessionId || null;
+      // "Current session" = newest ACTIVITY among hot sessions, NOT the last list
+      // element: mainAgentSessions is insertion-ordered, and with interleaved
+      // multi-terminal sessions or a truncated reconnect replay the tail is often
+      // an old session — following it anchored (and persisted) the wrong pin.
+      const latestId = this._derivedLatestId() || this._currentSessionId || null;
       // 始终跟随最新会话（不再只在「开关刚打开 / pin 为空」时锁一次）：这样即便持久化的 pin
       // 指向旧会话（cc-viewer 关闭期间新终端已启动，重开后 batch 重载出新会话），也会自动切到
       // 最新会话。因为没有「手动锁定任意旧会话」的 UI，「当前会话」恒等于最新会话，此推进安全。
@@ -557,55 +581,14 @@ class AppBase extends React.Component {
 
     // assignTimestamps + buildSessions（仅 mainAgent）
     if (isMainAgent(entry) && entry.body && Array.isArray(entry.body.messages)) {
-      const messages = entry.body.messages;
-      const count = entry._messageCount || messages.length;
-      const userId = entry.body.metadata?.user_id || null;
-      const timestamp = entry.timestamp || new Date().toISOString();
-
-      const prevCount = st.timestamps.length;
-      // /clear 后的首个 checkpoint：必须当成新会话起点，绕过 transient 过滤。
-      // 否则 delta 重建后第一个条目（count=1）会被 isTransient 吞掉，
-      // 导致 /clear 标记+用户输入的 _timestamp 被后面第一个 count>4 的条目"挪走"。
-      const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
-      const isNewSession = postClearCheckpoint || (prevCount > 0 && (
-        (count < prevCount * 0.5 && (prevCount - count) > 4) ||
-        (st.prevUserId && userId && userId !== st.prevUserId)
-      ));
-      // Transient 保护：极短 entry（<=4 msgs）在长对话后不应重置 timestamps 累积
-      // 这些通常是中间态请求（request body 只有 user message，尚未拿到 response）。
-      // postClearCheckpoint 是真实的会话起点，必须豁免。
-      const isTransient = isNewSession && !postClearCheckpoint && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
-      if (isNewSession && !isTransient) {
-        st.currentSessionId = timestamp;
-        st.timestamps = [];
-        st.generatedTimestamps = [];
-        st.prevMainAgentTs = null;       // 新 session 起点：reset，防跨 session 串场
-      } else if (st.currentSessionId === null) {
-        st.currentSessionId = timestamp;
-      }
-      // 扩展两个平行数组：新增 position 拿当前 entry 的 ts；并记录 prevMainAgentTs
-      // 作为该位置「首次加入时上一个 mainAgent 的 ts」。
-      // 注意：不在 push 时 gate isAsst —— offline 批量路径下，本次 entry 可能是 _slimmed
-      // （body.messages=[]）只靠 _messageCount 占位，messages[j] 是 undefined 会让 isAsst=false
-      // 永远 push null，导致后续 unslimmed checkpoint 的 inner loop 无法 backfill _generatedTs。
-      // 角色判断挪到 inner loop（msg 对象一定存在那时），用 m.role 在写入时 gate。
-      for (let j = st.timestamps.length; j < count; j++) {
-        st.timestamps.push(timestamp);
-        st.generatedTimestamps.push(st.prevMainAgentTs || null);
-      }
-      if (messages.length > 0) {
-        for (let j = 0; j < messages.length; j++) {
-          const m = messages[j];
-          if (!m) continue;
-          m._timestamp = st.timestamps[j];
-          if (m.role === 'assistant' && st.generatedTimestamps[j]) {
-            m._generatedTs = st.generatedTimestamps[j];
-          }
-        }
-      }
-      st.prevUserId = userId;
-      // 记录本次 mainAgent entry 的 ts，下一次循环用作 prevMainAgentTs
-      st.prevMainAgentTs = timestamp;
+      // Boundary detection + positional timestamp accumulation extracted to
+      // applyBatchEntryTimestamps (sessionManager.js) — shares isSessionBoundary
+      // with the live SSE path (_flushPendingEntries) so batch reload and live
+      // streaming segment sessions identically (the "only show current session"
+      // pin depends on stable ids matching across the two paths).
+      // KEEP IN SYNC: test/session-boundary-parity.test.js runBatchLeg mirrors
+      // this slim → applyBatchEntryTimestamps → merge call order.
+      applyBatchEntryTimestamps(st, entry);
 
       // session 合并（跳过 _slimmed；批量路径额外跳过 stale/broken/inProgress，见谓词 JSDoc）
       if (!entry._slimmed && !isMergeBlockedEntry(entry, { batch: true })) {
@@ -1542,15 +1525,19 @@ class AppBase extends React.Component {
       });
       // session_pin SSE — 本进程任一端改了「当前会话」pin 后广播，让同实例多端（电脑+手机）实时一致。
       // 采纳服务端值时置 _applyingRemotePin，避免 _maintainPinState 把它当本地改动回 POST（防回环）。
+      // A broadcast value that mismatches the locally derived latest is rejected via
+      // resolveHydratedPin (another client may have derived a stale "latest"). No
+      // POST-back on reject — re-persisting inside the broadcast handler could
+      // ping-pong between clients; healing flows through _maintainPinState's
+      // normal persist path instead.
       this.eventSource.addEventListener('session_pin', (event) => {
         this._resetSSETimeout();
         try {
           const data = JSON.parse(event?.data || '{}');
-          const raw = data.pinnedSessionId;
-          const val = (typeof raw === 'string' && raw) ? raw : null;
-          if (val !== this.state.pinnedSessionTs) {
+          const r = resolveHydratedPin(data.pinnedSessionId, this._derivedLatestId(), this._effectiveOnlyCurrentSession());
+          if (r.adopt && r.value !== this.state.pinnedSessionTs) {
             this._applyingRemotePin = true;
-            this.setState({ pinnedSessionTs: val }, () => { this._applyingRemotePin = false; });
+            this.setState({ pinnedSessionTs: r.value }, () => { this._applyingRemotePin = false; });
           }
         } catch { /* tolerate parse error */ }
       });
@@ -1797,19 +1784,23 @@ class AppBase extends React.Component {
           const prevCount = prevMessages.length;
 
           const userId = entry.body.metadata?.user_id || null;
-          // /clear 后首个 checkpoint：同 device 下 user_id 永远相同，会让 isNewSession 失效，
-          // 导致 L1058 的 inheritance 把旧 session 的 _timestamp 灌到新 /clear 后的 msg 上。
-          const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
-          // 大幅缩短信号：新 checkpoint 的 messages 数骤降 —— 可能是 /compact 续写，也可能是
-          // 从新终端(如 Ghostty)启动的全新会话。同机器多终端 user_id 完全相同，sameUser 恒 true，
-          // 故【不能】再用 !sameUser 去 gate（那会把「新终端会话」误当同会话续写，pin 卡在旧会话
-          // → [对话] 显示混乱，正是本次修复的 bug）。改用 isCompactContinuation 精确排除 /compact：
-          //   - /compact 续写：msg[0] 是 summary → 命中 → 属同会话延续，不切；
-          //   - 新终端会话：msg[0] 是用户真实首个输入 → 不命中 → 触发新会话切换。
-          // 与 batch 路径(_processOneEntry)对齐：那边本就未 gate sameUser；此处补 /compact 守卫后
-          // 两路径对「新终端会话」判定一致（live 识别，重载也识别）。
-          const bigDrop = prevCount > 0 && messages.length < prevCount * 0.5 && (prevCount - messages.length) > 4;
-          const isNewSession = postClearCheckpoint || (bigDrop && !isCompactContinuation(entry));
+          // Session-boundary detection shares isSessionBoundary (clearCheckpoint.js)
+          // with the batch path (applyBatchEntryTimestamps) so live streaming and
+          // reload segment sessions identically: post-/clear checkpoint always
+          // splits; a big count drop splits unless it's a /compact continuation
+          // (same-machine multi-terminal user_id is identical, so the summary
+          // msg[0] is the only reliable /compact-vs-new-terminal discriminator);
+          // a user_id change splits (previously batch-only — without it, merge
+          // appended a new session while timestamps were inherited positionally,
+          // yielding two sessions with the SAME stable id and a mis-resolved pin).
+          // KEEP IN SYNC: test/session-boundary-parity.test.js runLiveLeg mirrors
+          // this boundary → assignMessageTimestamps → in-place/merge call order.
+          const isNewSession = isSessionBoundary(entry, {
+            prevCount,
+            count: messages.length,
+            prevUserId: lastSession ? lastSession.userId : null,
+            userId,
+          });
 
           // SSE 实时流每条 entry 都是完整 request+response，不存在"中间态"；
           // 历史代码曾在此处 `if (isTransient) continue` 跳过极短 entry 防中间态污染，

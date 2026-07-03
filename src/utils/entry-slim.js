@@ -50,6 +50,7 @@ const _systemPool = new Map();  // sig → system array (full, shared)
 // internToolResultIfPooled 的命中信号是 lazy-clone 决策的关键：JS string === 是值比较，
 // 普通 internToolResult 返回的 ref 无法用于 ref-不变性判断。
 import { internToolResultIfPooled } from './readResultPool.js';
+import { isCompactContinuation } from './clearCheckpoint.js';
 
 function _toolsSig(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return '';
@@ -293,7 +294,20 @@ export function createEntrySlimmer(isMainAgentFn) {
       const count = entry.body.messages.length;
       const userId = entry.body.metadata?.user_id || null;
 
+      // Preserve the /compact-continuation signal BEFORE this entry can be slimmed
+      // by a later one: once body.messages is emptied, isCompactContinuation() can
+      // no longer see the summary msg[0], and isSessionBoundary (clearCheckpoint.js)
+      // would misread the big count drop as a new-terminal session on batch reload.
+      entry._compactContinuation = isCompactContinuation(entry);
+
       // session 边界检测（同 mergeMainAgentSessions）
+      // KEEP IN SYNC (semantics): isSessionBoundary in clearCheckpoint.js is the
+      // shared predicate for session segmentation. This copy intentionally stays
+      // divergent (no compact exclusion): if the slimmer treated a /compact
+      // continuation as same-session, the pre-compact entry would be slimmed with
+      // _fullEntryIndex pointing at the shorter compact entry, and
+      // restoreSlimmedEntry's guard (fullEntry.messages.length < _messageCount)
+      // would permanently fail to restore it.
       const isNewSession = prevMsgCount > 0 && (
         (count < prevMsgCount * 0.5 && (prevMsgCount - count) > 4) ||
         (prevUserId && userId && userId !== prevUserId)
@@ -360,6 +374,8 @@ export function createEntrySlimmer(isMainAgentFn) {
         const count = e._messageCount || e.body?.messages?.length || 0;
         const userId = e.body?.metadata?.user_id || null;
 
+        // KEEP IN SYNC (semantics): intentionally divergent from isSessionBoundary
+        // (clearCheckpoint.js) — see the comment on the process() predicate above.
         const isNew = pCount > 0 && (
           (count < pCount * 0.5 && (pCount - count) > 4) ||
           (pUserId && userId && userId !== pUserId)
@@ -461,7 +477,15 @@ export function createIncrementalSlimmer(isMainAgentFn) {
       const count = entry.body.messages.length;
       const userId = entry.body.metadata?.user_id || null;
 
+      // Preserve the /compact-continuation signal before slimming — same rationale
+      // as createEntrySlimmer.process(): incrementally-slimmed entries can be
+      // re-ingested by the batch pipeline on a warm-cache reconnect, where
+      // isSessionBoundary needs this flag because messages are gone.
+      entry._compactContinuation = isCompactContinuation(entry);
+
       // session 边界检测（与 batch slimmer / mergeMainAgentSessions 一致）
+      // KEEP IN SYNC (semantics): intentionally divergent from isSessionBoundary
+      // (clearCheckpoint.js) — see the comment on createEntrySlimmer.process().
       const isNewSession = prevMsgCount > 0 && (
         (count < prevMsgCount * 0.5 && (prevMsgCount - count) > 4) ||
         (prevUserId && userId && userId !== prevUserId)

@@ -1,5 +1,6 @@
 // Wire format 协议详见 docs/WIRE_FORMAT.md（applyInPlaceLastMsgReplace 信号驱动短路是其客户端唯一消费方）
 import { parseImOrigin } from './imOrigin.js';
+import { isSessionBoundary, isPostClearCheckpoint } from './clearCheckpoint.js';
 
 export const HOT_SESSION_COUNT = 8;
 
@@ -249,6 +250,216 @@ export function getSessionStableId(session) {
 }
 
 /**
+ * Latest-ACTIVITY timestamp of a session — the counterpart of getSessionStableId.
+ * Stable id answers "which session is this?"; activity ts answers "when did this
+ * session last receive an entry?". `entryTimestamp` is rewritten to the newest
+ * merged entry's ts on every mergeMainAgentSessions call — that drift makes it
+ * unusable as identity but exactly right for recency.
+ *
+ * ISO-8601 strings from toISOString() compare correctly with `<`/`>` (fixed-width
+ * UTC), same convention as buildSessionIndex.
+ *
+ * @param {object} session
+ * @returns {string|null}
+ */
+export function getSessionActivityTs(session) {
+  if (!session) return null;
+  if (session._cold) return session.lastTs || session.entryTimestamp || session.sessionId || null;
+  if (session.entryTimestamp) return session.entryTimestamp;
+  const msgs = session.messages;
+  const last = msgs && msgs.length ? msgs[msgs.length - 1] : null;
+  return (last && last._timestamp) || getSessionStableId(session);
+}
+
+/**
+ * Pick the session with the newest activity among HOT sessions.
+ *
+ * Used by the "only show current session" pin to decide what "current" means.
+ * mainAgentSessions is ordered by insertion, never by time — with interleaved
+ * multi-terminal sessions or a truncated reconnect replay, the LAST list element
+ * is frequently an old session, so "last element == current" does not hold.
+ *
+ * Cold placeholders are skipped: the true latest session is never cold
+ * (splitHotCold always keeps the newest hot), and a cold winner would pin the
+ * view to a "loading" placeholder while hiding the live conversation — a cold
+ * candidate can only win through a stale/misaligned index lastTs.
+ *
+ * A null activity ts never wins over a real timestamp (a session missing every
+ * timestamp source must not hijack the pick from a genuinely newer session).
+ * Ties resolve to the LATER list position. When NO hot session has a usable
+ * timestamp, degrade to the last element — unless it is a cold placeholder,
+ * in which case return null and let the caller's fallback take over.
+ *
+ * @param {Array} sessions - mainAgentSessions (hot sessions + cold placeholders)
+ * @returns {object|null}
+ */
+export function getLatestSessionByActivity(sessions) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return null;
+  let best = null;
+  let bestTs = null;
+  for (const s of sessions) {
+    if (!s || s._cold) continue;
+    const ts = getSessionActivityTs(s);
+    if (ts === null) continue;
+    if (bestTs === null || ts >= bestTs) {
+      best = s;
+      bestTs = ts;
+    }
+  }
+  if (best) return best;
+  const last = sessions[sessions.length - 1];
+  return (last && !last._cold) ? last : null;
+}
+
+/**
+ * Pure decision for adopting a server-side pin during hydrate (page load, project
+ * switch, SSE reconnect) or a `session_pin` broadcast.
+ *
+ * The server pin is just a persisted pointer — after idle/restart it can point at
+ * an older logical session (or have been poisoned by a client that derived a wrong
+ * latest). When "only show current session" is ON and we can already derive the
+ * latest session locally, the derived value is authoritative and a mismatching
+ * remote value is rejected. When the toggle is off, or sessions haven't loaded yet
+ * (no derived id), the remote value is adopted as-is.
+ *
+ * @param {*} remoteId - raw pinnedSessionId from the server (string|null|undefined)
+ * @param {string|null} derivedLatestId - getSessionStableId(getLatestSessionByActivity(...))
+ * @param {boolean} onlyCurrentSession - effective toggle value
+ * @returns {{adopt: boolean, value: string|null}} adopt=false means "keep/derive
+ *   locally"; value is then the derived latest for reference.
+ */
+export function resolveHydratedPin(remoteId, derivedLatestId, onlyCurrentSession) {
+  const remote = (typeof remoteId === 'string' && remoteId) ? remoteId : null;
+  if (!onlyCurrentSession) return { adopt: true, value: remote };
+  if (!derivedLatestId) return { adopt: true, value: remote };
+  return remote === derivedLatestId
+    ? { adopt: true, value: remote }
+    : { adopt: false, value: derivedLatestId };
+}
+
+/**
+ * Async orchestration of one pin-hydrate round, extracted from AppBase._hydratePin
+ * so the race-sensitive ordering is unit-testable without React:
+ *
+ *   1. Await the server pin; if this round was superseded (isCurrent() false —
+ *      a newer hydrate started, e.g. project switch or another reconnect), bail
+ *      out WITHOUT touching the gate: the newer round owns it.
+ *   2. Decide via resolveHydratedPin. Adopt → adopt(value) only on change.
+ *      Reject with the local pin ALREADY at the derived latest → persistLocal():
+ *      the follow-latest self-heal below won't change state in that case, so it
+ *      would never POST, and a poisoned server-side pin file would survive.
+ *   3. finally (still current): clearGate() BEFORE selfHeal() — follow-latest
+ *      early-outs while the gate is up, so the inverted order is a silent no-op
+ *      and a stale pin would stick until the next stream activity.
+ *
+ * @param {object} deps
+ * @param {() => Promise<*>} deps.fetchPin - resolves to raw remote pinnedSessionId
+ * @param {() => boolean} deps.isCurrent - false when a newer hydrate superseded this one
+ * @param {() => string|null} deps.getDerived - derived latest stable id (at resolve time)
+ * @param {() => boolean} deps.effOnly - effective "only show current session" toggle
+ * @param {() => string|null} deps.getLocalPin - current local pin state
+ * @param {(value: string|null) => void} deps.adopt - apply a remote pin value locally
+ * @param {() => void} deps.persistLocal - POST the current local pin to the server
+ * @param {() => void} deps.clearGate - clear the "hydrate in flight" gate
+ * @param {() => void} deps.selfHeal - re-run follow-latest (AppBase._maintainPinState)
+ * @returns {Promise<void>}
+ */
+export async function runPinHydration({ fetchPin, isCurrent, getDerived, effOnly, getLocalPin, adopt, persistLocal, clearGate, selfHeal }) {
+  try {
+    const remote = await fetchPin();
+    if (!isCurrent()) return;
+    const r = resolveHydratedPin(remote, getDerived(), effOnly());
+    if (r.adopt) {
+      if (r.value !== getLocalPin()) adopt(r.value);
+    } else if (getLocalPin() === r.value) {
+      persistLocal();
+    }
+  } catch {
+    // Network/JSON errors: nothing to adopt; fall through so the gate is cleared.
+  } finally {
+    if (isCurrent()) {
+      clearGate();
+      selfHeal();
+    }
+  }
+}
+
+/**
+ * Batch-path boundary + timestamp state machine, extracted from
+ * AppBase._processOneEntry so the session-segmentation logic is unit-testable
+ * and shares isSessionBoundary with the live SSE path (_flushPendingEntries).
+ * Two deliberate deltas vs the old inlined block: the shared predicate adds the
+ * /compact exclusion the batch path lacked, and a truncation branch (below)
+ * realigns the positional accumulators after a compact rewrite.
+ *
+ * Mutates `st` in place (same contract as before extraction):
+ *   st.timestamps / st.generatedTimestamps - positional ts accumulators
+ *   st.currentSessionId - stable id of the session being accumulated
+ *   st.prevUserId / st.prevMainAgentTs - carry-over between entries
+ * and stamps `_timestamp` / `_generatedTs` onto entry.body.messages.
+ *
+ * @param {object} st - batch accumulator state
+ * @param {object} entry - mainAgent entry with body.messages array
+ * @returns {void}
+ */
+export function applyBatchEntryTimestamps(st, entry) {
+  const messages = entry.body.messages;
+  const count = entry._messageCount || messages.length;
+  const userId = entry.body.metadata?.user_id || null;
+  const timestamp = entry.timestamp || new Date().toISOString();
+
+  const prevCount = st.timestamps.length;
+  // Post-/clear checkpoints must always start a new session (bypass the transient
+  // filter below), otherwise the first count=1 entry after a delta rebuild would
+  // be swallowed and its _timestamp stolen by the next count>4 entry.
+  const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
+  const isNewSession = isSessionBoundary(entry, { prevCount, count, prevUserId: st.prevUserId, userId });
+  // Transient protection: very short entries (<=4 msgs) after a long conversation
+  // are usually in-flight requests (request body only, no response yet) and must
+  // not reset the accumulated timestamps. Real /clear starts are exempt.
+  const isTransient = isNewSession && !postClearCheckpoint && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
+  if (isNewSession && !isTransient) {
+    st.currentSessionId = timestamp;
+    st.timestamps = [];
+    st.generatedTimestamps = [];
+    st.prevMainAgentTs = null; // new session start: reset to avoid cross-session bleed
+  } else if (st.currentSessionId === null) {
+    st.currentSessionId = timestamp;
+  } else if (entry._compactContinuation === true && count < st.timestamps.length) {
+    // /compact continuation (same session, NOT a boundary): the conversation was
+    // rewritten to a shorter message list. Truncate the positional accumulators so
+    // messages appended after the compact get fresh timestamps — mirroring the live
+    // path, where merge rebuilds lastSession.messages to the compact entry's list.
+    // Without this, positions beyond `count` keep inheriting hours-old ts until the
+    // conversation regrows past the pre-compact length.
+    st.timestamps.length = count;
+    st.generatedTimestamps.length = count;
+  }
+  // Extend the two parallel arrays; new positions take this entry's ts and record
+  // the previous mainAgent ts as their "generated at" ts.
+  // Note: role-gating happens in the inner loop (not at push time) — in the offline
+  // batch path this entry may be _slimmed (body.messages=[]) with only _messageCount,
+  // so messages[j] can be undefined here.
+  for (let j = st.timestamps.length; j < count; j++) {
+    st.timestamps.push(timestamp);
+    st.generatedTimestamps.push(st.prevMainAgentTs || null);
+  }
+  if (messages.length > 0) {
+    for (let j = 0; j < messages.length; j++) {
+      const m = messages[j];
+      if (!m) continue;
+      m._timestamp = st.timestamps[j];
+      if (m.role === 'assistant' && st.generatedTimestamps[j]) {
+        m._generatedTs = st.generatedTimestamps[j];
+      }
+    }
+  }
+  st.prevUserId = userId;
+  // Remember this entry's ts as the next entry's prevMainAgentTs.
+  st.prevMainAgentTs = timestamp;
+}
+
+/**
  * 解析「仅展示当前会话」锁定下，实际传给 ChatView 的会话切片。
  *
  * 策略：把 mainAgentSessions 切到「以 pin 会话结尾」(`slice(0, idx+1)`)，让 pin 会话从
@@ -262,6 +473,13 @@ export function getSessionStableId(session) {
  * @returns {{ sessions: Array, upperBoundTs: (string|null) }}
  *   upperBoundTs：pin 在中段时为下一个会话的起点 ts（供 ChatView 截断更晚会话的 sub-agent /
  *   抑制 streaming 浮层）；其余情形为 null。
+ *   Exception: a mid-list pinned session that is itself the latest-by-ACTIVITY is
+ *   the CURRENT session (the pin follows recency, and list order is insertion
+ *   order, not time order) — there is no strictly-newer session to bound against,
+ *   so upperBoundTs is null. A non-null bound here would invert ChatView's
+ *   "pin is on an older session" interpretation: it would suppress the live
+ *   streaming overlay and truncate trailing sub-agents on the very session the
+ *   user is watching.
  */
 export function resolveDisplaySessions(mainAgentSessions, pinnedTs, onlyCurrentSession) {
   const sessions = Array.isArray(mainAgentSessions) ? mainAgentSessions : [];
@@ -273,10 +491,12 @@ export function resolveDisplaySessions(mainAgentSessions, pinnedTs, onlyCurrentS
   if (idx === -1 || idx === sessions.length - 1) {
     return { sessions, upperBoundTs: null };
   }
-  // 命中中段 → 切到「以 pin 会话结尾」，上界 = 下一个会话起点 ts
+  // 命中中段 → 切到「以 pin 会话结尾」；上界 = 下一个会话起点 ts，
+  // 除非 pin 会话本身就是活动最新（= 当前会话，无更新会话可作上界）。
+  const pinnedIsCurrent = getLatestSessionByActivity(sessions) === sessions[idx];
   return {
     sessions: sessions.slice(0, idx + 1),
-    upperBoundTs: getSessionStableId(sessions[idx + 1]),
+    upperBoundTs: pinnedIsCurrent ? null : getSessionStableId(sessions[idx + 1]),
   };
 }
 

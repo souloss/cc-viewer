@@ -39,6 +39,7 @@ mainAgent entry 共 **4 种形态**，由信号字段联合判定：
 | `_seqEpoch` | 同上 | 进程启动随机 token，标识写进程；进程重启 / 第二写进程（IM worker 等）时变化 | epoch 变化 → 重建器重置 seq 基线而非误判乱序 | 落盘（同上剥除） |
 | `_staleReorder` | `delta-reconstructor.js`（重建期打标，**不落盘**） | 同 epoch 内 `_seq` 小于已见最大值（乱序条目），或重建长度超 `_totalMessageCount` 被 slice 修复 | `isMergeBlockedEntry()` → 两个 merge 入口跳过该条目（内容已被更新条目取代） | 内存态；mergeLogFiles 落盘前剥除/丢弃 |
 | `_reconstructBroken` | `delta-reconstructor.js`（重建期打标，**不落盘**） | 基线已建立时重建长度不足 `_totalMessageCount`（无法修复的断裂） | 同上跳过；至多滞后到下一 checkpoint（≤10 条）自然纠偏 | 内存态；同上 |
+| `_compactContinuation` | `entry-slim.js`（两个 slimmer 在剪枝前打标，**不落盘 .jsonl**） | mainAgent entry 的 msg[0] 命中 /compact 续写判据（`isCompactContinuation`），须在 messages 被后续条目剪空前记录 | `isSessionBoundary()`（clearCheckpoint.js）：entry 已被剪枝（messages=[]）时凭此标志把「/compact 大幅缩短」从会话边界排除，保证批量重载与实时流切分一致 | 内存态 + 客户端 IndexedDB 缓存（saveEntries 随条目落缓存）；不上行、不写服务端日志 |
 
 ---
 

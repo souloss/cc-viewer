@@ -61,3 +61,44 @@ export function isCompactContinuation(entry) {
   }
   return COMPACT_SUMMARY_RE.test(text.trimStart());
 }
+
+/**
+ * Shared session-boundary predicate — the single source of truth for "does this
+ * mainAgent entry start a NEW logical session?", used by BOTH the batch path
+ * (applyBatchEntryTimestamps → _processOneEntry) and the live SSE path
+ * (_flushPendingEntries). Keeping the two paths on one predicate guarantees the
+ * session segmentation (and thus each session's stable id = messages[0]._timestamp)
+ * is identical live and after a reload, which the "only show current session"
+ * pin depends on.
+ *
+ * Rules:
+ *   1. Post-/clear checkpoint → always a boundary (bypasses everything else).
+ *   2. Big message-count drop (count < 50% of prev AND drop > 4) → boundary,
+ *      UNLESS the entry is a /compact continuation. Slimmed entries have
+ *      body.messages emptied, so isCompactContinuation() can no longer see the
+ *      summary — the slimmer stamps `entry._compactContinuation` beforehand
+ *      (entry-slim.js) and we trust that flag here.
+ *   3. user_id change with an established previous session (prevCount > 0) →
+ *      boundary (different device/account writing into the same log).
+ *
+ * KEEP IN SYNC: the bigDrop formula (rule 2, minus the compact exclusion) is
+ * mirrored in entry-slim.js's three slimmer predicates (process/finalize/
+ * incremental), which stay intentionally divergent for restore-guard reasons —
+ * tune the 0.5 ratio or the >4 drop threshold in all four places together.
+ *
+ * @param {object} entry - mainAgent entry (may be _slimmed)
+ * @param {object} ctx
+ * @param {number} ctx.prevCount - message count accumulated before this entry
+ * @param {number} ctx.count - this entry's message count
+ * @param {string|null} ctx.prevUserId - user_id of the previous entry/session
+ * @param {string|null} ctx.userId - this entry's user_id
+ * @returns {boolean}
+ */
+export function isSessionBoundary(entry, { prevCount, count, prevUserId, userId }) {
+  if (isPostClearCheckpoint(entry, prevCount)) return true;
+  const bigDrop = prevCount > 0 && count < prevCount * 0.5 && (prevCount - count) > 4;
+  const compactLike = (entry && entry._compactContinuation === true) || isCompactContinuation(entry);
+  if (bigDrop && !compactLike) return true;
+  if (prevCount > 0 && prevUserId && userId && userId !== prevUserId) return true;
+  return false;
+}

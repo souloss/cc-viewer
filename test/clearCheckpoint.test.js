@@ -4,7 +4,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPostClearCheckpoint, isCompactContinuation } from '../src/utils/clearCheckpoint.js';
+import { isPostClearCheckpoint, isCompactContinuation, isSessionBoundary } from '../src/utils/clearCheckpoint.js';
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -298,5 +298,82 @@ describe('isCompactContinuation', () => {
     assert.equal(isCompactContinuation({ body: {} }), false);
     assert.equal(isCompactContinuation(null), false);
     assert.equal(isCompactContinuation(undefined), false);
+  });
+});
+
+// ─── isSessionBoundary ────────────────────────────────────────────────────────
+// Shared batch/live session-boundary predicate — single source of truth for
+// session segmentation, so stable ids match across reload and live streaming
+// ("only show current session" pin depends on this).
+
+describe('isSessionBoundary', () => {
+  const AUTO_COMPACT = 'This session is being continued from a previous conversation that ran out of context. The summary below...';
+
+  function plainEntry(msgCount, { userId = 'u1', firstText = 'hello' } = {}) {
+    const msgs = [userMsg([textBlock(firstText)])];
+    for (let i = 1; i < msgCount; i++) {
+      msgs.push({ role: i % 2 ? 'assistant' : 'user', content: [textBlock(`m${i}`)] });
+    }
+    return { body: { messages: msgs, metadata: { user_id: userId } }, timestamp: '2026-07-03T10:00:00.000Z' };
+  }
+
+  it('true — post-/clear checkpoint always splits (even same user, tiny count)', () => {
+    const entry = makeCheckpointEntry({ msgs: [userMsg([textBlock(CLEAR_MARKER)])] });
+    assert.equal(isSessionBoundary(entry, { prevCount: 40, count: 1, prevUserId: 'u1', userId: 'u1' }), true);
+  });
+
+  it('false — big drop but msg[0] is a /compact continuation summary', () => {
+    const entry = plainEntry(10, { firstText: AUTO_COMPACT });
+    assert.equal(isSessionBoundary(entry, { prevCount: 100, count: 10, prevUserId: 'u1', userId: 'u1' }), false);
+  });
+
+  it('false — big drop on a SLIMMED entry carrying _compactContinuation:true (messages emptied)', () => {
+    // P0 regression: the batch slim pass runs before boundary detection and empties
+    // body.messages, so isCompactContinuation() alone can no longer see the summary.
+    const entry = { _slimmed: true, _messageCount: 10, _compactContinuation: true, body: { messages: [], metadata: { user_id: 'u1' } } };
+    assert.equal(isSessionBoundary(entry, { prevCount: 100, count: 10, prevUserId: 'u1', userId: 'u1' }), false);
+  });
+
+  it('true — big drop with a genuine new-terminal first prompt (same user)', () => {
+    const entry = plainEntry(3, { firstText: 'fix this bug please' });
+    assert.equal(isSessionBoundary(entry, { prevCount: 40, count: 3, prevUserId: 'u1', userId: 'u1' }), true);
+  });
+
+  it('true — user_id change without a count drop (prevCount > 0)', () => {
+    const entry = plainEntry(50, { userId: 'u2' });
+    assert.equal(isSessionBoundary(entry, { prevCount: 45, count: 50, prevUserId: 'u1', userId: 'u2' }), true);
+  });
+
+  it('false — prevCount 0 (first entry) even with differing userId, unless postClear', () => {
+    const entry = plainEntry(5, { userId: 'u2' });
+    assert.equal(isSessionBoundary(entry, { prevCount: 0, count: 5, prevUserId: 'u1', userId: 'u2' }), false);
+  });
+
+  it('false — no signals: normal same-session growth', () => {
+    const entry = plainEntry(42);
+    assert.equal(isSessionBoundary(entry, { prevCount: 40, count: 42, prevUserId: 'u1', userId: 'u1' }), false);
+  });
+
+  it('false — shrink too small to be a bigDrop (drop <= 4)', () => {
+    const entry = plainEntry(4);
+    assert.equal(isSessionBoundary(entry, { prevCount: 8, count: 4, prevUserId: 'u1', userId: 'u1' }), false);
+  });
+
+  it('false — shrink >= 50% of prev is not a bigDrop', () => {
+    const entry = plainEntry(20);
+    assert.equal(isSessionBoundary(entry, { prevCount: 30, count: 20, prevUserId: 'u1', userId: 'u1' }), false);
+  });
+
+  it('true — compact-flagged entry still splits on user_id change', () => {
+    // The compact exclusion only guards the bigDrop signal; a device/account change
+    // is a session boundary regardless.
+    const entry = { _slimmed: true, _messageCount: 10, _compactContinuation: true, body: { messages: [], metadata: { user_id: 'u2' } } };
+    assert.equal(isSessionBoundary(entry, { prevCount: 100, count: 10, prevUserId: 'u1', userId: 'u2' }), true);
+  });
+
+  it('false — null/missing userIds never trigger the user_id branch', () => {
+    const entry = plainEntry(42);
+    assert.equal(isSessionBoundary(entry, { prevCount: 40, count: 42, prevUserId: null, userId: 'u1' }), false);
+    assert.equal(isSessionBoundary(entry, { prevCount: 40, count: 42, prevUserId: 'u1', userId: null }), false);
   });
 });

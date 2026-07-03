@@ -11,6 +11,11 @@ import {
   applyInPlaceLastMsgReplace,
   getSessionStableId,
   resolveDisplaySessions,
+  getSessionActivityTs,
+  getLatestSessionByActivity,
+  resolveHydratedPin,
+  runPinHydration,
+  applyBatchEntryTimestamps,
 } from '../src/utils/sessionManager.js';
 
 // ─── Test helpers ─────────────────────────────────────────────────��───────────
@@ -642,6 +647,20 @@ describe('resolveDisplaySessions', () => {
     assert.equal(r.upperBoundTs, '2025-01-01T02:00:00Z');
   });
 
+  it('mid-list pin that IS the latest-by-activity → sliced but NO upper bound (it is the current session)', () => {
+    // Multi-terminal case: the pinned session sits mid-list by insertion order
+    // but carries the newest activity. A non-null bound would suppress the live
+    // streaming overlay and truncate trailing sub-agents on the current session.
+    const mid = pinnedSession('2025-01-01T01:00:00Z');
+    mid.entryTimestamp = '2025-01-01T09:00:00Z'; // newest activity
+    const tail = pinnedSession('2025-01-01T02:00:00Z');
+    tail.entryTimestamp = '2025-01-01T03:00:00Z';
+    const list = [s0, mid, tail];
+    const r = resolveDisplaySessions(list, '2025-01-01T01:00:00Z', true);
+    assert.deepEqual(r.sessions, [s0, mid], 'still sliced to end at the pin');
+    assert.equal(r.upperBoundTs, null, 'no strictly-newer session to bound against');
+  });
+
   it('pin 是首个会话且有更晚会话 → 仅含该会话，上界 = 第二个会话起点', () => {
     const r = resolveDisplaySessions(sessions, '2025-01-01T00:00:00Z', true);
     assert.deepEqual(r.sessions, [s0]);
@@ -665,5 +684,350 @@ describe('resolveDisplaySessions', () => {
     const r = resolveDisplaySessions([], '2025-01-01T00:00:00Z', true);
     assert.deepEqual(r.sessions, []);
     assert.equal(r.upperBoundTs, null);
+  });
+});
+
+// ─── getSessionActivityTs ────────────────────────────────────────────────────
+
+function hotSession(startTs, activityTs, opts = {}) {
+  const s = makeSession(opts.msgCount || 4, { userId: opts.userId || 'user-1', entryTimestamp: activityTs });
+  s.messages[0]._timestamp = startTs;
+  return s;
+}
+
+function coldSession(sessionId, lastTs) {
+  return { _cold: true, sessionId, lastTs, entryTimestamp: lastTs, messages: null, response: null, userId: 'user-1' };
+}
+
+describe('getSessionActivityTs', () => {
+  it('hot session → entryTimestamp (drifts to newest merged entry by design)', () => {
+    const s = hotSession('2026-07-01T00:00:00.000Z', '2026-07-01T05:00:00.000Z');
+    assert.equal(getSessionActivityTs(s), '2026-07-01T05:00:00.000Z');
+  });
+
+  it('hot session without entryTimestamp → last message _timestamp', () => {
+    const s = makeSession(3, { entryTimestamp: null });
+    s.messages[2]._timestamp = '2026-07-01T02:00:00.000Z';
+    assert.equal(getSessionActivityTs(s), '2026-07-01T02:00:00.000Z');
+  });
+
+  it('cold placeholder → lastTs', () => {
+    const s = coldSession('2026-07-01T00:00:00.000Z', '2026-07-01T03:00:00.000Z');
+    assert.equal(getSessionActivityTs(s), '2026-07-01T03:00:00.000Z');
+  });
+
+  it('cold without lastTs → entryTimestamp, then sessionId', () => {
+    const viaEntryTs = { _cold: true, sessionId: 'sid-1', lastTs: null, entryTimestamp: '2026-07-01T04:00:00.000Z', messages: null };
+    assert.equal(getSessionActivityTs(viaEntryTs), '2026-07-01T04:00:00.000Z');
+    const viaSessionId = { _cold: true, sessionId: 'sid-2', lastTs: null, entryTimestamp: null, messages: null };
+    assert.equal(getSessionActivityTs(viaSessionId), 'sid-2');
+  });
+
+  it('hot without entryTimestamp and without message ts → stable id fallback', () => {
+    const s = makeSession(2, { entryTimestamp: null });
+    s.messages[0]._timestamp = '2026-07-01T01:00:00.000Z'; // stable id, last msg unstamped
+    assert.equal(getSessionActivityTs(s), '2026-07-01T01:00:00.000Z');
+  });
+
+  it('null session → null', () => {
+    assert.equal(getSessionActivityTs(null), null);
+  });
+});
+
+// ─── getLatestSessionByActivity ──────────────────────────────────────────────
+
+describe('getLatestSessionByActivity', () => {
+  it('Defect-1 regression: mid-list session with newer activity beats last-positioned older one', () => {
+    // Interleaved multi-terminal merge order: session B was inserted last, but
+    // session A received the most recent entry. "Last element" is the bug.
+    const a = hotSession('2026-07-01T00:00:00.000Z', '2026-07-01T09:00:00.000Z');
+    const b = hotSession('2026-07-01T01:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    assert.equal(getLatestSessionByActivity([a, b]), a);
+  });
+
+  it('suffix-truncated replay still resolves the true latest (not list tail)', () => {
+    // Reconnect replays only the last N entries; whatever order the rebuilt list
+    // has, the max-activity session must win. Simulate a 40-session interleave
+    // where an early-positioned session carries the newest activity, then take a
+    // suffix slice like the replay window does.
+    const sessions = [];
+    for (let i = 0; i < 40; i++) {
+      sessions.push(hotSession(
+        `2026-07-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+        `2026-07-01T10:${String(39 - i).padStart(2, '0')}:00.000Z`, // reverse: earliest position = newest activity
+      ));
+    }
+    const windowed = sessions.slice(-25);
+    assert.equal(getLatestSessionByActivity(windowed), windowed[0]);
+  });
+
+  it('cold placeholder with the max activity ts is skipped — best hot session wins', () => {
+    // A cold winner would pin the view to a "loading" placeholder and hide the
+    // live conversation; cold lastTs can also be misaligned (positional index).
+    const cold = coldSession('2026-07-01T00:00:00.000Z', '2026-07-01T23:00:00.000Z');
+    const hot = hotSession('2026-07-01T01:00:00.000Z', '2026-07-01T09:00:00.000Z');
+    assert.equal(getLatestSessionByActivity([cold, hot]), hot);
+  });
+
+  it('all-cold list → null (never pin to a "loading" placeholder; caller fallback takes over)', () => {
+    const c1 = coldSession('s1', '2026-07-01T05:00:00.000Z');
+    const c2 = coldSession('s2', '2026-07-01T01:00:00.000Z');
+    assert.equal(getLatestSessionByActivity([c1, c2]), null);
+  });
+
+  it('null-activity session never hijacks the pick from a genuinely newer one', () => {
+    // Regression: the old loop let a ts===null candidate always replace `best`
+    // without advancing bestTs, so a timestamp-less session sitting after the
+    // true latest would win — the exact wrong-anchor class this helper fixes.
+    const a = hotSession('2026-07-01T00:00:00.000Z', '2026-07-01T09:00:00.000Z');
+    const b = makeSession(2, { entryTimestamp: null }); // no usable ts anywhere
+    const c = hotSession('2026-07-01T01:00:00.000Z', '2026-07-01T05:00:00.000Z');
+    assert.equal(getLatestSessionByActivity([a, b]), a);
+    assert.equal(getLatestSessionByActivity([a, b, c]), a);
+  });
+
+  it('all-null activity ts degrades to the last element (behavior preservation)', () => {
+    const s1 = makeSession(2, { entryTimestamp: null });
+    const s2 = makeSession(2, { entryTimestamp: null });
+    assert.equal(getLatestSessionByActivity([s1, s2]), s2);
+  });
+
+  it('tie resolves to the later list position', () => {
+    const ts = '2026-07-01T07:00:00.000Z';
+    const s1 = hotSession('2026-07-01T00:00:00.000Z', ts);
+    const s2 = hotSession('2026-07-01T01:00:00.000Z', ts);
+    assert.equal(getLatestSessionByActivity([s1, s2]), s2);
+  });
+
+  it('empty / non-array → null', () => {
+    assert.equal(getLatestSessionByActivity([]), null);
+    assert.equal(getLatestSessionByActivity(null), null);
+    assert.equal(getLatestSessionByActivity(undefined), null);
+  });
+});
+
+// ─── resolveHydratedPin ──────────────────────────────────────────────────────
+
+describe('resolveHydratedPin', () => {
+  it('toggle off → adopt remote string as-is', () => {
+    assert.deepEqual(resolveHydratedPin('t1', 't9', false), { adopt: true, value: 't1' });
+  });
+
+  it('toggle off → adopt remote null (and normalizes non-strings)', () => {
+    assert.deepEqual(resolveHydratedPin(null, 't9', false), { adopt: true, value: null });
+    assert.deepEqual(resolveHydratedPin(undefined, 't9', false), { adopt: true, value: null });
+    assert.deepEqual(resolveHydratedPin('', 't9', false), { adopt: true, value: null });
+    assert.deepEqual(resolveHydratedPin(42, 't9', false), { adopt: true, value: null });
+  });
+
+  it('toggle on + no derived latest (sessions not loaded) → adopt remote', () => {
+    assert.deepEqual(resolveHydratedPin('t1', null, true), { adopt: true, value: 't1' });
+  });
+
+  it('toggle on + remote === derived → adopt', () => {
+    assert.deepEqual(resolveHydratedPin('t9', 't9', true), { adopt: true, value: 't9' });
+  });
+
+  it('toggle on + stale remote → reject, value = derived latest', () => {
+    assert.deepEqual(resolveHydratedPin('t1', 't9', true), { adopt: false, value: 't9' });
+  });
+
+  it('toggle on + remote null + derived exists → reject (derive locally)', () => {
+    assert.deepEqual(resolveHydratedPin(null, 't9', true), { adopt: false, value: 't9' });
+  });
+});
+
+// ─── runPinHydration ─────────────────────────────────────────────────────────
+
+describe('runPinHydration', () => {
+  function makeHarness({ remote, derived, effOnly = true, localPin = null, current = () => true }) {
+    const calls = [];
+    let resolveFetch;
+    const fetchPromise = new Promise((res) => { resolveFetch = res; });
+    const run = runPinHydration({
+      fetchPin: () => fetchPromise,
+      isCurrent: current,
+      getDerived: () => derived,
+      effOnly: () => effOnly,
+      getLocalPin: () => localPin,
+      adopt: (v) => calls.push(['adopt', v]),
+      persistLocal: () => calls.push(['persist']),
+      clearGate: () => calls.push(['clearGate']),
+      selfHeal: () => calls.push(['selfHeal']),
+    });
+    return { calls, run, resolve: () => resolveFetch(remote) };
+  }
+
+  it('adopt path: remote differs from local → adopt(remote), then clearGate before selfHeal', async () => {
+    const h = makeHarness({ remote: 't9', derived: 't9', localPin: 't1' });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, [['adopt', 't9'], ['clearGate'], ['selfHeal']]);
+  });
+
+  it('adopt path: remote equals local → no adopt call (no redundant setState)', async () => {
+    const h = makeHarness({ remote: 't9', derived: 't9', localPin: 't9' });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, [['clearGate'], ['selfHeal']]);
+  });
+
+  it('gate is cleared BEFORE self-heal (inverted order would silently no-op follow-latest)', async () => {
+    const h = makeHarness({ remote: 't1', derived: 't9', localPin: 't1' });
+    h.resolve();
+    await h.run;
+    const gateIdx = h.calls.findIndex(c => c[0] === 'clearGate');
+    const healIdx = h.calls.findIndex(c => c[0] === 'selfHeal');
+    assert.ok(gateIdx !== -1 && healIdx !== -1 && gateIdx < healIdx,
+      `clearGate must precede selfHeal, got ${JSON.stringify(h.calls)}`);
+  });
+
+  it('rejected stale remote + local already at derived → persistLocal (heals poisoned server pin)', async () => {
+    const h = makeHarness({ remote: 't1', derived: 't9', localPin: 't9' });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, [['persist'], ['clearGate'], ['selfHeal']]);
+  });
+
+  it('rejected stale remote + local NOT at derived → no persist here (selfHeal advances + persists)', async () => {
+    const h = makeHarness({ remote: 't1', derived: 't9', localPin: 't5' });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, [['clearGate'], ['selfHeal']]);
+  });
+
+  it('superseded GET is fully discarded — no adopt, no gate touch (newer round owns it)', async () => {
+    const h = makeHarness({ remote: 't1', derived: 't9', localPin: 't9', current: () => false });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, []);
+  });
+
+  it('supersession that happens between resolve and finally does not clear the newer gate', async () => {
+    let currentFlag = true;
+    const calls = [];
+    let resolveFetch;
+    const run = runPinHydration({
+      fetchPin: () => new Promise((res) => { resolveFetch = res; }),
+      isCurrent: () => currentFlag,
+      getDerived: () => 't9',
+      effOnly: () => true,
+      getLocalPin: () => 't1',
+      adopt: (v) => { calls.push(['adopt', v]); currentFlag = false; }, // superseded mid-flight
+      persistLocal: () => calls.push(['persist']),
+      clearGate: () => calls.push(['clearGate']),
+      selfHeal: () => calls.push(['selfHeal']),
+    });
+    resolveFetch('t9');
+    await run;
+    assert.deepEqual(calls, [['adopt', 't9']]);
+  });
+
+  it('fetch rejection still clears the gate and self-heals', async () => {
+    const calls = [];
+    await runPinHydration({
+      fetchPin: () => Promise.reject(new Error('network')),
+      isCurrent: () => true,
+      getDerived: () => 't9',
+      effOnly: () => true,
+      getLocalPin: () => 't1',
+      adopt: () => calls.push(['adopt']),
+      persistLocal: () => calls.push(['persist']),
+      clearGate: () => calls.push(['clearGate']),
+      selfHeal: () => calls.push(['selfHeal']),
+    });
+    assert.deepEqual(calls, [['clearGate'], ['selfHeal']]);
+  });
+
+  it('toggle off → adopts remote verbatim even when derived differs', async () => {
+    const h = makeHarness({ remote: 't1', derived: 't9', localPin: 't9', effOnly: false });
+    h.resolve();
+    await h.run;
+    assert.deepEqual(h.calls, [['adopt', 't1'], ['clearGate'], ['selfHeal']]);
+  });
+});
+
+// ─── applyBatchEntryTimestamps ───────────────────────────────────────────────
+
+describe('applyBatchEntryTimestamps', () => {
+  function freshSt() {
+    return { timestamps: [], generatedTimestamps: [], currentSessionId: null, prevUserId: null, prevMainAgentTs: null };
+  }
+
+  function batchEntry(msgCount, ts, { userId = 'u1', firstText = 'hello', slimmed = false, compactFlag } = {}) {
+    const messages = [];
+    for (let i = 0; i < msgCount; i++) {
+      messages.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: i === 0 ? firstText : `m${i}` });
+    }
+    const e = {
+      timestamp: ts,
+      mainAgent: true,
+      body: { messages: slimmed ? [] : messages, metadata: { user_id: userId } },
+    };
+    if (slimmed) { e._slimmed = true; e._messageCount = msgCount; }
+    if (compactFlag !== undefined) e._compactContinuation = compactFlag;
+    return e;
+  }
+
+  it('first entry seeds currentSessionId and stamps all positions with its ts', () => {
+    const st = freshSt();
+    const e = batchEntry(4, '2026-07-01T00:00:00.000Z');
+    applyBatchEntryTimestamps(st, e);
+    assert.equal(st.currentSessionId, '2026-07-01T00:00:00.000Z');
+    assert.equal(st.timestamps.length, 4);
+    assert.equal(e.body.messages[0]._timestamp, '2026-07-01T00:00:00.000Z');
+  });
+
+  it('same-session growth extends without resetting (positions keep first-seen ts)', () => {
+    const st = freshSt();
+    applyBatchEntryTimestamps(st, batchEntry(4, '2026-07-01T00:00:00.000Z'));
+    const e2 = batchEntry(6, '2026-07-01T00:05:00.000Z');
+    applyBatchEntryTimestamps(st, e2);
+    assert.equal(st.currentSessionId, '2026-07-01T00:00:00.000Z');
+    assert.equal(e2.body.messages[0]._timestamp, '2026-07-01T00:00:00.000Z');
+    assert.equal(e2.body.messages[5]._timestamp, '2026-07-01T00:05:00.000Z');
+  });
+
+  it('new-terminal bigDrop (count > 4) resets: new session id = entry ts', () => {
+    const st = freshSt();
+    applyBatchEntryTimestamps(st, batchEntry(30, '2026-07-01T00:00:00.000Z'));
+    const e2 = batchEntry(6, '2026-07-01T01:00:00.000Z', { firstText: 'new terminal prompt' });
+    applyBatchEntryTimestamps(st, e2);
+    assert.equal(st.currentSessionId, '2026-07-01T01:00:00.000Z');
+    assert.equal(st.timestamps.length, 6);
+    assert.equal(e2.body.messages[0]._timestamp, '2026-07-01T01:00:00.000Z');
+  });
+
+  it('transient short entry (<=4 msgs after long) does NOT reset', () => {
+    const st = freshSt();
+    applyBatchEntryTimestamps(st, batchEntry(30, '2026-07-01T00:00:00.000Z'));
+    applyBatchEntryTimestamps(st, batchEntry(2, '2026-07-01T01:00:00.000Z', { firstText: 'quick q' }));
+    assert.equal(st.currentSessionId, '2026-07-01T00:00:00.000Z');
+    assert.equal(st.timestamps.length, 30);
+  });
+
+  it('slimmed compact continuation (_compactContinuation:true) does NOT reset and truncates accumulators', () => {
+    // The P0 scenario: slim pass emptied the compact entry's messages before the
+    // batch boundary check; the stamped flag must (a) prevent a session split and
+    // (b) truncate positional ts so post-compact growth gets fresh timestamps.
+    const st = freshSt();
+    applyBatchEntryTimestamps(st, batchEntry(30, '2026-07-01T00:00:00.000Z'));
+    const compact = batchEntry(10, '2026-07-01T02:00:00.000Z', { slimmed: true, compactFlag: true });
+    applyBatchEntryTimestamps(st, compact);
+    assert.equal(st.currentSessionId, '2026-07-01T00:00:00.000Z', 'compact must not split the session');
+    assert.equal(st.timestamps.length, 10, 'accumulators truncated to compact length');
+    const e3 = batchEntry(12, '2026-07-01T03:00:00.000Z');
+    applyBatchEntryTimestamps(st, e3);
+    assert.equal(e3.body.messages[0]._timestamp, '2026-07-01T00:00:00.000Z', 'stable id preserved');
+    assert.equal(e3.body.messages[11]._timestamp, '2026-07-01T03:00:00.000Z', 'post-compact growth gets fresh ts');
+  });
+
+  it('user_id change with an established session resets (new session)', () => {
+    const st = freshSt();
+    applyBatchEntryTimestamps(st, batchEntry(20, '2026-07-01T00:00:00.000Z', { userId: 'u1' }));
+    const e2 = batchEntry(25, '2026-07-01T01:00:00.000Z', { userId: 'u2' });
+    applyBatchEntryTimestamps(st, e2);
+    assert.equal(st.currentSessionId, '2026-07-01T01:00:00.000Z');
+    assert.equal(e2.body.messages[0]._timestamp, '2026-07-01T01:00:00.000Z');
   });
 });
