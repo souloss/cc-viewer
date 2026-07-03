@@ -143,7 +143,7 @@ ccv -h
 
 ### 日志模式（查看claude code 完整会话）
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * 实时捕获 Claude Code 发出的所有 API 请求，确保是原文，而不是被阉割之后的日志（这很重要！！！）
 * 自动识别并标记 Main Agent 和 Sub Agent 请求（子类型：Plan、Search、Bash）

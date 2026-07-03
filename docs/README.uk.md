@@ -133,7 +133,7 @@ ccv -h
 
 ### Режим логування (перегляд повної сесії claude code)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Захоплення всіх API-запитів від Claude Code у реальному часі — гарантується оригінал, а не урізані логи (це дуже важливо!!!)
 * Автоматичне розпізнавання та маркування запитів Main Agent і Sub Agent (підтипи: Plan, Search, Bash)

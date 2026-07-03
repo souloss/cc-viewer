@@ -133,7 +133,7 @@ Oppfyll din forestilling om mobil programmering. Det finnes også en plugin-meka
 
 ### Logger-modus (Se komplette Claude Code-økter)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Fanger alle API-forespørsler fra Claude Code i sanntid og sikrer råtekst — ikke redigerte logger (dette er viktig!!!)
 * Identifiserer og merker automatisk Main Agent- og Sub Agent-forespørsler (undertyper: Plan, Search, Bash)

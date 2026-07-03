@@ -133,7 +133,7 @@ Cumpla su imaginación sobre la programación móvil. También hay un mecanismo 
 
 ### Modo Logger (Ver sesiones completas de Claude Code)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Captura todas las solicitudes API de Claude Code en tiempo real, asegurando texto sin procesar — no registros censurados (¡¡¡esto es importante!!!)
 * Identifica y etiqueta automáticamente las solicitudes de Main Agent y Sub Agent (subtipos: Plan, Search, Bash)

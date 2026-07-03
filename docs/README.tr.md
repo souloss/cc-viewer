@@ -133,7 +133,7 @@ Mobil programlamaya dair hayallerinizi gerçekleştirin. Ayrıca bir eklenti mek
 
 ### Log modu (claude code'un eksiksiz oturumlarını görüntüleyin)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Claude Code'un gönderdiği tüm API isteklerini gerçek zamanlı olarak yakalar; orijinal metin olduğunu, kırpılmış logları değil (bu çok önemli!!!)
 * Main Agent ve Sub Agent isteklerini otomatik olarak tanımlar ve etiketler (alt türler: Plan, Search, Bash)

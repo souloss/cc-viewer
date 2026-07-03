@@ -133,7 +133,7 @@ Spełnij swoje wyobrażenie o programowaniu mobilnym. Istnieje również mechani
 
 ### Tryb loggera (Wyświetlanie pełnych sesji Claude Code)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Przechwytuje wszystkie żądania API z Claude Code w czasie rzeczywistym, zapewniając tekst surowy — nie zredagowane logi (to jest ważne!!!)
 * Automatycznie identyfikuje i oznacza żądania Main Agent i Sub Agent (podtypy: Plan, Search, Bash)

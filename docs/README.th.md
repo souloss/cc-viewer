@@ -133,7 +133,7 @@ ccv -h
 
 ### โหมด Logger (ดูเซสชันที่สมบูรณ์ของ claude code)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * ดักจับคำขอ API ทั้งหมดที่ Claude Code ส่งออกแบบเรียลไทม์ รับรองว่าเป็นข้อความต้นฉบับ ไม่ใช่ log ที่ถูกตัดทอน (สิ่งนี้สำคัญมาก!!!)
 * ระบุและทำเครื่องหมายคำขอของ Main Agent และ Sub Agent โดยอัตโนมัติ (ชนิดย่อย: Plan, Search, Bash)

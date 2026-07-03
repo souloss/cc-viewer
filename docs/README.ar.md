@@ -133,7 +133,7 @@ ccv -h
 
 ### وضع التسجيل (عرض الجلسة الكاملة لـ claude code)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * التقاط جميع طلبات API الصادرة من Claude Code في الوقت الفعلي، مع ضمان أنها هي النص الأصلي وليست سجلات تم اقتطاعها (هذا مهم جدًا!!!)
 * التعرف التلقائي على طلبات Main Agent وSub Agent ووسمها (الأنواع الفرعية: Plan، Search، Bash)

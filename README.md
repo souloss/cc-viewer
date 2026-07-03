@@ -143,7 +143,7 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 
 ### Logger mode (view the complete Claude Code session)
 
-<img height="768" width="1500" alt="image" src="https://github.com/user-attachments/assets/a8a9f3f7-d876-4f6b-a64d-f323a05c4d21" />
+<img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
 
 * Captures every API request from Claude Code in real time, guaranteeing the raw payload rather than a censored log (this matters a lot!!!)
 * Automatically identifies and labels Main Agent and Sub Agent requests (subtypes: Plan, Search, Bash)
@@ -151,7 +151,7 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 * Each request inlines Token usage stats (input/output tokens, cache creation/read, hit rate)
 * Compatible with Claude Code Router (CCR) and other proxy scenarios — falls back to matching requests by API path pattern
 
-<a href="https://www.star-history.com/?type=date&repos=weiesky%2Fcc-viewer">
+<a href="https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
