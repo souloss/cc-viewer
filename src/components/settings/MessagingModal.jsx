@@ -4,6 +4,7 @@ import { MessageOutlined } from '@ant-design/icons';
 import { imTr as _tr } from '../../utils/imTr';
 import ImPlatformSettings from './ImPlatformSettings';
 import { IM_PLATFORMS } from './imPlatforms';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import styles from './MessagingModal.module.css';
 
 // IM tool tabs derived from the platform registry (imPlatforms.js); the tab strip renders
@@ -35,7 +36,7 @@ export default function MessagingModal({ open, onClose, initialTool }) {
       // Modal body 取 --bg-elevated,内部 toolBody 取 --bg-container,二者对比让
       // active tab "拉出贴合下方面板" 的 Chrome 标签观感在明暗主题都成立(对照 UltraPlan)。
       // header 同步取 --bg-elevated,否则 light 下标题栏(antd 默认 #FFF)会与 body(#F9F9F9)错色。
-      styles={{ content: { background: 'var(--bg-elevated)' }, header: { background: 'var(--bg-elevated)' } }}
+      styles={{ content: { background: 'var(--bg-elevated)' }, header: { background: 'var(--bg-elevated)' }, mask: BLUR_MASK_STYLE }}
       title={<span><MessageOutlined style={{ marginInlineEnd: 8 }} />{_tr('ui.messaging.title', null, 'Messaging Integrations')}</span>}
     >
       <div className={styles.tabRow}>

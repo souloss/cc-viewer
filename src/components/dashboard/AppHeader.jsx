@@ -9,6 +9,7 @@ import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeT
 import { PERM_AUTO_APPROVE_OPTIONS, PLAN_AUTO_APPROVE_OPTIONS, autoApproveSelectOptions } from '../../utils/autoApproveOptions';
 import { classifyUserContent, isMainAgent, extractDisplayText } from '../../utils/contentFilter';
 import { parseImOrigin } from '../../utils/imOrigin';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import { sortSkillsDefault } from '../../utils/skillsParser';
 import { handleSkillToggle, handleSkillDelete } from '../../utils/skillModalController';
 import { PINNED_KEY, parsePinned, serializePinned, togglePinned } from '../../utils/pinnedMenu';
@@ -1883,6 +1884,7 @@ class AppHeader extends React.Component {
           onCancel={() => this.setState({ promptModalVisible: false })}
           footer={null}
           width={700}
+          styles={{ mask: BLUR_MASK_STYLE }}
         >
           <div className={styles.promptExportBar}>
             <Button icon={<DownloadOutlined />} onClick={this.handleExportPromptsTxt}>

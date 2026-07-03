@@ -4,6 +4,7 @@ import { ReloadOutlined, DashboardOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { isMobile } from '../../env';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import styles from './ProcessModal.module.css';
 import sharedChrome from '../common/sharedChrome.module.css';
 import appStyles from '../../App.module.css';
@@ -164,7 +165,7 @@ export default function ProcessModal({ open, onClose }) {
         width={780}
         // mobile portal 适配：modal 通过 ReactDOM portal 逃出 mobileCachePanelInner zoom:0.6 容器，
         // 因此 body 自身需补 zoom:0.6 才能视觉与外层 mobile UI 一致（同 SkillsManagerModal:50）
-        styles={{ body: isMobile ? { zoom: 0.6 } : {} }}
+        styles={{ body: isMobile ? { zoom: 0.6 } : {}, mask: BLUR_MASK_STYLE }}
       >
         {tableNode}
       </Modal>

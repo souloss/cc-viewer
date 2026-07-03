@@ -4,6 +4,7 @@ import { ApiOutlined, PlusOutlined, ReloadOutlined, DeleteOutlined, CloudDownloa
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { isMobile } from '../../env';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import { SettingsContext } from '../../contexts/SettingsContext';
 import styles from './PluginModal.module.css';
 import sharedChrome from '../common/sharedChrome.module.css';
@@ -411,7 +412,7 @@ export default function PluginModal({ open, onClose }) {
         onCancel={onClose}
         footer={footerNode}
         width={560}
-        styles={{ body: isMobile ? { zoom: 0.6 } : {} }}
+        styles={{ body: isMobile ? { zoom: 0.6 } : {}, mask: BLUR_MASK_STYLE }}
       >
         {bodyNode}
       </Modal>

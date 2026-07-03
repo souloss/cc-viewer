@@ -19,6 +19,7 @@ import { filterRelevantRequests, findPrevMainAgentTimestamp } from './utils/help
 import { isMainAgent } from './utils/contentFilter';
 import { classifyRequest } from './utils/requestType';
 import { apiUrl } from './utils/apiUrl';
+import { BLUR_MASK_STYLE } from './utils/modalMask';
 
 class App extends AppBase {
   constructor(props) {
@@ -578,7 +579,7 @@ class App extends AppBase {
           onCancel={this.handleCloseImportModal}
           footer={null}
           width={1000}
-          styles={{ body: { overflow: 'hidden' } }}
+          styles={{ body: { overflow: 'hidden' }, mask: BLUR_MASK_STYLE }}
         >
           <div className={styles.modalActions}>
             <Button size="small" icon={<UploadOutlined />} onClick={this.handleLoadLocalJsonlFile}>

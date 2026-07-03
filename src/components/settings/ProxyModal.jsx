@@ -3,6 +3,7 @@ import { Modal, Button, Input, Radio, Select, Tag, message } from 'antd';
 import { EditOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { isMobile } from '../../env';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import ConceptHelp from '../common/ConceptHelp';
 import styles from './ProxyModal.module.css';
 import appStyles from '../../App.module.css';
@@ -296,7 +297,7 @@ export default function ProxyModal({
         onCancel={onClose}
         footer={null}
         width={520}
-        styles={{ body: isMobile ? { zoom: 0.6 } : {} }}
+        styles={{ body: isMobile ? { zoom: 0.6 } : {}, mask: BLUR_MASK_STYLE }}
       >
         {bodyNode}
       </Modal>

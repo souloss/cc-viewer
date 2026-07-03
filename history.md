@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- feat(ui): the six hamburger-menu feature modals (Log Management, Export user prompts, Plugin Management, CCV Process Manager, Messaging Integration, Hot-Switch Proxy) now show a Gaussian-blurred overlay matching the AskUserQuestion / plan-approval backdrop (`rgba(0,0,0,0.45)` + `blur(2px)`), applied per-instance via a shared `BLUR_MASK_STYLE` constant so no other pop-up is affected; nested sub-dialogs keep the default mask
+- test(ui): `modal-mask.test.js` guards the blur — the constant stays byte-synced with `ApprovalModal.module.css`, and a recursive source walk pins the consumer set to exactly the six modals (a seventh adopter or a dropped target fails the suite)
+
 ## 1.6.333 (2026-07-03)
 
 - fix(仅展示当前会话): eliminate intermittent wrong-session anchoring after idle / SSE reconnect / refresh — the pin now follows the newest-ACTIVITY hot session (`getLatestSessionByActivity`) instead of the last-inserted list element (insertion order ≠ recency under multi-terminal interleave and truncated reconnect replays); pin hydrate is sequenced (`runPinHydration`): a stale server pin loses to the locally derived latest, superseded GETs are discarded (including after unmount), the in-flight gate clears before the follow-latest self-heal so an idle stream self-corrects, and a poisoned `.session-pin*.json` is healed by an explicit re-persist
