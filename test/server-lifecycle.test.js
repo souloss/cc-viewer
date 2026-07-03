@@ -18,6 +18,7 @@
 //     不适合单测里等待/打网络（G5 可用 mock 单独覆盖 updater.js）。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -122,7 +123,7 @@ function getJson(port, path) {
   });
 }
 
-describe('server.js lifecycle: start/stop rounds + EADDRINUSE + SSE broadcasts', { concurrency: false }, () => {
+describeCli('server.js lifecycle: start/stop rounds + EADDRINUSE + SSE broadcasts', { concurrency: false }, () => {
   let mod;
 
   before(async () => {

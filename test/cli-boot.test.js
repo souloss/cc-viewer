@@ -29,6 +29,7 @@
 // {concurrency:false}：每个用例起一个真 server 占私有端口，串行避免任何窗口抢占。
 
 import { describe, it, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import {
@@ -202,7 +203,7 @@ function parseLocalPort(out) {
 // spawnClaude（fake 常驻 claude）+ --no-open（跳过开浏览器）+ 打印 URL/Network + 注册 SIGINT
 // cleanup。覆盖 342-417 主体 + 424-430 cleanup（SIGINT 路径）。
 
-describe('cli-boot: runCliMode 真实启动 → SIGINT 干净退出', { concurrency: false }, () => {
+describeCli('cli-boot: runCliMode 真实启动 → SIGINT 干净退出', { concurrency: false }, () => {
   it('--no-open：server 启动 + spawn fake claude + 打印 Local/Network，SIGINT 后 exit 0 且端口释放', async () => {
     const fx = bootFixture({ startPort: 17940, endPort: 17943 });
     const r = await bootAndSignal({
@@ -248,7 +249,7 @@ describe('cli-boot: runCliMode 真实启动 → SIGINT 干净退出', { concurre
 // --usePassword=<pwd> → server.js 启用密码登录 → cli.js 在启动尾部打印 passwordActive 文案
 // （server.js 的密码打印只在非 CLI 模式生效，故由 cli.js 这里补打）。覆盖 418-421 的 enabled 分支。
 
-describe('cli-boot: runCliMode + --usePassword 打印激活密码', { concurrency: false }, () => {
+describeCli('cli-boot: runCliMode + --usePassword 打印激活密码', { concurrency: false }, () => {
   it('--usePassword=secret123：启动尾部打印 password active（getAuthConfig enabled 分支）', async () => {
     const fx = bootFixture({ startPort: 17948, endPort: 17951 });
     const r = await bootAndSignal({
@@ -269,7 +270,7 @@ describe('cli-boot: runCliMode + --usePassword 打印激活密码', { concurrenc
 // import server.js + 等端口 + initSdkSession + 注册 SDK 回调 + --no-open + 打印 URL/Network +
 // 注册 SIGINT cleanup。SDK 模式不 spawn claude，故无需 fake claude。覆盖 502-593 主体。
 
-describe('cli-boot: runSdkMode 真实启动 → SIGINT 干净退出', { concurrency: false }, () => {
+describeCli('cli-boot: runSdkMode 真实启动 → SIGINT 干净退出', { concurrency: false }, () => {
   it('--sdk --no-open：SDK 会话初始化 + server 启动 + 打印 "(SDK mode)"，SIGINT 后 exit 0 且端口释放', async () => {
     // SDK 路径不需要 claude；PATH 仍剥离。cwd=REPO_ROOT 让 agent-sdk import 命中仓库 node_modules。
     const root = mkTmp('ccv-boot-sdk-');

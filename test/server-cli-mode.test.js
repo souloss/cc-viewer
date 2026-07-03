@@ -16,6 +16,7 @@
 // node-pty 加载失败（缺平台 prebuild）→ 整套 skip。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import { request } from 'node:http';
@@ -152,7 +153,7 @@ function connectSse(port) {
 let ptyAvailable = false;
 try { await import('node-pty'); ptyAvailable = true; } catch { ptyAvailable = false; }
 
-describe('server.js CLI-mode terminal WS with a real PTY', { concurrency: false, skip: ptyAvailable ? false : 'node-pty unavailable' }, () => {
+describeCli('server.js CLI-mode terminal WS with a real PTY', { concurrency: false, skip: ptyAvailable ? false : 'node-pty unavailable' }, () => {
   let mod, ptyMgr, scratchMgr, port, base;
 
   before(async () => {

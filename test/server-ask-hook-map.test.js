@@ -9,6 +9,7 @@
 // the server responds, neither side should observe a 409 — that status only appears when
 // the legacy single-slot path actively cancels the prior request.
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync } from 'node:fs';
@@ -49,7 +50,7 @@ function postAskHook(port, questions, clientTimeoutMs) {
   });
 }
 
-describe('server ask-hook Map (concurrent asks)', { concurrency: false }, () => {
+describeCli('server ask-hook Map (concurrent asks)', { concurrency: false }, () => {
   let port, stopViewer;
 
   before(async () => {

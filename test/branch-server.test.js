@@ -19,6 +19,7 @@
 // __testing；node:test 默认按文件进程隔离，本文件独占一个 server.js 单例。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { WebSocket } from 'ws';
@@ -277,7 +278,7 @@ try {
 // ════════════════════════════════════════════════════════════════════════
 // A + B. 在进程内 CLI-mode server 上跑 handleRequest 分支
 // ════════════════════════════════════════════════════════════════════════
-describe('server.js handleRequest 分支（in-process CLI server）', { concurrency: false }, () => {
+describeCli('server.js handleRequest 分支（in-process CLI server）', { concurrency: false }, () => {
   let mod, port;
 
   before(async () => {
@@ -603,7 +604,7 @@ describe('server.js handleRequest 分支（in-process CLI server）', { concurre
 // ════════════════════════════════════════════════════════════════════════
 // C. 模块加载期 / startViewer env 分支（子进程 canonical import）
 // ════════════════════════════════════════════════════════════════════════
-describe('server.js 模块加载期 / startViewer env 分支（子进程）', { concurrency: false }, () => {
+describeCli('server.js 模块加载期 / startViewer env 分支（子进程）', { concurrency: false }, () => {
   it('CCV_USE_PASSWORD=1 无显式密码 → generatePassword()（line 335）', () => {
     const res = runScenario('usePasswordGen', {
       CCV_USE_PASSWORD: '1',
@@ -878,7 +879,7 @@ export default {
 // ════════════════════════════════════════════════════════════════════════
 // D. turn-end 状态机 / SDK export 分支（__testing namespace + 直接调 export）
 // ════════════════════════════════════════════════════════════════════════
-describe('server.js turn-end 状态机 / SDK export 分支', { concurrency: false }, () => {
+describeCli('server.js turn-end 状态机 / SDK export 分支', { concurrency: false }, () => {
   let mod;
   before(async () => { mod = await import('../server/server.js'); });
   after(() => { rmSync(tmpDir, { recursive: true, force: true }); });

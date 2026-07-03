@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { t } from './server/i18n.js';
-import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath, resolveNpmClaudePath, buildShellCandidates, setLogDir, LOG_DIR, hasClaude2xWrapper, getGlobalNodeModulesDir, PACKAGES, getClaudeConfigDir } from './findcc.js';
+import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath, resolveNpmClaudePath, buildShellCandidates, setLogDir, LOG_DIR, hasClaude2xWrapper, getGlobalNodeModulesDir, PACKAGES, getClaudeConfigDir, isBrowserOpenSuppressed } from './findcc.js';
 import { ensureHooks, removeAllManagedHooks } from './server/lib/ensure-hooks.js';
 import { injectCliJsAt, removeCliJsInjectionAt, INJECT_START as _INJECT_START, INJECT_END as _INJECT_END, buildInjectBlock as _buildInjectBlock } from './server/lib/cli-inject.js';
 import { normalizeBasePath } from './server/lib/base-path.js';
@@ -662,6 +662,11 @@ const noOpenIdx = args.indexOf('--no-open');
 if (noOpenIdx !== -1) {
   noOpen = true;
   args.splice(noOpenIdx, 1);
+}
+// L7 sandbox: never pop real browser windows from tests (NODE_TEST_CONTEXT) or
+// CCV_NO_OPEN=1 environments — single derivation point feeding both run modes.
+if (!noOpen && isBrowserOpenSuppressed()) {
+  noOpen = true;
 }
 
 // Extract --user-name <name>

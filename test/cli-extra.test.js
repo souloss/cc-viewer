@@ -14,6 +14,7 @@
 // CLAUDE_CONFIG_DIR；日志一律 CCV_LOG_DIR=tmp，after() 清理临时目录。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
@@ -62,7 +63,7 @@ after(() => {
 
 // ════════════════════ 参数提取：--log-dir ════════════════════
 
-describe('cli: --log-dir 参数提取', () => {
+describeCli('cli: --log-dir 参数提取', () => {
   it('合法 /tmp/ 路径被接受，随后 --help 干净退出', () => {
     const r = runCli(['--log-dir', '/tmp/ccv-extra-logs', '--help']);
     assert.equal(r.exitCode, 0);
@@ -88,7 +89,7 @@ describe('cli: --log-dir 参数提取', () => {
 
 // ════════════════════ 参数提取：--user-name ════════════════════
 
-describe('cli: --user-name 参数提取', () => {
+describeCli('cli: --user-name 参数提取', () => {
   it('合法值被提取，--help 干净退出', () => {
     const r = runCli(['--user-name', 'Alice', '--help']);
     assert.equal(r.exitCode, 0);
@@ -112,7 +113,7 @@ describe('cli: --user-name 参数提取', () => {
 
 // ════════════════════ 参数提取：--user-avatar ════════════════════
 
-describe('cli: --user-avatar 参数提取', () => {
+describeCli('cli: --user-avatar 参数提取', () => {
   it('相对路径会被解析为绝对路径（走 resolve 分支），--help 退出', () => {
     const r = runCli(['--user-avatar', './me.png', '--help']);
     assert.equal(r.exitCode, 0);
@@ -143,7 +144,7 @@ describe('cli: --user-avatar 参数提取', () => {
 
 // ════════════════════ 参数提取：--usePassword ════════════════════
 
-describe('cli: --usePassword 参数提取', () => {
+describeCli('cli: --usePassword 参数提取', () => {
   it('裸 --usePassword 被消费（随机密码模式），--help 退出', () => {
     const r = runCli(['--usePassword', '--help']);
     assert.equal(r.exitCode, 0);
@@ -163,7 +164,7 @@ describe('cli: --usePassword 参数提取', () => {
 
 // ════════════════════ 参数提取：--no-open + 组合 ════════════════════
 
-describe('cli: --no-open 与组合参数提取', () => {
+describeCli('cli: --no-open 与组合参数提取', () => {
   it('--no-open 在 --help 前被剥离，不影响 help', () => {
     const r = runCli(['--no-open', '--help']);
     assert.equal(r.exitCode, 0);
@@ -179,7 +180,7 @@ describe('cli: --no-open 与组合参数提取', () => {
 
 // ════════════════════ 参数提取：--im ════════════════════
 
-describe('cli: --im 参数提取与未知平台', () => {
+describeCli('cli: --im 参数提取与未知平台', () => {
   it('缺失平台 id 报错退出非 0', () => {
     const r = runCli(['--im']);
     assert.notEqual(r.exitCode, 0);
@@ -200,7 +201,7 @@ describe('cli: --im 参数提取与未知平台', () => {
 // ════════════════════ ccv run（runProxyCommand）════════════════════
 // runProxyCommand 启动一次性 proxy，再 spawn 子命令；子进程退出后整体退出，不常驻。
 
-describe('cli: ccv run（runProxyCommand 派发）', () => {
+describeCli('cli: ccv run（runProxyCommand 派发）', () => {
   it('run 后无命令 → "No command provided to run." 退出非 0', () => {
     const r = runCli(['run']);
     assert.notEqual(r.exitCode, 0);
@@ -238,7 +239,7 @@ describe('cli: ccv run（runProxyCommand 派发）', () => {
 
 // ════════════════════ --uninstall：settings.json 清理 ════════════════════
 
-describe('cli: --uninstall settings.json 清理块', () => {
+describeCli('cli: --uninstall settings.json 清理块', () => {
   it('清除 cc-viewer-managed hooks + statusLine + ccv-statusline.sh + context-window.json，保留用户键', () => {
     const home = mkTmp('ccv-uninst-');
     const ccfg = join(home, '.claude');
@@ -334,14 +335,17 @@ function seedNativeClaude(home) {
 // 盲调成本过高,经决策 CI 跳过、本地照常验证(2026-06-06)。本地任何回归仍会被捕获。
 const SKIP_ON_CI = process.env.CI ? 'CI 裸机 -logger native 链路环境差异,本地保留验证' : false;
 
-describe('cli: -logger（native 安装路径）', () => {
+describeCli('cli: -logger（native 安装路径）', () => {
   const HOOK_MARK = 'CC-Viewer Auto-Inject';
 
   it('全新 .zshrc：安装 hook，退出 0', { skip: SKIP_ON_CI }, () => {
     const home = mkTmp('ccv-logger-fresh-');
     seedNativeClaude(home);
     writeFileSync(join(home, '.zshrc'), '# my config\n');
-    const r = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh' } });
+    // L7: CLAUDE_CONFIG_DIR is the sanctioned seam for the seeded native candidate
+    // (~/.claude expands through getClaudeConfigDir, L1b-redirected under tests);
+    // sanitized PATH keeps the ungated which-lookup from finding a real claude.
+    const r = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: join(home, '.claude'), PATH: '/usr/bin:/bin' } });
     assert.equal(r.exitCode, 0);
     const zshrc = readFileSync(join(home, '.zshrc'), 'utf-8');
     assert.ok(zshrc.includes(HOOK_MARK), '应写入 hook marker');
@@ -352,10 +356,11 @@ describe('cli: -logger（native 安装路径）', () => {
     const home = mkTmp('ccv-logger-idem-');
     seedNativeClaude(home);
     writeFileSync(join(home, '.zshrc'), '# cfg\n');
-    const r1 = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh' } });
+    const loggerEnv = { HOME: home, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: join(home, '.claude'), PATH: '/usr/bin:/bin' };
+    const r1 = runCli(['-logger'], { env: loggerEnv });
     assert.equal(r1.exitCode, 0);
     const afterFirst = readFileSync(join(home, '.zshrc'), 'utf-8');
-    const r2 = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh' } });
+    const r2 = runCli(['-logger'], { env: loggerEnv });
     assert.equal(r2.exitCode, 0);
     const afterSecond = readFileSync(join(home, '.zshrc'), 'utf-8');
     assert.equal(afterSecond, afterFirst, '二次 -logger 后 .zshrc 字节稳定（幂等）');
@@ -377,7 +382,7 @@ describe('cli: -logger（native 安装路径）', () => {
       '# user after',
     ].join('\n');
     writeFileSync(join(home, '.zshrc'), stale);
-    const r = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh' } });
+    const r = runCli(['-logger'], { env: { HOME: home, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: join(home, '.claude'), PATH: '/usr/bin:/bin' } });
     assert.equal(r.exitCode, 0);
     const after = readFileSync(join(home, '.zshrc'), 'utf-8');
     assert.ok(!after.includes('echo stale-hook'), '旧 hook 内容应被替换');
@@ -393,9 +398,13 @@ describe('cli: -logger（native 安装路径）', () => {
 // 调用 reportClaudeNotFound() 给出诊断。两条分支：
 //   A. 全局 node_modules 含 install.cjs（2.x wrapper 在场）但二进制缺失 → "binary missing" 指引
 //   B. 完全没检测到 Claude Code → "not found" + native hint
-// 通过隔离 PATH（无 claude / 无 npm 或 fake npm）+ fake HOME（native 候选路径全 miss）触发。
+// Isolation: sanitized PATH (no claude; no npm, or a fake npm) + CLAUDE_CONFIG_DIR under the
+// fake HOME. The absolute NATIVE_CANDIDATES (/usr/local/bin, /opt/homebrew/bin) ignore both —
+// they used to defeat these tests on machines with a real claude installed; the L7 lookup gate
+// (findcc.js isRealClaudeLookupBlocked, NODE_TEST_CONTEXT) now blocks them, making the
+// not-found branches deterministic everywhere.
 
-describe('cli: -logger reportClaudeNotFound 诊断分支', () => {
+describeCli('cli: -logger reportClaudeNotFound 诊断分支', () => {
   it('B：完全找不到 Claude（隔离 PATH、无 npm）→ not found + native hint，退出 1', () => {
     const home = mkTmp('ccv-noclaude-');
     const r = runCli(['-logger'], {
@@ -453,7 +462,7 @@ describe('cli: -logger reportClaudeNotFound 诊断分支', () => {
 // 必须在 import 前置 CCV_PROXY_MODE=1（命中 _ccvSkip 之外的惰性分支）；import 后立刻
 // 还原该 env，防止泄漏给后续会 spawn cli.js 子进程的用例。
 
-describe('interceptor.js 根 shim：re-export', () => {
+describeCli('interceptor.js 根 shim：re-export', () => {
   it('完整 re-export server/interceptor.js 的全部具名导出（同引用）', async () => {
     const savedProxy = process.env.CCV_PROXY_MODE;
     process.env.CCV_PROXY_MODE = '1'; // 让拦截器保持惰性，不 patch 全局 http

@@ -18,6 +18,7 @@
 // 需 runSdkMode），SIGWINCH 重绘 / 反压 timeout terminate（需真 PTY 洪泛）。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import { request } from 'node:http';
@@ -153,7 +154,7 @@ function connectWs(base, path = '/ws/terminal') {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-describe('server.js terminal WS long-poll resolution branches (CLI mode)', { concurrency: false }, () => {
+describeCli('server.js terminal WS long-poll resolution branches (CLI mode)', { concurrency: false }, () => {
   let mod, port, base;
 
   before(async () => {

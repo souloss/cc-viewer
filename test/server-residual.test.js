@@ -45,6 +45,7 @@
 //     定时器 + npm registry 网络（见 server-lifecycle.test.js 顶注）。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -105,7 +106,7 @@ async function stopAndSettle(mod) {
   await wait(120);
 }
 
-describe('server.js residual: deps.setAuthConfig / clearAuthOverride via /api/auth/config', { concurrency: false }, () => {
+describeCli('server.js residual: deps.setAuthConfig / clearAuthOverride via /api/auth/config', { concurrency: false }, () => {
   let mod, port;
 
   before(async () => {
@@ -151,7 +152,7 @@ describe('server.js residual: deps.setAuthConfig / clearAuthOverride via /api/au
   });
 });
 
-describe('server.js residual: _notifyParentPending switch via broadcastWsMessage (process.send installed)', { concurrency: false }, () => {
+describeCli('server.js residual: _notifyParentPending switch via broadcastWsMessage (process.send installed)', { concurrency: false }, () => {
   let mod, port, prevSend;
   let captured;
 
@@ -222,7 +223,7 @@ describe('server.js residual: _notifyParentPending switch via broadcastWsMessage
   });
 });
 
-describe('server.js residual: setSdkStreamingState no-edge inactive branch', { concurrency: false }, () => {
+describeCli('server.js residual: setSdkStreamingState no-edge inactive branch', { concurrency: false }, () => {
   let mod;
 
   before(async () => {
@@ -263,7 +264,7 @@ describe('server.js residual: setSdkStreamingState no-edge inactive branch', { c
   });
 });
 
-describe('server.js residual: beforeRequest plugin throw is SWALLOWED by loader (pins actual behavior)', { concurrency: false }, () => {
+describeCli('server.js residual: beforeRequest plugin throw is SWALLOWED by loader (pins actual behavior)', { concurrency: false }, () => {
   let mod, port;
   const PLUGIN_NAME = 'residual-throwing.js';
 
@@ -333,7 +334,7 @@ function postLongPoll(port, path, body) {
   return { req, done, abort: () => { try { req.destroy(); } catch {} } };
 }
 
-describe('server.js residual: serverStarted interactions resolvePerm / resolveAsk on real pending entries', { concurrency: false }, () => {
+describeCli('server.js residual: serverStarted interactions resolvePerm / resolveAsk on real pending entries', { concurrency: false }, () => {
   let mod, port;
   const PLUGIN_NAME = 'residual-interactions.js';
   const GLOBAL_KEY = '__ccvResidualInteractions';

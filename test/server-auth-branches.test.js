@@ -13,6 +13,7 @@
 // 无法从本机入站触发这些拒绝分支。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -58,7 +59,7 @@ function raw(port, path, { method = 'GET', headers = {} } = {}) {
   });
 }
 
-describe('server.js with password auth enabled (loopback always-allow invariant)', { concurrency: false }, () => {
+describeCli('server.js with password auth enabled (loopback always-allow invariant)', { concurrency: false }, () => {
   let mod, port, token;
 
   before(async () => {

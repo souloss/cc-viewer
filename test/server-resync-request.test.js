@@ -8,6 +8,7 @@
 // 隔离同 server-ws-branches.test.js：CCV_CLI_MODE=1 + mkdtemp env，NODE_ENV=test，
 // 全程不发 input → 不拉起 node-pty 子进程。
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -70,7 +71,7 @@ function connectWs(base, path = '/ws/terminal') {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-describe('server.js terminal WS resync-request branch (CLI mode)', { concurrency: false }, () => {
+describeCli('server.js terminal WS resync-request branch (CLI mode)', { concurrency: false }, () => {
   let mod, port, base;
 
   before(async () => {

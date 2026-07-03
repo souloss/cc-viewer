@@ -17,6 +17,7 @@
 // （SIGWINCH 重绘、反压 timeout terminate）放过。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -58,7 +59,7 @@ function openWs(base, path, { sendAfterOpen = [], collectMs = 350 } = {}) {
   });
 }
 
-describe('server.js terminal WebSocket (CLI mode)', { concurrency: false }, () => {
+describeCli('server.js terminal WebSocket (CLI mode)', { concurrency: false }, () => {
   let mod, port, base, token;
 
   before(async () => {

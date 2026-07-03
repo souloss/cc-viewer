@@ -7,9 +7,10 @@
 // 为不污染 currentLang 跨用例，凡改 process.env.LANG 的用例都在 finally 里复原，并显式 setLang 回 'en'。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 
-describe('server/i18n.js export branches', () => {
+describeCli('server/i18n.js export branches', () => {
   let i18n;
   let savedLang;
 

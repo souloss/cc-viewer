@@ -11,6 +11,7 @@
 // 指向本仓库根，让 git 路由有真实 repo。{concurrency:false}。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -49,7 +50,7 @@ function raw(port, path, { method = 'GET', headers = {}, body = null } = {}) {
   });
 }
 
-describe('server.js startup-path extras', { concurrency: false }, () => {
+describeCli('server.js startup-path extras', { concurrency: false }, () => {
   let mod, port;
 
   before(async () => {

@@ -203,11 +203,19 @@ describe('findcc: resolveNpmClaudePath', () => {
     process.env.PATH = `${binDir}:/usr/bin:/bin`;
     delete process.env.NPM_CONFIG_PREFIX;
 
-    const got = resolveNpmClaudePath();
-    assert.equal(got, join(pkgDir, 'cli.js'),
-      `应从 fake npm 报告的全局 node_modules 兜底找到 cli.js，实得: ${got}`);
-    // 顺带验证 getGlobalNodeModulesDir 也走通 fake npm
-    assert.equal(getGlobalNodeModulesDir(), gnm);
+    // This test exercises the step-2 npm-root-g fallback IN-PROCESS, which the L7 lookup
+    // gate blocks under NODE_TEST_CONTEXT — open the sanctioned escape door for this one
+    // assertion (same idiom as im-spawn-test-guard's CCV_TEST_ALLOW_IM_SPAWN).
+    process.env.CCV_TEST_ALLOW_REAL_CLAUDE = '1';
+    try {
+      const got = resolveNpmClaudePath();
+      assert.equal(got, join(pkgDir, 'cli.js'),
+        `应从 fake npm 报告的全局 node_modules 兜底找到 cli.js，实得: ${got}`);
+      // 顺带验证 getGlobalNodeModulesDir 也走通 fake npm
+      assert.equal(getGlobalNodeModulesDir(), gnm);
+    } finally {
+      delete process.env.CCV_TEST_ALLOW_REAL_CLAUDE;
+    }
   });
 });
 

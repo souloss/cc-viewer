@@ -27,4 +27,6 @@ jobs:
       - run: npm rebuild node-pty
       # Static serving / SSR injection tests need real dist/
       - run: npm run build
-      - run: npm test
+      # Full suite: fast unit tier + the CCV_TEST_CLI-gated CLI/server integration tier
+      # (a superset of `npm test`, which developers use for the fast local loop).
+      - run: npm run test:cli

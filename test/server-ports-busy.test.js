@@ -9,6 +9,7 @@
 // 进程卫生：squatter listener 在 finally 里 close；startViewer 返回 null 时无 server 需停。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -34,7 +35,7 @@ delete process.env.CCV_ALLOWED_HOSTS;
 delete process.env.CCV_USE_PASSWORD;
 delete process.env.CCV_PASSWORD;
 
-describe('server.js startViewer exhausts the port range (portsBusy)', { concurrency: false }, () => {
+describeCli('server.js startViewer exhausts the port range (portsBusy)', { concurrency: false }, () => {
   let squatter;
 
   before(async () => {

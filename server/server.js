@@ -74,7 +74,7 @@ function execWithStdin(cmd, args, input, options) {
 }
 import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
 import { recordInstance, listInstances } from './lib/instance-registry.js';
-import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../findcc.js';
+import { LOG_DIR, setLogDir, getClaudeConfigDir, isBrowserOpenSuppressed } from '../findcc.js';
 import { t, getLang, setLang } from './i18n.js';
 import { loadAuthConfig, loadAuthState, saveAuthConfig, clearProjectOverride, generatePassword, decideAuth, parseCookies, renderLoginPage, localeFromAcceptLanguage } from './lib/auth.js';
 import { checkAndUpdate } from './lib/updater.js';
@@ -946,11 +946,12 @@ export async function startViewer() {
             }
           }
           // v2.0.69 之前的版本会清空控制台，自动打开浏览器确保用户能看到界面
+          // L7 sandbox: suppressed under tests / CCV_NO_OPEN=1 (see findcc.js).
           try {
             const ccPkgPath = join(NODE_MODULES, '@anthropic-ai', 'claude-code', 'package.json');
             const ccVer = JSON.parse(readFileSync(ccPkgPath, 'utf-8')).version;
             const [maj, min, pat] = ccVer.split('.').map(Number);
-            if (maj < 2 || (maj === 2 && min === 0 && pat < 69)) {
+            if ((maj < 2 || (maj === 2 && min === 0 && pat < 69)) && !isBrowserOpenSuppressed()) {
               const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open';
               execAsync(`${cmd} ${url}`, { timeout: 5000 }).catch(() => {});
             }

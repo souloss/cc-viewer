@@ -132,6 +132,27 @@ export const LEGACY_INJECT_IMPORTS = [
 
 // ============ Exported functions ============
 
+// ████████ Test isolation barrier L7 — DO NOT REMOVE (browser-window / real-claude leak) ████████
+// Claude-binary discovery must NEVER find the user's real installation from inside tests:
+// the absolute NATIVE_CANDIDATES (/usr/local/bin/claude, /opt/homebrew/bin/claude) and the
+// `npm root -g` global lookup ignore the PATH/HOME isolation every CLI test relies on, so
+// "claude not found" tests used to find and RUN the real claude (30–120s each), open real
+// browser windows, and -logger paths could even mutate a real global claude install via
+// injectCliJs. Same convention as L1/L1b (NODE_TEST_CONTEXT) with the CCV_TEST_ALLOW_*
+// escape idiom of L4 (im-process-manager). PATH-mediated `which` lookup stays UNGATED on
+// purpose — an isolated PATH with a fake `claude` is the sanctioned test fixture seam, as is
+// an explicit CLAUDE_CONFIG_DIR. Unit test: test/claude-lookup-test-guard.test.js.
+export function isRealClaudeLookupBlocked() {
+  return !!process.env.NODE_TEST_CONTEXT && process.env.CCV_TEST_ALLOW_REAL_CLAUDE !== '1';
+}
+
+// Browser auto-open suppression: tests must never pop real browser windows, and
+// CCV_NO_OPEN=1 offers the same switch to any environment without the --no-open flag.
+export function isBrowserOpenSuppressed() {
+  return process.env.CCV_NO_OPEN === '1' || !!process.env.NODE_TEST_CONTEXT;
+}
+// ████████████████████████████████████████████████████████████████████████████
+
 export function getGlobalNodeModulesDir() {
   try {
     return execSync('npm root -g', { encoding: 'utf-8', windowsHide: true }).trim();
@@ -141,8 +162,13 @@ export function getGlobalNodeModulesDir() {
 }
 
 export function resolveCliPath() {
-  // Candidate base directories: local node_modules (cc-viewer's sibling) + global node_modules
-  const baseDirs = [NODE_MODULES];
+  // Candidate base directories: local node_modules (cc-viewer's sibling) + global node_modules.
+  // L7: under test context the NODE_MODULES sibling scan is blocked — on 1.x-layout machines it
+  // finds a REAL global @anthropic-ai/claude-code/cli.js with no npm and no PATH involved, and
+  // -logger tests would then mutate that real install via injectCliJs. The globalRoot push below
+  // stays UNGATED: `npm root -g` is the fake-npm fixture seam (npmLoggerFixture) tests rely on.
+  const blocked = isRealClaudeLookupBlocked();
+  const baseDirs = blocked ? [] : [NODE_MODULES];
   const globalRoot = getGlobalNodeModulesDir();
   if (globalRoot && globalRoot !== NODE_MODULES) {
     baseDirs.push(globalRoot);
@@ -157,7 +183,15 @@ export function resolveCliPath() {
     }
   }
   // 兜底：返回全局目录下的默认路径，便于错误提示
-  return join(globalRoot || NODE_MODULES, PACKAGES[0], CLI_ENTRY);
+  // L7: under the block the fallback hint must NEVER be a real existing path — when the
+  // real `npm root -g` equals NODE_MODULES the loop above never scanned it (the push is
+  // gated on inequality), and rooting the hint there would let cli.js's existsSync go
+  // npm-mode against the real global install. Root it at a never-existing guard dir,
+  // keeping the package-shaped suffix consumers assert on.
+  const fallbackRoot = blocked
+    ? join(tmpdir(), 'cc-viewer-test', `guard-gnm-${process.pid}-${threadId}`)
+    : (globalRoot || NODE_MODULES);
+  return join(fallbackRoot, PACKAGES[0], CLI_ENTRY);
 }
 
 /**
@@ -197,6 +231,10 @@ export function resolveNpmClaudePath() {
     }
   }
 
+  // L7: the global node_modules lookup below ignores PATH isolation (`npm root -g` finds the
+  // real global root regardless of a sanitized PATH) — blocked under test context.
+  if (isRealClaudeLookupBlocked()) return null;
+
   // 2. 尝试从全局 node_modules 查找
   const globalRoot = getGlobalNodeModulesDir();
   if (globalRoot) {
@@ -226,7 +264,9 @@ export function pickSpawnableLookupResult(rawOut, platform = process.platform) {
 }
 
 export function resolveNativePath() {
-  const globalRoot = getGlobalNodeModulesDir();
+  // L7: steps 1 & 4 (platform/packaged binaries under `npm root -g`) ignore PATH isolation —
+  // neutralized under test context via a null globalRoot (both helpers null-guard).
+  const globalRoot = isRealClaudeLookupBlocked() ? null : getGlobalNodeModulesDir();
 
   // 1. 优先：平台特定 optionalDependency 里的原生二进制（如
   //    @anthropic-ai/claude-code-darwin-arm64/claude）。
@@ -263,9 +303,16 @@ export function resolveNativePath() {
   // 3. 检查常见 native 安装路径
   //    注意：~/.claude/ 前缀走 getClaudeConfigDir()，尊重 CLAUDE_CONFIG_DIR 重定向；
   //    其他 ~/ 前缀（如 ~/.local）只走普通 homedir 展开。
+  // L7: under test context only the ~/.claude/ candidates survive — they expand through
+  // getClaudeConfigDir(), which L1b already redirects to a private temp dir under tests (and
+  // an explicit CLAUDE_CONFIG_DIR is the sanctioned fixture seam). The raw absolute candidates
+  // (/usr/local/bin, /opt/homebrew/bin) and plain-~ ones ignore PATH/HOME isolation entirely.
   const home = homedir();
   const claudeDir = getClaudeConfigDir();
-  const candidates = NATIVE_CANDIDATES.map(p => {
+  const nativeCandidates = isRealClaudeLookupBlocked()
+    ? NATIVE_CANDIDATES.filter(p => p.startsWith('~/.claude/'))
+    : NATIVE_CANDIDATES;
+  const candidates = nativeCandidates.map(p => {
     if (p.startsWith('~/.claude/')) return join(claudeDir, p.slice('~/.claude/'.length));
     if (p.startsWith('~')) return join(home, p.slice(2));
     return p;

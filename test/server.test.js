@@ -1,4 +1,5 @@
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -60,7 +61,7 @@ function httpRequest(port, path, { method = 'GET', body = null } = {}) {
   });
 }
 
-describe('server API endpoints', { concurrency: false }, () => {
+describeCli('server API endpoints', { concurrency: false }, () => {
   let startViewer, stopViewer, getPort;
   let port;
 

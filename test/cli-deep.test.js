@@ -40,6 +40,7 @@
 //   - 315-430 / 489-593 真实 server 启动主体、596-667 workspace selector（不可达死代码）。
 
 import { describe, it, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
@@ -126,7 +127,7 @@ function fakeNativeClaudeEnv() {
 // 抛错 → 落入 try/catch（294-297）→ console.error('Proxy error:', err) + process.exit(1)。
 // 既有 cli-extra / cli-modes 只覆盖了 proxy 成功后的 spawn 分支，没碰这个 catch。
 
-describe('cli-deep: runProxyCommand —— proxy import 抛错走 catch（Proxy error:）', { concurrency: false }, () => {
+describeCli('cli-deep: runProxyCommand —— proxy import 抛错走 catch（Proxy error:）', { concurrency: false }, () => {
   it('run -- echo + proxy.js import 被阻断 → "Proxy error:" 退出 1', () => {
     const NODE_OPTIONS = importBlockerNodeOptions('/server/proxy.js', 'blocked-proxy-for-test');
     const r = runCli(['run', '--', 'echo', 'hi'], { env: { NODE_OPTIONS } });
@@ -148,7 +149,7 @@ describe('cli-deep: runProxyCommand —— proxy import 抛错走 catch（Proxy 
 // 且 throw 发生在任何端口 bind（startProxy / server.js listen）之前 → 子进程不留监听、不占端口。
 // 既有测试只测了「claude 没找到 → process.exit(1)」，从没让 runCliMode 真正 reject。
 
-describe('cli-deep: 默认 PTY runCliMode 主体抛错 → 顶层 .catch（CLI mode error:）', { concurrency: false }, () => {
+describeCli('cli-deep: 默认 PTY runCliMode 主体抛错 → 顶层 .catch（CLI mode error:）', { concurrency: false }, () => {
   it('claude 可用 + proxy.js import 阻断（bind 端口前）→ "CLI mode error:" 退出 1', () => {
     const c = fakeNativeClaudeEnv();
     const NODE_OPTIONS = importBlockerNodeOptions('/server/proxy.js', 'blocked-proxy-for-test');
@@ -181,7 +182,7 @@ describe('cli-deep: 默认 PTY runCliMode 主体抛错 → 顶层 .catch（CLI m
 // auto-startViewer）：throw 在 server.js 模块体执行前 → 无任何端口 bind，子进程干净退出。
 // 覆盖 SDK-available 入口 + 主体前半段（cli-modes 只测了 SDK 不可用 fallback 路径）。
 
-describe('cli-deep: -SDK runSdkMode（SDK 可用）主体抛错 → 顶层 .catch（SDK mode error:）', { concurrency: false }, () => {
+describeCli('cli-deep: -SDK runSdkMode（SDK 可用）主体抛错 → 顶层 .catch（SDK mode error:）', { concurrency: false }, () => {
   it('SDK 可用 + server.js import 阻断（bind 端口前）→ "SDK mode error:" 退出 1', () => {
     const c = fakeNativeClaudeEnv();
     const NODE_OPTIONS = importBlockerNodeOptions('/server/server.js', 'blocked-server-for-test');
@@ -210,7 +211,7 @@ describe('cli-deep: -SDK runSdkMode（SDK 可用）主体抛错 → 顶层 .catc
 // （acquireImLock 来源）处被 loader 阻断 → 抛错 → runImMode reject → 顶层 `.catch`（916-919）
 // 打印 "IM mode error:" + exit 1。既有测试只覆盖了 runImMode 内部 process.exit 早退路径。
 
-describe('cli-deep: --im runImMode 主体抛错 → 顶层 .catch（IM mode error:）', { concurrency: false }, () => {
+describeCli('cli-deep: --im runImMode 主体抛错 → 顶层 .catch（IM mode error:）', { concurrency: false }, () => {
   it('合法平台 + im-lock import 阻断 → "IM mode error:" 退出 1', () => {
     const home = mkTmp('ccv-deep-im-');
     const logDir = mkTmp('ccv-deep-imlog-');
@@ -241,7 +242,7 @@ describe('cli-deep: --im runImMode 主体抛错 → 顶层 .catch（IM mode erro
 // writeFileSync 抛 EACCES（err.code !== 'ENOENT'）→ 走通用失败分支（884 + 888-891）→
 // console.error(cli.inject.fail) + exit 1。既有 cli-modes 只覆盖了注入成功路径。
 
-describe('cli-deep: -logger npm-mode injectCliJs writeFileSync 失败 → cli.inject.fail', { concurrency: false }, () => {
+describeCli('cli-deep: -logger npm-mode injectCliJs writeFileSync 失败 → cli.inject.fail', { concurrency: false }, () => {
   it('legacy marker + 只读 cli.js/父目录 → EACCES（非 ENOENT）→ "Installation failed" 退出 1', () => {
     const root = mkTmp('ccv-deep-npmerr-');
     const bin = join(root, 'bin');
@@ -309,7 +310,7 @@ describe('cli-deep: -logger npm-mode injectCliJs writeFileSync 失败 → cli.in
 // console.log(cli.hook.fail)。这是 cli-modes 的 *native*-mode hook.fail 在 npm 分支的对应物
 // （那条走 904-905，本条走 880-881，不同 i18n key 与代码分支）。整体仍 exit 0。
 
-describe('cli-deep: -logger npm-mode cli.js 注入成功但 hook 写失败 → cli.hook.fail（880-881）', { concurrency: false }, () => {
+describeCli('cli-deep: -logger npm-mode cli.js 注入成功但 hook 写失败 → cli.hook.fail（880-881）', { concurrency: false }, () => {
   it('可写 cli.js + 只读 .zshrc/home → 注入成功、hook 写失败，报 hook fail，整体 exit 0', () => {
     const root = mkTmp('ccv-deep-npmhookfail-');
     const bin = join(root, 'bin');

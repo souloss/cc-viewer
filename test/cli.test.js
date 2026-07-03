@@ -1,4 +1,5 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
@@ -35,7 +36,7 @@ function runCli(args = [], opts = {}) {
 
 // ─── --help ───
 
-describe('ccv --help', () => {
+describeCli('ccv --help', () => {
   it('exits 0 and prints help text', () => {
     const r = runCli(['--help']);
     assert.equal(r.exitCode, 0);
@@ -65,7 +66,7 @@ describe('ccv --help', () => {
 
 // ─── --version ───
 
-describe('ccv --version', () => {
+describeCli('ccv --version', () => {
   it('exits 0 and prints version from package.json', () => {
     const r = runCli(['--version']);
     assert.equal(r.exitCode, 0);
@@ -87,7 +88,7 @@ describe('ccv --version', () => {
 
 // ─── --uninstall with isolated HOME ───
 
-describe('ccv --uninstall', () => {
+describeCli('ccv --uninstall', () => {
   let fakeHome;
 
   beforeEach(() => {
@@ -302,7 +303,7 @@ describe('ccv --uninstall', () => {
 
 // ─── getShellConfigPath logic (tested indirectly via --uninstall) ───
 
-describe('shell config path selection', () => {
+describeCli('shell config path selection', () => {
   let fakeHome;
 
   beforeEach(() => {
@@ -356,7 +357,7 @@ describe('shell config path selection', () => {
 
 // ─── "run" subcommand without a command ───
 
-describe('ccv run', () => {
+describeCli('ccv run', () => {
   it('errors when no command is provided after run', () => {
     const r = runCli(['run']);
     // Should fail because no command to run
@@ -366,7 +367,7 @@ describe('ccv run', () => {
 
 // ─── arg parsing edge cases ───
 
-describe('arg parsing', () => {
+describeCli('arg parsing', () => {
   it('--help takes priority even with other flags', () => {
     const r = runCli(['--help', '--version']);
     assert.equal(r.exitCode, 0);
@@ -408,7 +409,7 @@ describe('arg parsing', () => {
 
 // ─── --no-open ───
 
-describe('ccv --no-open', () => {
+describeCli('ccv --no-open', () => {
   it('--no-open appears in help text', () => {
     const r = runCli(['--help']);
     assert.equal(r.exitCode, 0);
@@ -424,7 +425,7 @@ describe('ccv --no-open', () => {
 
 // ─── --log-dir ───
 
-describe('ccv --log-dir', () => {
+describeCli('ccv --log-dir', () => {
   it('--log-dir appears in help text', () => {
     const r = runCli(['--help']);
     assert.equal(r.exitCode, 0);
@@ -464,7 +465,7 @@ describe('ccv --log-dir', () => {
 // behavioral tests because buildShellHook is internal to cli.js; if the
 // file is ever refactored to export it, swap these for direct unit tests.
 
-describe('ccv -logger: shell hook template invariants', () => {
+describeCli('ccv -logger: shell hook template invariants', () => {
   const source = readFileSync(CLI_PATH, 'utf-8');
 
   it('npm-mode hook includes a 2.x self-heal branch (cli.js missing → ccv run)', () => {

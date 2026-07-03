@@ -13,6 +13,7 @@
 // server.js 单例，不与其它 test 文件互相污染。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -50,7 +51,7 @@ function raw(port, path, { method = 'GET', headers = {}, body = null } = {}) {
   });
 }
 
-describe('server.js HTTP prelude + static serving + exports', { concurrency: false }, () => {
+describeCli('server.js HTTP prelude + static serving + exports', { concurrency: false }, () => {
   let mod, port;
 
   before(async () => {

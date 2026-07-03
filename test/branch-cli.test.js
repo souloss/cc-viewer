@@ -31,6 +31,7 @@
 //   password 空臂（420/583，server 不会解析出空密码）；reportClaudeNotFound 2.x-wrapper 臂（37-50，需伪造）。
 
 import { describe, it, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import {
@@ -118,9 +119,11 @@ function npmLoggerFixture() {
 }
 
 // ════════════════════ A. 参数派发 --ad 三元中段（853 SDK / 860 PTY）════════════════════
-describe('branch-cli: 参数派发 --ad 三元中段（853/860）', () => {
+describeCli('branch-cli: 参数派发 --ad 三元中段（853/860）', () => {
   it('PTY 默认模式 `--ad`：args.map 命中 --ad 中段后 claude-not-found 早退', () => {
-    const r = runCli(['--ad'], { env: noClaudeEnv() });
+    // --no-open: defense in depth on top of the L7 sandbox — this run reaches the
+    // browser-open decision point if claude resolution ever regresses.
+    const r = runCli(['--ad', '--no-open'], { env: noClaudeEnv() });
     assert.equal(r.exitCode, 1, 'claude 找不到应 exit 1');
     assert.ok(/not found|claude/i.test(r.stderr + r.stdout), '应报 claude not found');
   });
@@ -136,7 +139,7 @@ describe('branch-cli: 参数派发 --ad 三元中段（853/860）', () => {
       "}\n");
     writeFileSync(join(blockDir, 'register.mjs'),
       "import { register } from 'node:module';\nregister('./block.mjs', import.meta.url);\n");
-    const r = runCli(['-SDK', '--ad'], {
+    const r = runCli(['-SDK', '--ad', '--no-open'], {
       env: noClaudeEnv({ NODE_OPTIONS: `--import ${join(blockDir, 'register.mjs')}` }),
     });
     assert.equal(r.exitCode, 1, 'SDK 不可用 fallback 后 claude 找不到应 exit 1');
@@ -144,7 +147,7 @@ describe('branch-cli: 参数派发 --ad 三元中段（853/860）', () => {
 });
 
 // ════════════════════ B. getShellConfigPath / installShellHook 的 cheap 读分支（56 / 159 / 171）════════════════════
-describe('branch-cli: getShellConfigPath / installShellHook 读分支（56 / 159 / 171）', () => {
+describeCli('branch-cli: getShellConfigPath / installShellHook 读分支（56 / 159 / 171）', () => {
   it('--uninstall 且 SHELL 未设置 → getShellConfigPath 走 SHELL||\'\' 空臂（56），默认 .zshrc，exit 0', () => {
     const home = mkTmp('ccv-branch-noshell-');
     writeFileSync(join(home, '.zshrc'), '# empty\n');
@@ -207,7 +210,7 @@ function uninstallWithManagedHooks(count) {
   return { r, cfg };
 }
 
-describe('branch-cli: --uninstall 清理 managed hook（743-745 两臂）', () => {
+describeCli('branch-cli: --uninstall 清理 managed hook（743-745 两臂）', () => {
   it('settings.json 恰含 1 个 managed hook → removed===1 \'entry\' 单数臂', () => {
     const { r, cfg } = uninstallWithManagedHooks(1);
     assert.equal(r.exitCode, 0, `--uninstall 应 exit 0；实得 ${r.exitCode} out=${r.stdout}`);
@@ -274,6 +277,13 @@ function imFixture({ startPort, endPort }) {
     HOME: home,
     SHELL: '/bin/zsh',
     CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    // L7 escape hatch: the fake resident claude is discovered through the fake
+    // `npm root -g` seam (resolveNpmClaudePath step 2), which the lookup gate
+    // blocks by default. Safety does NOT come from the sanitized PATH alone —
+    // with the gate off, resolveNativePath's absolute candidates ignore PATH —
+    // but from resolution ORDERING: cli.js consults resolveNpmClaudePath first
+    // and the fake npm reliably satisfies it, so the native fallback never runs.
+    CCV_TEST_ALLOW_REAL_CLAUDE: '1',
     CCV_LOG_DIR: logDir,
     CCV_START_PORT: String(startPort),
     CCV_MAX_PORT: String(endPort),
@@ -318,7 +328,7 @@ function parseLocalPort(out) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-describe('branch-cli: --im 全程启动 → updateImLockPort 回填端口（351/371/457）', { concurrency: false }, () => {
+describeCli('branch-cli: --im 全程启动 → updateImLockPort 回填端口（351/371/457）', { concurrency: false }, () => {
   it('--im dingtalk：建 IM_dingtalk/ + 取锁 + server 启动 + 回填 im.lock 端口，SIGINT exit 0', async () => {
     const fx = imFixture({ startPort: 18868, endPort: 18871 });
     const r = await bootAndSignal({ args: ['--im', 'dingtalk'], env: fx.env, signal: 'SIGINT', markerRe: /CC Viewer:/ });
@@ -335,7 +345,7 @@ describe('branch-cli: --im 全程启动 → updateImLockPort 回填端口（351/
 });
 
 // ── IM 全局唯一锁竞争：锁被活进程持有时第二个 --im 拒绝启动 → exit 3（451 真臂 + 452-453）──
-describe('branch-cli: --im 锁竞争 → 第二实例 exit 3（451-453）', { concurrency: false }, () => {
+describeCli('branch-cli: --im 锁竞争 → 第二实例 exit 3（451-453）', { concurrency: false }, () => {
   it('同 LOG_DIR 下并发两个 --im dingtalk：先到者持锁，后到者 acquireImLock 失败 → exit 3', async () => {
     // 复用同一 fixture（同 home/logDir → 同 im.lock 路径）让两实例竞争同一把锁。
     const fx = imFixture({ startPort: 18872, endPort: 18875 });

@@ -4,6 +4,7 @@
 // (2026-06-06 事故同源)。必须:node: 内置静态 import → 隔离段锁 env → 动态 import 项目模块。
 // 私有端口窗 19750-19759 避免与默认窗 / 其它 server-* 测试跨进程抢端口。禁止改回静态 import。
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { rmSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs';
@@ -51,7 +52,7 @@ function httpRequest(port, path, { method = 'GET', body = null } = {}) {
   });
 }
 
-describe('server local logs endpoints', { concurrency: false }, () => {
+describeCli('server local logs endpoints', { concurrency: false }, () => {
   let startViewer, stopViewer, getPort;
   let port;
   const projectName = `projX_${Date.now()}`;

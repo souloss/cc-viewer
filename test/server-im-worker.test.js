@@ -14,6 +14,7 @@
 // 17910-17914 / startup-extra 17860-17899 / lifecycle 17920-17959）。
 
 import { describe, it, before, after } from 'node:test';
+import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -55,7 +56,7 @@ function raw(port, path) {
   });
 }
 
-describe('server.js CLI-mode IM-worker startBridge wiring (CCV_IM_PLATFORM)', { concurrency: false }, () => {
+describeCli('server.js CLI-mode IM-worker startBridge wiring (CCV_IM_PLATFORM)', { concurrency: false }, () => {
   let mod, imCore, port;
 
   before(async () => {
