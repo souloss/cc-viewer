@@ -4,6 +4,7 @@
 
 - feat(ui): the six hamburger-menu feature modals (Log Management, Export user prompts, Plugin Management, CCV Process Manager, Messaging Integration, Hot-Switch Proxy) now show a Gaussian-blurred overlay matching the AskUserQuestion / plan-approval backdrop (`rgba(0,0,0,0.45)` + `blur(2px)`), applied per-instance via a shared `BLUR_MASK_STYLE` constant so no other pop-up is affected; nested sub-dialogs keep the default mask
 - test(ui): `modal-mask.test.js` guards the blur — the constant stays byte-synced with `ApprovalModal.module.css`, and a recursive source walk pins the consumer set to exactly the six modals (a seventh adopter or a dropped target fails the suite)
+- feat(i18n): rename the expert-settings label `ui.expert.systemText` from "Edit System Text" to "Edit System Prompt" across all 18 locales (modal title + Preferences row)
 
 ## 1.6.333 (2026-07-03)
 
