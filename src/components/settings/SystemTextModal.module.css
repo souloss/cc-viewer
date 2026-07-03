@@ -47,7 +47,7 @@
 .hint {
   margin-top: 10px;
   font-size: 12px;
-  color: var(--ccv-text-secondary, #888);
+  color: var(--text-secondary, #888);
   line-height: 1.6;
 }
 
@@ -58,5 +58,196 @@
 .warn {
   margin-top: 10px;
   font-size: 12px;
-  color: var(--ccv-warning, #d4810a);
+  color: var(--color-warning, #d4810a);
+}
+
+/* ===== 模型页签条(参照 UltraplanPanel 的 Chrome-tab strip,裁掉 sticky/柔光等
+   popover 专属打磨;单行不换行、横向滚动、滚动条隐藏,tab 多时可横向拖动)。 ===== */
+.tabRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-secondary, #d9d9d9);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.tabRow::-webkit-scrollbar {
+  display: none;
+}
+
+.tabBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border: 1px solid var(--border-color, #d9d9d9);
+  border-radius: 14px;
+  background: var(--bg-main, var(--bg-container));
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tabBtn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.tabBtn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* 选中态 = Chrome tab 形:顶圆角 + 底开口(border-bottom 取内容区同色) +
+   margin-bottom -1px 贴合 .tabRow 下沿分隔线;复合选择器特异度压过 :hover。 */
+.tabBtn.tabActive {
+  background: var(--bg-container);
+  color: var(--color-primary);
+  border-color: var(--border-primary);
+  border-bottom-color: var(--bg-container);
+  border-radius: 10px 10px 0 0;
+  font-weight: 500;
+  margin-bottom: -1px;
+  position: relative;
+  z-index: 1;
+}
+
+.tabWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.tabTitle {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 悬停浮现的删除「×」(参照 ultraplanEditPencil;触屏端常显)。 */
+.tabDelete {
+  position: absolute;
+  top: -2px;
+  inset-inline-end: -4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 2;
+}
+.tabWrap:hover .tabDelete {
+  opacity: 1;
+}
+.tabDelete:hover {
+  color: var(--color-error, #d4380d);
+  border-color: var(--color-error, #d4380d);
+}
+@media (max-width: 768px) {
+  .tabDelete { opacity: 1; }
+}
+
+/* 无边框「+ 添加模型」(参照 ultraplanAddExpertBtn;浅色主题提色保对比度)。 */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-left: 2px;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.addBtn:hover {
+  color: var(--color-primary);
+  background: var(--bg-surface);
+}
+.addBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+[data-theme="light"] .addBtn {
+  color: var(--text-secondary);
+}
+
+/* 作用域徽标(tab 内小标签:全局/工作区)。 */
+.scopeBadge {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+}
+
+/* 未保存修改的小圆点。 */
+.dirtyDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  flex-shrink: 0;
+}
+
+/* 「?」帮助:tab 条右端 16px 圆形,悬停/点按出 Tooltip。 */
+.helpBtn {
+  align-self: center;
+  margin-left: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+  flex-shrink: 0;
+  user-select: none;
+}
+.helpBtn:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+/* 「+ 添加模型」Popover 内容。 */
+.addPopover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 240px;
+}
+.addError {
+  font-size: 12px;
+  color: var(--color-error, #d4380d);
 }

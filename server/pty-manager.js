@@ -1,6 +1,6 @@
 import { resolveNativePath, LOG_DIR } from '../findcc.js';
 import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { chmodSync, statSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -8,6 +8,8 @@ import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn, applyClau
 import { killPtyTree } from './lib/term-signals.js';
 import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-slice.js';
 import { buildSystemPromptFileArgs } from './lib/system-prompt-files.js';
+import { MODEL_PROMPT_DIR } from './lib/model-system-prompts.js';
+import { readClaudeProjectModel } from './lib/context-watcher.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -46,6 +48,20 @@ let _ptyImportForTests = null;
 
 export function _setPtyImportForTests(fn) {
   _ptyImportForTests = fn;
+}
+
+// spawn 时读取「上次启动所用模型 id」供模型定制 system prompt 匹配。
+// readClaudeProjectModel 读的是真实 ~/.claude.json(无 NODE_TEST_CONTEXT 屏障)，
+// 而多数 pty 单测以仓库根为 cwd —— 默认读取器在测试上下文里必须失活，
+// 否则开发机的真实模型记录会漏进单测(机器状态依赖)。测试用 _setSpawnModelReaderForTests 显式注入。
+// env/reader 参数化只为可测性：单测能直接断言「测试上下文 → null / 生产 → 透传」，
+// 而无需真的读 ~/.claude.json(见 test/pty-manager.test.js 的 guard 单测)。
+export function _defaultSpawnModelReader(c, env = process.env, reader = readClaudeProjectModel) {
+  return env.NODE_TEST_CONTEXT ? null : reader(c);
+}
+let _spawnModelReader = _defaultSpawnModelReader;
+export function _setSpawnModelReaderForTests(fn) {
+  _spawnModelReader = fn || _defaultSpawnModelReader;
 }
 
 async function getPty() {
@@ -277,9 +293,18 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
 
   // 启动目录存在 CC_SYSTEM.md / CC_APPEND_SYSTEM.md(非空)时，自动追加
   // --system-prompt-file / --append-system-prompt-file(两者独立、用户已传同义 flag 时跳过对应项)。
+  // 模型定制：以「上次启动所用模型」在 <cwd>/system_prompt/ 与 <LOG_DIR>/system_prompt/
+  // 里模糊匹配，命中的条目整体取代上面两份默认 sentinel。
   // 注：currentWorkspacePath 在下方才赋值，这里用 cwd 参数判定启动目录。
-  let sysPrompt = buildSystemPromptFileArgs(cwd || process.cwd(), finalExtraArgs);
-  if (_systemPromptFileRejectedPaths.has(claudePath)) sysPrompt = { args: [], loaded: [] };
+  // LOG_DIR 内的 spawn(IM worker 工作目录 = <LOG_DIR>/IM_<id>/)跳过模型匹配：
+  // IM 人格依赖默认 sentinel CC_APPEND_SYSTEM.md 注入，全局模型条目不得静默取代它。
+  const spawnDir = cwd || process.cwd();
+  const insideLogDir = spawnDir === LOG_DIR || spawnDir.startsWith(LOG_DIR + sep);
+  let sysPrompt = buildSystemPromptFileArgs(spawnDir, finalExtraArgs, process.env, {
+    modelId: insideLogDir ? null : _spawnModelReader(spawnDir),
+    globalModelDir: join(LOG_DIR, MODEL_PROMPT_DIR),
+  });
+  if (_systemPromptFileRejectedPaths.has(claudePath)) sysPrompt = { args: [], loaded: [], model: null };
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
   let command = claudePath;
@@ -309,7 +334,8 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
 
   // 注入了 system prompt 文件时向终端打印一行提示(可见性/安全)；内部重启已抑制以免重复。
   if (sysPrompt.loaded.length && !_suppressNextSpawnNotice) {
-    emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt`);
+    const modelSuffix = sysPrompt.model ? ` (model match: ${sysPrompt.model})` : '';
+    emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt${modelSuffix}`);
   }
   _suppressNextSpawnNotice = false;
 

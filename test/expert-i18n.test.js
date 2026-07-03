@@ -40,6 +40,22 @@ const KEYS = [
   'ui.expert.systemText.cleared',
   'ui.expert.systemText.saveError',
   'ui.expert.systemText.loadError',
+  // 模型定制页签(Model-specific System Prompts)
+  'ui.expert.systemText.tabDefault',
+  'ui.expert.systemText.addModel',
+  'ui.expert.systemText.addModelName',
+  'ui.expert.systemText.addModelConfirm',
+  'ui.expert.systemText.scopeGlobal',
+  'ui.expert.systemText.scopeWorkspace',
+  'ui.expert.systemText.modelHelp',
+  'ui.expert.systemText.invalidName',
+  'ui.expert.systemText.reservedName',
+  'ui.expert.systemText.duplicateName',
+  'ui.expert.systemText.deleteTab',
+  'ui.expert.systemText.deleted',
+  'ui.expert.systemText.deleteError',
+  'ui.expert.systemText.dirHintGlobal',
+  'ui.expert.systemText.discardTitle',
   'ui.save',   // 复用：模态保存按钮
   'ui.cancel', // 复用：模态取消按钮
 ];

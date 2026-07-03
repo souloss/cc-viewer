@@ -131,6 +131,15 @@ Vous pouvez même scanner un code QR pour programmer depuis votre appareil mobil
 
 Réalisez votre imagination de la programmation mobile. Il existe également un mécanisme de plugins — si vous avez besoin de personnaliser selon vos habitudes de codage, surveillez les mises à jour des hooks de plugins.
 
+### Prompts système par modèle
+
+La fenêtre modale **Modifier le prompt système** (Préférences → Paramètres experts) est organisée en onglets :
+
+* L'onglet **Défaut** conserve le comportement classique : il écrit `CC_SYSTEM.md` (remplacer) ou `CC_APPEND_SYSTEM.md` (ajouter) dans l'espace de travail courant, injecté via `--system-prompt-file` / `--append-system-prompt-file` au prochain lancement de ccv.
+* **Onglets de modèle** : cliquez sur **+ Ajouter un modèle**, saisissez un nom comme `opus` ou `Gemini3`, puis choisissez une portée — **Global** (`~/.claude/cc-viewer/system_prompt/`, s'applique à tous les espaces de travail) ou **Espace de travail** (`<project>/system_prompt/`). Chaque onglet possède son propre commutateur Ajouter/Remplacer et son aperçu Markdown.
+* Les entrées sont stockées sous forme de fichiers en majuscules : `OPUS_SYSTEM.md` (remplacer) ou `OPUS_APPEND_SYSTEM.md` (ajouter). La correspondance est approximative — une sous-chaîne insensible à la casse de l'ID de modèle utilisé au dernier lancement, de sorte que `opus` correspond à `claude-opus-4-8[1m]` quelle que soit la version. Une correspondance au niveau de l'espace de travail l'emporte sur une correspondance globale ; au sein d'une même portée, le nom le plus long gagne ; une entrée correspondante remplace entièrement les fichiers de l'onglet Défaut pour ce lancement.
+* Enregistrer un onglet vide supprime l'entrée. Les changements de modèle effectués en cours de session s'appliquent au prochain relancement. Définissez `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` pour désactiver toute injection automatique. Vous pouvez committer `<project>/system_prompt/` pour partager les prompts avec votre équipe, ou l'ajouter à `.gitignore` pour les garder privés.
+
 ### Mode Logger (Visualiser les sessions complètes de Claude Code)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

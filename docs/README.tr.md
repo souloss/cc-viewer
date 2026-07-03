@@ -131,6 +131,15 @@ Hatta QR kodunu tarayarak mobil cihazlarda programlama yapabilirsiniz:
 
 Mobil programlamaya dair hayallerinizi gerçekleştirin. Ayrıca bir eklenti mekanizması da var — kendi programlama alışkanlıklarınıza göre özelleştirmek isterseniz, ileride eklenti hooks güncellemelerini takip edebilirsiniz.
 
+### Modele özgü sistem promptları
+
+**Sistem promptunu düzenle** modalı (Tercihler → Uzman Ayarları) sekmelere ayrılmıştır:
+
+* **Varsayılan** sekmesi klasik davranışı korur: geçerli çalışma alanına `CC_SYSTEM.md` (üzerine yazma) veya `CC_APPEND_SYSTEM.md` (ekleme) dosyasını yazar; bu dosya bir sonraki ccv başlatılışında `--system-prompt-file` / `--append-system-prompt-file` olarak enjekte edilir.
+* **Model sekmeleri**: **+ Model ekle** düğmesine tıklayın, `opus` veya `Gemini3` gibi bir ad yazın ve bir kapsam seçin — **Genel** (`~/.claude/cc-viewer/system_prompt/`, tüm çalışma alanlarına uygulanır) veya **Çalışma alanı** (`<project>/system_prompt/`). Her sekmenin kendi Ekle/Üzerine yaz anahtarı ve Markdown önizlemesi vardır.
+* Girdiler büyük harfli dosyalar olarak saklanır: `OPUS_SYSTEM.md` (üzerine yazma) veya `OPUS_APPEND_SYSTEM.md` (ekleme). Eşleştirme bulanıktır — son başlatmada kullanılan model kimliğinin büyük/küçük harfe duyarsız bir alt dizesi aranır; bu yüzden `opus`, sürümden bağımsız olarak `claude-opus-4-8[1m]` ile eşleşir. Çalışma alanı eşleşmesi genel eşleşmeye üstün gelir; aynı kapsam içinde en uzun ad kazanır; eşleşen bir girdi, o başlatma için Varsayılan dosyaların yerini tamamen alır.
+* Bir sekmeyi boş kaydetmek girdiyi siler. Oturum ortasında yapılan model değişiklikleri bir sonraki yeniden başlatmada geçerli olur. Tüm otomatik enjeksiyonu devre dışı bırakmak için `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` ayarlayın. Promptları ekibinizle paylaşmak için `<project>/system_prompt/` dizinini commit edebilir veya gizli tutmak için `.gitignore` dosyasına ekleyebilirsiniz.
+
 ### Log modu (claude code'un eksiksiz oturumlarını görüntüleyin)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

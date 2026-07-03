@@ -131,6 +131,15 @@ ccv -h
 
 滿足你對行動端程式設計的想像，另外還有外掛機制，如果你需要針對自己的程式設計習慣客製化，後續可以關注外掛 hooks 的更新。
 
+### 按模型定制系統提示詞
+
+**編輯系統提示詞**模態框（偏好設定 → 專家設定）採用分頁設計：
+
+* **預設**分頁保留經典行為：它會將 `CC_SYSTEM.md`（覆蓋）或 `CC_APPEND_SYSTEM.md`（追加）寫入目前工作區，並在下次 ccv 啟動時以 `--system-prompt-file` / `--append-system-prompt-file` 注入。
+* **模型分頁**：點擊 **+ 新增模型**，輸入名稱（例如 `opus` 或 `Gemini3`），並選擇作用範圍——**全域**（`~/.claude/cc-viewer/system_prompt/`，套用於所有工作區）或**工作區**（`<project>/system_prompt/`）。每個分頁都有自己的追加/覆蓋開關和 Markdown 預覽。
+* 條目以大寫檔名儲存：`OPUS_SYSTEM.md`（覆蓋）或 `OPUS_APPEND_SYSTEM.md`（追加）。比對採模糊方式——以上次啟動所用模型 ID 的不區分大小寫子字串進行比對，因此無論版本為何，`opus` 都能比對到 `claude-opus-4-8[1m]`。工作區比對優先於全域比對；同一作用範圍內名稱最長者勝出；比對到的條目會在該次啟動中完全取代預設分頁的檔案。
+* 將分頁儲存為空白即可刪除該條目。工作階段中途切換模型會在下次重新啟動時生效。設定 `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` 可停用所有自動注入。你可以將 `<project>/system_prompt/` 提交到版本庫與團隊共享提示詞，也可以將其加入 `.gitignore` 保持私有。
+
 ### 日誌模式（檢視 claude code 完整對話）
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

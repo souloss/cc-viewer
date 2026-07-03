@@ -141,6 +141,15 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 * **Global default + per-project override:** by default one password covers every project. From the QR popover the admin can switch between **This project** and **Global** — set a project-specific password that overrides the global default for that project only, or remove the override to inherit the global setting again. (A disabled project override means "no protection for this project", which is different from removing it.)
 * The on/off state and password(s) are persisted alongside your other settings in cc-viewer's `preferences.json` — a global `auth` key plus an optional `authByProject` map (the password is base64-obfuscated, not stored as raw plaintext; file mode `0600`). The login cookie is tied to the per-launch token, so restarting ccv requires remote devices to log in again.
 
+### Model-specific system prompts
+
+The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
+
+* The **Default** tab keeps the classic behavior: it writes `CC_SYSTEM.md` (override) or `CC_APPEND_SYSTEM.md` (append) into the current workspace, injected as `--system-prompt-file` / `--append-system-prompt-file` on the next ccv launch.
+* **Model tabs**: click **+ Add model**, type a name such as `opus` or `Gemini3`, and pick a scope — **Global** (`~/.claude/cc-viewer/system_prompt/`, applies to every workspace) or **Workspace** (`<project>/system_prompt/`). Each tab has its own Append/Override switch and Markdown preview.
+* Entries are stored as uppercase files: `OPUS_SYSTEM.md` (override) or `OPUS_APPEND_SYSTEM.md` (append). Matching is fuzzy — a case-insensitive substring of the model ID used at the last launch, so `opus` matches `claude-opus-4-8[1m]` regardless of version. A workspace match beats a global one; within a scope the longest name wins; a matched entry fully replaces the Default files for that launch.
+* Saving a tab empty deletes the entry. Model switches made mid-session apply at the next relaunch. Set `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` to disable all automatic injection. You may commit `<project>/system_prompt/` to share prompts with your team, or add it to `.gitignore` to keep them private.
+
 ### Logger mode (view the complete Claude Code session)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

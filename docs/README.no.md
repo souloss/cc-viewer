@@ -131,6 +131,15 @@ Du kan til og med skanne en QR-kode for å programmere fra mobilenheten din:
 
 Oppfyll din forestilling om mobil programmering. Det finnes også en plugin-mekanisme — hvis du trenger tilpasninger til programmeringsvanene dine, kan du holde deg oppdatert om kommende plugin-hook-oppdateringer.
 
+### Modellspesifikke systemprompter
+
+Modalen **Rediger systemprompt** (Innstillinger → Ekspertinnstillinger) er delt inn i faner:
+
+* Fanen **Standard** beholder den klassiske oppførselen: den skriver `CC_SYSTEM.md` (overskriv) eller `CC_APPEND_SYSTEM.md` (legg til) i det gjeldende arbeidsområdet, injisert som `--system-prompt-file` / `--append-system-prompt-file` ved neste ccv-oppstart.
+* **Modellfaner**: klikk på **+ Legg til modell**, skriv inn et navn som `opus` eller `Gemini3`, og velg et omfang — **Global** (`~/.claude/cc-viewer/system_prompt/`, gjelder for alle arbeidsområder) eller **Arbeidsområde** (`<project>/system_prompt/`). Hver fane har sin egen Legg til/Overskriv-bryter og Markdown-forhåndsvisning.
+* Oppføringene lagres som filer med store bokstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (legg til). Matchingen er fuzzy — en delstreng, uten skille mellom store og små bokstaver, av modell-ID-en som ble brukt ved forrige oppstart, så `opus` matcher `claude-opus-4-8[1m]` uavhengig av versjon. Et treff i arbeidsområdet slår et globalt; innenfor et omfang vinner det lengste navnet; en matchet oppføring erstatter Standard-filene fullstendig for den oppstarten.
+* Lagres en fane tom, slettes oppføringen. Modellbytter gjort midt i en økt trer i kraft ved neste omstart. Sett `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` for å deaktivere all automatisk injeksjon. Du kan committe `<project>/system_prompt/` for å dele prompter med teamet ditt, eller legge den til i `.gitignore` for å holde dem private.
+
 ### Logger-modus (Se komplette Claude Code-økter)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

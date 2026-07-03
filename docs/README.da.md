@@ -131,6 +131,15 @@ Du kan endda scanne en QR-kode for at programmere fra din mobile enhed:
 
 Opfyld din forestilling om mobil programmering. Der er også en plugin-mekanisme — hvis du har brug for tilpasninger til dine programmeringsvaner, kan du holde dig opdateret om kommende plugin-hook-opdateringer.
 
+### Modelspecifikke systemprompter
+
+Modalen **Rediger systemprompt** (Indstillinger → Ekspertindstillinger) er opdelt i faner:
+
+* Fanen **Standard** bevarer den klassiske adfærd: den skriver `CC_SYSTEM.md` (overskriv) eller `CC_APPEND_SYSTEM.md` (tilføj) i det aktuelle arbejdsområde, injiceret som `--system-prompt-file` / `--append-system-prompt-file` ved næste ccv-start.
+* **Modelfaner**: klik på **+ Tilføj model**, indtast et navn som `opus` eller `Gemini3`, og vælg et omfang — **Global** (`~/.claude/cc-viewer/system_prompt/`, gælder for alle arbejdsområder) eller **Arbejdsområde** (`<project>/system_prompt/`). Hver fane har sin egen Tilføj/Overskriv-kontakt og Markdown-forhåndsvisning.
+* Posterne gemmes som filer med store bogstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (tilføj). Matchningen er fuzzy — en delstreng, uden forskel på store og små bogstaver, af det model-ID der blev brugt ved seneste start, så `opus` matcher `claude-opus-4-8[1m]` uanset version. Et match i arbejdsområdet slår et globalt; inden for et omfang vinder det længste navn; en matchet post erstatter fuldstændigt Standard-filerne for den pågældende start.
+* Gemmes en fane tom, slettes posten. Modelskift foretaget midt i en session træder i kraft ved næste genstart. Sæt `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` for at deaktivere al automatisk injektion. Du kan committe `<project>/system_prompt/` for at dele prompter med dit team, eller tilføje den til `.gitignore` for at holde dem private.
+
 ### Logger-tilstand (Se komplette Claude Code-sessioner)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

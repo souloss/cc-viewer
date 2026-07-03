@@ -141,6 +141,15 @@ ccv -h
 
 满足你对移动端编程的想象，另外还有插件机制，如果你需要针对自己的编程习惯定制，后续可以跟进插件的hooks更新。
 
+### 按模型定制系统提示词
+
+**编辑系统提示词**模态框（偏好设置 → 专家设置）采用标签页设计：
+
+* **默认**标签页保留经典行为：它将 `CC_SYSTEM.md`（覆盖）或 `CC_APPEND_SYSTEM.md`（追加）写入当前工作区，并在下次 ccv 启动时通过 `--system-prompt-file` / `--append-system-prompt-file` 注入。
+* **模型标签页**：点击 **+ 添加模型**，输入名称（例如 `opus` 或 `Gemini3`），并选择作用域——**全局**（`~/.claude/cc-viewer/system_prompt/`，对所有工作区生效）或**工作区**（`<project>/system_prompt/`）。每个标签页都有自己的追加/覆盖开关和 Markdown 预览。
+* 条目以大写文件名存储：`OPUS_SYSTEM.md`（覆盖）或 `OPUS_APPEND_SYSTEM.md`（追加）。匹配是模糊的——按上次启动所用模型 ID 的不区分大小写子串进行匹配，因此无论版本如何，`opus` 都能匹配 `claude-opus-4-8[1m]`。工作区匹配优先于全局匹配；同一作用域内名称最长者胜出；匹配到的条目会在该次启动中完全取代默认标签页的文件。
+* 将标签页保存为空即可删除该条目。会话中途切换模型将在下次重新启动时生效。设置 `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` 可禁用所有自动注入。你可以将 `<project>/system_prompt/` 提交到版本库与团队共享提示词，也可以将其加入 `.gitignore` 保持私有。
+
 ### 日志模式（查看claude code 完整会话）
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />

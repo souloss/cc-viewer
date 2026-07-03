@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -23,7 +23,10 @@ import {
   _markThinkingDisplayRejected,
   _clearSystemPromptFileRejectedPaths,
   _isSystemPromptFileRejected,
+  _setSpawnModelReaderForTests,
+  _defaultSpawnModelReader,
 } from '../server/pty-manager.js';
+import { LOG_DIR } from '../findcc.js';
 
 // ─── getPtyPid / getPtyState / getCurrentWorkspace (no PTY running) ───
 
@@ -134,6 +137,7 @@ describe('pty-manager: spawnClaude integration', () => {
   afterEach(() => {
     killPty();
     _setPtyImportForTests(null);
+    _setSpawnModelReaderForTests(null);
   });
 
   it('getPtyPid returns PID when PTY is running', async () => {
@@ -495,6 +499,106 @@ describe('pty-manager: spawnClaude integration', () => {
     assert.equal(spawned.length, 1, 'no retry for unrelated crash');
     assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-sysfile-unrelated'), false);
   });
+
+  // ─── 模型定制 system prompt(<dir>/system_prompt/)注入与自愈 ───
+  it('model-specific prompt supersedes CC_SYSTEM.md when the spawn model matches', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-modelprompt-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'DEFAULT PROMPT', 'utf-8');
+    mkdirSync(join(dir, 'system_prompt'));
+    const modelFile = join(dir, 'system_prompt', 'OPUS_SYSTEM.md');
+    writeFileSync(modelFile, 'OPUS PROMPT', 'utf-8');
+    _setSpawnModelReaderForTests(() => 'claude-opus-4-8[1m]');
+
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-modelmatch');
+      assert.ok(spawned[0].args.includes(modelFile), 'model file injected');
+      assert.ok(!spawned[0].args.includes(join(dir, 'CC_SYSTEM.md')), 'default sentinel superseded');
+      assert.ok(getOutputBuffer().includes('(model match: OPUS)'), 'spawn notice carries the model suffix');
+    } finally {
+      _setSpawnModelReaderForTests(null);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('_defaultSpawnModelReader: NODE_TEST_CONTEXT 短路为 null,生产环境透传底层 reader', () => {
+    // 直接断言 guard 本身(参数化 env/reader,不触真实 ~/.claude.json)：
+    // 若有人删掉 NODE_TEST_CONTEXT 守卫,第一条立即失败。
+    assert.equal(_defaultSpawnModelReader('/x', { NODE_TEST_CONTEXT: '1' }, () => 'claude-opus-4-8'), null);
+    assert.equal(_defaultSpawnModelReader('/x', {}, () => 'claude-opus-4-8'), 'claude-opus-4-8');
+  });
+
+  it('default spawn model reader is inert under NODE_TEST_CONTEXT (no injected reader → no model match)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-modelinert-'));
+    mkdirSync(join(dir, 'system_prompt'));
+    const modelFile = join(dir, 'system_prompt', 'OPUS_SYSTEM.md');
+    writeFileSync(modelFile, 'OPUS PROMPT', 'utf-8');
+    // 不注入 reader：默认读取器在 NODE_TEST_CONTEXT 下必须返回 null → 条目不注入
+    _setSpawnModelReaderForTests(null);
+
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-modelinert');
+      assert.ok(!spawned[0].args.includes(modelFile), 'model file must not be injected under tests by default');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('spawns with cwd inside LOG_DIR (IM worker) skip model matching; IM persona sentinel still injects', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    // 全局模型条目 + LOG_DIR 下的 IM worker 目录(带人格 CC_APPEND_SYSTEM.md)
+    // 写盘 setup 放 try 内：setup 中途抛错也能走 finally 清理,不泄漏到同进程后续测试。
+    const globalDir = join(LOG_DIR, 'system_prompt');
+    const globalFile = join(globalDir, 'OPUS_SYSTEM.md');
+    const imDir = join(LOG_DIR, 'IM_test-worker');
+    const personaFile = join(imDir, 'CC_APPEND_SYSTEM.md');
+    _setSpawnModelReaderForTests(() => 'claude-opus-4-8');
+
+    try {
+      mkdirSync(globalDir, { recursive: true });
+      writeFileSync(globalFile, 'GLOBAL OPUS PROMPT', 'utf-8');
+      mkdirSync(imDir, { recursive: true });
+      writeFileSync(personaFile, 'IM PERSONA', 'utf-8');
+      await spawnClaude(9999, imDir, [], '/bin/fake-claude-imworker');
+      assert.ok(!spawned[0].args.includes(globalFile), 'global model entry must not supersede the IM persona');
+      assert.ok(spawned[0].args.includes(personaFile), 'IM persona sentinel still injected');
+    } finally {
+      _setSpawnModelReaderForTests(null);
+      rmSync(globalDir, { recursive: true, force: true });
+      rmSync(imDir, { recursive: true, force: true });
+    }
+  });
+
+  it('self-heal also strips a rejected model-specific --system-prompt-file', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-modelheal-'));
+    mkdirSync(join(dir, 'system_prompt'));
+    const modelFile = join(dir, 'system_prompt', 'OPUS_SYSTEM.md');
+    writeFileSync(modelFile, 'OPUS PROMPT', 'utf-8');
+    _setSpawnModelReaderForTests(() => 'claude-opus-4-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash("error: unknown option '--system-prompt-file'\n"));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-modelheal');
+      await waitUntil(() => spawned.length >= 2);
+    } finally {
+      console.error = origError;
+      _setSpawnModelReaderForTests(null);
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 2, 'initial + retry');
+    assert.ok(spawned[0].args.includes(modelFile), 'first spawn injects the model file');
+    assert.ok(!spawned[1].args.includes('--system-prompt-file'), 'retry strips the flag');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-modelheal'), true);
+  });
 });
 
 // ─── writeToPtySequential delay rules ───
@@ -530,6 +634,7 @@ describe('pty-manager: writeToPtySequential delay rules', () => {
   afterEach(() => {
     killPty();
     _setPtyImportForTests(null);
+    _setSpawnModelReaderForTests(null);
   });
 
   // 工具栏快捷按钮路径：[paste-end-chunk, '\r'] 写入 paste 块后必须等 settleMs
@@ -599,6 +704,7 @@ describe('pty-manager: resize clamp / chunk validation / spawn guard', () => {
   afterEach(() => {
     killPty();
     _setPtyImportForTests(null);
+    _setSpawnModelReaderForTests(null);
   });
 
   it('resizePty clamps NaN/0/negative/oversize to finite positive bounds', async () => {

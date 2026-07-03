@@ -2,8 +2,17 @@
 // (CC_SYSTEM.md / CC_APPEND_SYSTEM.md)，对应偏好设置 → 专家设置 → 系统文本修改。
 // 这两个文件由 pty-manager._spawnClaudeImpl 在启动 claude 时自动注入为
 // --system-prompt-file / --append-system-prompt-file（见 server/lib/system-prompt-files.js）。
+// 另有「按模型定制」条目(/api/expert/model-prompts)：工作区 <ws>/system_prompt/ 与
+// 全局 <LOG_DIR>/system_prompt/ 两套目录，见 server/lib/model-system-prompts.js。
 // 鉴权沿用 dispatch 之前的全局鉴权（与 files-fs 写操作一致，不额外 gate isLocal）。
+import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { readWorkspaceSystemText, writeWorkspaceSystemText } from '../lib/system-prompt-files.js';
+import {
+  MODEL_PROMPT_DIR, normalizeModelName, listModelPrompts,
+  writeModelPrompt, deleteModelPrompt,
+} from '../lib/model-system-prompts.js';
+import { LOG_DIR } from '../../findcc.js';
 
 // 当前工作区目录全部由服务端解析（绝不接收客户端路径 → 无遍历面）：
 //   运行中/最近一次 claude 的 cwd > CCV_PROJECT_DIR > （仅非工作区模式才回退 process.cwd()）
@@ -66,7 +75,82 @@ function postSystemText(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// 列出某目录全部模型条目并内联文本(条目数很小，一次返回免去 N 次跟进请求)。
+// 直接读 listModelPrompts 给出的生效文件，避免 readModelPrompt 每条目重扫目录(N+1)。
+function collectModelEntries(dir) {
+  if (!dir) return [];
+  return listModelPrompts(dir)
+    .map((e) => {
+      try {
+        return { name: e.name, mode: e.mode, text: readFileSync(join(dir, e.fileName), 'utf-8') };
+      } catch {
+        return null; // 列表后被并发删除等：跳过该条目
+      }
+    })
+    .filter(Boolean);
+}
+
+async function getModelPrompts(req, res, parsedUrl, isLocal, deps) {
+  try {
+    const dir = await resolveDir(deps);
+    const globalDir = join(LOG_DIR, MODEL_PROMPT_DIR);
+    sendJson(res, 200, {
+      workspaceDir: dir || null,
+      workspaceActive: !!dir,
+      globalDir,
+      workspace: dir ? collectModelEntries(join(dir, MODEL_PROMPT_DIR)) : [],
+      global: collectModelEntries(globalDir),
+    });
+  } catch (e) {
+    console.error('[CC Viewer] expert model-prompts GET failed:', e.message);
+    sendJson(res, 500, { error: 'read_failed' });
+  }
+}
+
+function postModelPrompts(req, res, parsedUrl, isLocal, deps) {
+  let body = '';
+  let truncated = false;
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > deps.MAX_POST_BODY) { truncated = true; req.destroy(); }
+  });
+  req.on('end', async () => {
+    if (truncated) return; // 超限已 destroy，socket 关闭，勿再解析/回包(对齐 postSystemText)
+    try {
+      const { scope, name, mode, text } = JSON.parse(body || '{}');
+      if (scope !== 'workspace' && scope !== 'global') {
+        sendJson(res, 400, { error: 'bad_scope' });
+        return;
+      }
+      const canonical = normalizeModelName(name);
+      if (!canonical) { sendJson(res, 400, { error: 'bad_model_name' }); return; }
+      let targetDir;
+      if (scope === 'global') {
+        targetDir = join(LOG_DIR, MODEL_PROMPT_DIR);
+      } else {
+        const dir = await resolveDir(deps);
+        if (!dir) { sendJson(res, 400, { error: 'no_active_workspace' }); return; }
+        targetDir = join(dir, MODEL_PROMPT_DIR);
+      }
+      const raw = typeof text === 'string' ? text : '';
+      if (raw.trim().length === 0) {
+        // 空文本 = 删除条目(对齐 system-text 的「存空即禁用」约定；此时 mode 可缺省)。
+        deleteModelPrompt(targetDir, canonical);
+        sendJson(res, 200, { ok: true, name: canonical, scope, cleared: true });
+        return;
+      }
+      const result = writeModelPrompt(targetDir, canonical, mode === 'override' ? 'override' : 'append', raw);
+      sendJson(res, 200, { ok: true, scope, ...result });
+    } catch (e) {
+      console.error('[CC Viewer] expert model-prompts POST failed:', e.message);
+      sendJson(res, 500, { error: 'write_failed' });
+    }
+  });
+}
+
 export const expertRoutes = [
   { method: 'GET', match: 'exact', path: '/api/expert/system-text', handler: getSystemText },
   { method: 'POST', match: 'exact', path: '/api/expert/system-text', handler: postSystemText },
+  { method: 'GET', match: 'exact', path: '/api/expert/model-prompts', handler: getModelPrompts },
+  { method: 'POST', match: 'exact', path: '/api/expert/model-prompts', handler: postModelPrompts },
 ];

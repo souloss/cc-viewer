@@ -131,6 +131,15 @@ Puoi persino scansionare un codice QR per programmare dal tuo dispositivo mobile
 
 Realizza la tua immaginazione della programmazione mobile. C'è anche un meccanismo di plugin — se hai bisogno di personalizzare in base alle tue abitudini di codifica, tieni d'occhio gli aggiornamenti degli hook dei plugin.
 
+### Prompt di sistema per modello
+
+La finestra modale **Modifica prompt di sistema** (Preferenze → Impostazioni avanzate) è organizzata in schede:
+
+* La scheda **Predefinito** mantiene il comportamento classico: scrive `CC_SYSTEM.md` (sovrascrivi) o `CC_APPEND_SYSTEM.md` (aggiungi) nell'area di lavoro corrente, iniettato come `--system-prompt-file` / `--append-system-prompt-file` al successivo avvio di ccv.
+* **Schede modello**: fai clic su **+ Aggiungi modello**, digita un nome come `opus` o `Gemini3` e scegli un ambito — **Globale** (`~/.claude/cc-viewer/system_prompt/`, si applica a ogni area di lavoro) o **Area di lavoro** (`<project>/system_prompt/`). Ogni scheda ha il proprio interruttore Aggiungi/Sovrascrivi e la propria anteprima Markdown.
+* Le voci sono memorizzate come file in maiuscolo: `OPUS_SYSTEM.md` (sovrascrivi) o `OPUS_APPEND_SYSTEM.md` (aggiungi). La corrispondenza è fuzzy — una sottostringa, senza distinzione tra maiuscole e minuscole, dell'ID del modello usato all'ultimo avvio, quindi `opus` corrisponde a `claude-opus-4-8[1m]` indipendentemente dalla versione. Una corrispondenza dell'area di lavoro prevale su una globale; all'interno di un ambito vince il nome più lungo; una voce corrispondente sostituisce completamente i file di Predefinito per quell'avvio.
+* Salvare una scheda vuota elimina la voce. I cambi di modello effettuati a metà sessione si applicano al successivo riavvio. Imposta `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` per disabilitare ogni iniezione automatica. Puoi fare il commit di `<project>/system_prompt/` per condividere i prompt con il tuo team, oppure aggiungerlo a `.gitignore` per mantenerli privati.
+
 ### Modalità Logger (Visualizzare sessioni complete di Claude Code)
 
 <img width="860" alt="cc-viewer — wire-level capture and packet decomposition" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-proxy.svg" />
