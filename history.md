@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.333 (2026-07-03)
 
 - fix(仅展示当前会话): eliminate intermittent wrong-session anchoring after idle / SSE reconnect / refresh — the pin now follows the newest-ACTIVITY hot session (`getLatestSessionByActivity`) instead of the last-inserted list element (insertion order ≠ recency under multi-terminal interleave and truncated reconnect replays); pin hydrate is sequenced (`runPinHydration`): a stale server pin loses to the locally derived latest, superseded GETs are discarded (including after unmount), the in-flight gate clears before the follow-latest self-heal so an idle stream self-corrects, and a poisoned `.session-pin*.json` is healed by an explicit re-persist
 - fix(仅展示当前会话): unify batch-reload and live-SSE session segmentation on a single shared predicate (`isSessionBoundary`) — batch gains the /compact exclusion (both slimmers stamp `_compactContinuation` before emptying messages so the signal survives slimming; positional timestamp accumulators truncate on compact to keep live parity), live gains the user-id trigger (fixes two sessions sharing one stable id); stable ids now match across reload and live. Upgrade note: sessions previously mis-split at a /compact point re-merge under the correct id, so pre-upgrade mobile caches may briefly show duplicate cold rows until the cache rebuilds (recoverable via the session REST refetch)
