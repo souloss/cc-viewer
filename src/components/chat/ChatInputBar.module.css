@@ -41,7 +41,7 @@
   resize: none;
   font-size: 14px;
   line-height: 1.5;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-ui);
   box-sizing: border-box;
 }
 
@@ -131,7 +131,7 @@
   color: var(--text-secondary);
   font-size: 12px;
   font-style: italic;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-ui);
   white-space: pre-wrap;
   max-height: 40px;
   overflow: hidden;
@@ -295,7 +295,7 @@
   color: var(--border-light);
   font-size: 14px;
   line-height: 1.5;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-ui);
   pointer-events: none;
   white-space: pre-wrap;
   overflow: hidden;

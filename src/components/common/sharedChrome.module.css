@@ -21,7 +21,7 @@
 .th {
   padding: 2px 12px;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   color: var(--text-tertiary);
   font-weight: normal;
@@ -30,7 +30,7 @@
 .td {
   padding: 2px 12px;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   color: var(--text-primary);
   text-align: right;
@@ -38,7 +38,7 @@
 .label {
   padding: 2px 12px;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   color: var(--text-light);
   font-weight: normal;
@@ -126,7 +126,7 @@
   text-decoration: underline;
 }
 .memoryMarkdown code {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   padding: 1px 4px;
   border-radius: 3px;

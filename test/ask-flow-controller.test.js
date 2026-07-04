@@ -124,7 +124,7 @@ describe('AskFlowController — 队列 promote / dedupe', () => {
     const c = new AskFlowController(makeHost());
     assert.equal(c.handleWsMessage({ type: 'data', data: 'x' }), false);
     assert.equal(c.handleWsMessage({ type: 'perm-hook-pending', id: 'p1' }), false);
-    assert.equal(c.handleWsMessage({ type: undefined }), false); // onWsOpen 注入的 {data:...} 形态
+    assert.equal(c.handleWsMessage({ type: undefined }), false); // typeless message stays unhandled
   });
 });
 
@@ -384,5 +384,37 @@ describe('AskFlowController — timeout 队列移除 / 生命周期', () => {
     const cancels = host._sent.filter(m => m.type === 'ask-cancel');
     assert.equal(cancels.length, 2);
     assert.equal(c._pendingCancelIds.size, 0, '重发后清空');
+  });
+
+  it('onWsOpen: /api/pending-asks entries actually set pendingAsk (regression: {data:JSON} wrapper was a silent no-op)', async () => {
+    const host = makeHost();
+    host.fetchPendingAsks = () => Promise.resolve({
+      pendingAsks: [
+        { id: 'toolu_disk1', questions: Q1, createdAt: 123 },
+        { id: 'toolu_disk2', questions: Q2, createdAt: 456 },
+        { id: 'bad_empty', questions: [], createdAt: 789 }, // filtered: empty questions
+      ],
+    });
+    const c = new AskFlowController(host);
+    c.onWsOpen();
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(host._state.pendingAsk?.id, 'toolu_disk1');
+    assert.deepEqual(host._state.pendingAsk?.questions, Q1);
+    assert.equal(host._state.askQueue.length, 1, 'second entry queued behind the head');
+    assert.equal(host._state.askQueue[0].id, 'toolu_disk2');
+    assert.equal(host._state.askMetaMap['toolu_disk1']?.startedAt, 123, 'createdAt flows into askMetaMap');
+  });
+
+  it('onWsOpen: replayed entry already pending is deduped (no duplicate head/queue)', async () => {
+    const host = makeHost();
+    host.fetchPendingAsks = () => Promise.resolve({
+      pendingAsks: [{ id: 'toolu_dup', questions: Q1, createdAt: 1 }],
+    });
+    const c = new AskFlowController(host);
+    c.handleWsMessage({ type: 'ask-hook-pending', id: 'toolu_dup', questions: Q1 });
+    c.onWsOpen();
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(host._state.pendingAsk?.id, 'toolu_dup');
+    assert.equal(host._state.askQueue.length, 0);
   });
 });

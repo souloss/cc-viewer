@@ -11,3 +11,11 @@
 // 纯常量模块：无任何 node-only 依赖，前端 webpack / 后端 ESM 都能 import。
 
 export const ASK_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
+// Waiter-liveness reaper (server/lib/ask-reaper.js). These are NOT ask timeouts:
+// the "GUI effectively no-timeout" contract above still holds. The reaper only
+// resolves asks whose HOOK WAITER (ask-bridge short-poll loop) has provably died —
+// keyed on poll liveness, never on wall-clock ask age. A live bridge polls every
+// ~25s (5s backoff cap on errors), so 90s = at least 3 missed cycles + grace.
+export const ASK_WAITER_LIVENESS_MS = 90_000;
+export const ASK_WAITER_REAP_INTERVAL_MS = 30_000;

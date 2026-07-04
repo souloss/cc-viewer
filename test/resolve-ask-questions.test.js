@@ -1,10 +1,13 @@
 /**
  * Unit tests for resolveAskQuestions (src/utils/askOptionDesc.js).
  *
- * Regression guard for the 2026-07-02 blank multi-question popup: the modal body is
- * filled by the streamed tool_use block, which can carry empty/short questions while
- * the stream is still assembling. resolveAskQuestions falls back to the authoritative
- * pendingAsk.questions for the currently-pending ask so the popup never renders blank.
+ * Regression guard for the 2026-07-02 blank multi-question popup and the 2026-07-04
+ * hollow-at-equal-length variant (large options[].preview payloads materialize the
+ * outer questions[] shape before element content): the modal body is filled by the
+ * streamed tool_use block, which can carry empty/hollow questions while the stream is
+ * still assembling. resolveAskQuestions prefers the authoritative pendingAsk.questions
+ * for the currently-pending ask so the popup never renders blank, and only borrows it
+ * on legacy placeholder ids when the streamed render would otherwise be empty.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,11 +33,98 @@ describe('resolveAskQuestions', () => {
     assert.equal(out, Q2);
   });
 
-  it('keeps streamed when it is already complete (same length)', () => {
+  it('prefers authoritative for the pending ask even when streamed looks complete', () => {
     const streamed = Q2.map((q) => ({ ...q }));
     const pendingAsk = { id: TOOL_ID, questions: Q2 };
     const out = resolveAskQuestions(streamed, TOOL_ID, TOOL_ID, pendingAsk);
-    assert.equal(out, streamed);
+    assert.equal(out, Q2);
+  });
+
+  it('uses authoritative when streamed has equal length but hollow questions', () => {
+    // Partial-JSON assembly materializes the array shape before element content:
+    // two question objects exist but carry no text/options yet.
+    const pendingAsk = { id: TOOL_ID, questions: Q2 };
+    const out = resolveAskQuestions([{}, {}], TOOL_ID, TOOL_ID, pendingAsk);
+    assert.equal(out, Q2);
+  });
+
+  it('uses authoritative when streamed is partially hollow at equal length', () => {
+    const streamed = [
+      { question: 'a', header: 'A', options: [{ label: 'x' }] },
+      { question: '', options: [] },
+    ];
+    const pendingAsk = { id: TOOL_ID, questions: Q2 };
+    const out = resolveAskQuestions(streamed, TOOL_ID, TOOL_ID, pendingAsk);
+    assert.equal(out, Q2);
+  });
+
+  it('uses authoritative when streamed options are missing labels', () => {
+    const streamed = [
+      { question: 'a', header: 'A', options: [{}, {}] },
+      { question: 'b', header: 'B', options: [{}] },
+    ];
+    const pendingAsk = { id: TOOL_ID, questions: Q2 };
+    const out = resolveAskQuestions(streamed, TOOL_ID, TOOL_ID, pendingAsk);
+    assert.equal(out, Q2);
+  });
+
+  it('preserves preview and multiSelect fields on the authoritative copy', () => {
+    const questions = [
+      {
+        question: 'a',
+        header: 'A',
+        multiSelect: false,
+        options: [{ label: 'x', description: 'dx', preview: 'line1\nline2\nline3' }],
+      },
+      { question: 'b', header: 'B', multiSelect: true, options: [{ label: 'y' }] },
+    ];
+    const pendingAsk = { id: TOOL_ID, questions };
+    const out = resolveAskQuestions([{}, {}], TOOL_ID, TOOL_ID, pendingAsk);
+    assert.equal(out, questions);
+    assert.equal(out[0].options[0].preview, 'line1\nline2\nline3');
+    assert.equal(out[1].multiSelect, true);
+  });
+
+  it('keeps streamed when authoritative is empty or non-array despite matching ids', () => {
+    assert.equal(
+      resolveAskQuestions(Q1, TOOL_ID, TOOL_ID, { id: TOOL_ID, questions: [] }),
+      Q1
+    );
+    assert.equal(
+      resolveAskQuestions(Q1, TOOL_ID, TOOL_ID, { id: TOOL_ID, questions: null }),
+      Q1
+    );
+  });
+
+  it('fills an empty render from placeholder-id pendingAsk (legacy servers)', () => {
+    for (const placeholderId of ['__ask__', 'ask_123_abc']) {
+      const pendingAsk = { id: placeholderId, questions: Q2 };
+      const out = resolveAskQuestions([], TOOL_ID, TOOL_ID, pendingAsk);
+      assert.equal(out, Q2, `placeholder id ${placeholderId}`);
+    }
+  });
+
+  it('never overrides a non-empty render from placeholder-id pendingAsk', () => {
+    // Compatibility gate: a stale legacy pendingAsk must not inject a previous
+    // ask's questions over content the owner block already renders.
+    for (const placeholderId of ['__ask__', 'ask_123_abc']) {
+      const pendingAsk = { id: placeholderId, questions: Q2 };
+      const out = resolveAskQuestions(Q1, TOOL_ID, TOOL_ID, pendingAsk);
+      assert.equal(out, Q1, `placeholder id ${placeholderId}`);
+    }
+  });
+
+  it('keeps streamed for placeholder-id pendingAsk when block is not the owner', () => {
+    const pendingAsk = { id: '__ask__', questions: Q2 };
+    const out = resolveAskQuestions([], TOOL_ID, 'someone_else', pendingAsk);
+    assert.deepEqual(out, []);
+  });
+
+  it('does not borrow from a real (non-placeholder) mismatched pendingAsk id even when empty', () => {
+    // Guards the placeholder gate against widening: a different real tool id is a
+    // different ask, never a naming fallback for this block.
+    const pendingAsk = { id: 'toolu_other', questions: Q2 };
+    assert.deepEqual(resolveAskQuestions([], TOOL_ID, TOOL_ID, pendingAsk), []);
   });
 
   it('keeps streamed when toolId is not the pending ask (history block)', () => {

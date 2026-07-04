@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Modal, Input, Switch, Spin, message } from 'antd';
+import { Modal, Input, Switch, Spin, Tooltip, message } from 'antd';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { renderMarkdown } from '../../utils/markdown';
@@ -81,7 +81,13 @@ export default function SystemTextModal({ open, onClose }) {
       setSnapshots(snaps);
       setDrafts(JSON.parse(JSON.stringify(snaps)));
       setPersisted(pers);
-    }).finally(() => { if (!cancelled) setLoading(false); });
+    }).finally(() => {
+      if (cancelled) return;
+      setLoading(false);
+      // Focus the editor on open (focus on a disabled field is a no-op): the focused
+      // border turns theme-primary, matching how UltraPlan looks when it opens.
+      setTimeout(() => textareaRef.current?.focus?.(), 0);
+    });
     return () => { cancelled = true; };
   }, [open]);
 
@@ -219,7 +225,14 @@ export default function SystemTextModal({ open, onClose }) {
 
   return (
     <Modal
-      title={t('ui.expert.systemText')}
+      title={(
+        <span className={styles.titleRow}>
+          {t('ui.expert.systemText')}
+          <Tooltip title={t('ui.expert.systemText.modelHelp')} trigger={['hover', 'click']} placement="bottomLeft">
+            <span className={styles.helpBtn} aria-label={t('ui.expert.systemText.modelHelp')}>?</span>
+          </Tooltip>
+        </span>
+      )}
       open={open}
       onCancel={handleCancel}
       onOk={handleSave}
@@ -240,6 +253,26 @@ export default function SystemTextModal({ open, onClose }) {
           onAdd={handleAdd}
           onDelete={handleDelete}
         />
+        {/* The editor card immediately follows the tab strip (sibling, zero gap) —
+            the active tab's -1px overlaps the card's top edge for a seamless join */}
+        <div className={styles.editorBox}>
+          {preview ? (
+            <div className={styles.previewBox}>
+              {draft.text
+                ? <div className="chat-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(draft.text) }} />
+                : <div className={styles.previewEmpty}>{t('ui.expert.systemText.placeholder')}</div>}
+            </div>
+          ) : (
+            <Input.TextArea
+              ref={textareaRef}
+              value={draft.text}
+              onChange={(e) => setDraft({ text: e.target.value })}
+              placeholder={t('ui.expert.systemText.placeholder')}
+              autoSize={{ minRows: 14, maxRows: 28 }}
+              disabled={!curEditable}
+            />
+          )}
+        </div>
         <div className={styles.modeRow}>
           <div className={styles.modeLeft}>
             <Switch
@@ -258,22 +291,6 @@ export default function SystemTextModal({ open, onClose }) {
             <Switch checked={preview} onChange={setPreview} disabled={!curEditable} />
           </div>
         </div>
-        {preview ? (
-          <div className={styles.previewBox}>
-            {draft.text
-              ? <div className="chat-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(draft.text) }} />
-              : <div className={styles.previewEmpty}>{t('ui.expert.systemText.placeholder')}</div>}
-          </div>
-        ) : (
-          <Input.TextArea
-            ref={textareaRef}
-            value={draft.text}
-            onChange={(e) => setDraft({ text: e.target.value })}
-            placeholder={t('ui.expert.systemText.placeholder')}
-            autoSize={{ minRows: 14, maxRows: 28 }}
-            disabled={!curEditable}
-          />
-        )}
         {curEditable ? (
           <div className={styles.hint}>
             <div className={styles.dirLine}>

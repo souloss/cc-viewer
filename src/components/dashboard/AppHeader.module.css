@@ -126,7 +126,7 @@
 .qrcodeUrlInput {
   margin-top: 12px;
   font-size: 12px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 .qrcodeUrlCopy {
@@ -173,7 +173,7 @@
 
 .authPasswordInput {
   font-size: 12px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 .authSaveBtn {
@@ -234,7 +234,7 @@
   background: var(--bg-base-alt);
   border-color: var(--border-light);
   color: var(--text-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
@@ -350,7 +350,7 @@
   width: 100%;
   min-height: 400px;
   color: var(--text-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
   border: none;
@@ -403,7 +403,7 @@
   font-size: 22px;
   font-weight: 700;
   color: var(--text-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -452,7 +452,7 @@
 .projectStatsModelCount {
   font-size: 12px;
   color: var(--text-tertiary);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* KV-Cache content popover */
@@ -473,7 +473,7 @@
   display: flex;
   align-items: center;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--text-light);
   margin-bottom: 8px;
 }
@@ -493,7 +493,7 @@
   border-radius: 4px;
   padding: 8px;
   margin: 4px 0;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 .cacheCodeBlockSystem {
@@ -507,7 +507,7 @@
   border-radius: 4px;
   padding: 8px;
   margin: 4px 0;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 .cacheNavBtn {

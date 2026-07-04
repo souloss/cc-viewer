@@ -4,6 +4,6 @@
   border: 1px solid var(--border-primary);
   padding: 12px;
   font-size: 13px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   overflow: auto;
 }

@@ -287,7 +287,8 @@ export function renderLoginPage({ lang = 'en', error = false } = {}) {
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: #1a1a1a; color: #e8e8e8;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    /* Standalone document (no SPA CSS bundle): keep in sync with --font-ui in src/global.css */
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
   .card {
     width: 100%; max-width: 340px; padding: 32px 28px; margin: 16px;

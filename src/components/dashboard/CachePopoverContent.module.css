@@ -195,7 +195,7 @@
 }
 
 .memoryDirHint {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
   margin-top: 4px;

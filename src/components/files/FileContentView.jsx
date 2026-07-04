@@ -110,7 +110,7 @@ const editorTheme = EditorView.theme({
   '& .cm-scroller': {
     position: 'absolute',
     inset: '0',
-    fontFamily: "'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace",
+    fontFamily: 'var(--font-mono)',
     fontSize: '12px',
     lineHeight: '1.5',
   },

@@ -1,3 +1,5 @@
+import { isPlaceholderAskId } from './askPortalMatcher.js';
+
 // AskUserQuestion options[].description is schema-optional; centralize fallback
 // so AskQuestionForm and ChatMessage recap stay aligned.
 
@@ -12,22 +14,42 @@ export function hasOptionDescription(opt) {
   return Boolean(opt && opt.description);
 }
 
-// 选出 AskUserQuestion 交互卡片实际要渲染的 questions。
+// Pick the questions the interactive AskUserQuestion card actually renders.
 //
-// 弹窗 body 由内联 tool_use 块（从日志流重建）portal 进 modal askSlot 填充，而不是直接读
-// pendingAsk.questions（WS ask-hook-pending 下发、server 端已完整解析的权威副本）。streaming
-// 期间大 payload（如多问题）会有一段窗口：modal 已经因 hook 弹起，但流式重建出的块 input 尚未
-// 到 content_block_stop、还是未解析的部分 JSON 字符串 → 派生 questions 为空 → 弹窗空白（用户
-// 只能去终端里拒绝，这正是 2026-07-02 多问题 ask 被拒的根因）。
+// The modal body is filled by the inline tool_use block (reconstructed from the log
+// stream) portaling into the modal's askSlot — it does not read pendingAsk.questions
+// (the authoritative copy broadcast over WS ask-hook-pending / sdk-ask-pending, fully
+// parsed server-side before the hook fires) directly. During streaming of a large
+// payload there is a window where the modal is already open but the reconstructed
+// block's input is still partial JSON. Crucially, partial-JSON parsing materializes
+// the outer questions[] array shape before the element content arrives, so the
+// streamed copy can be HOLLOW AT EQUAL LENGTH (e.g. two question objects with empty
+// text/options while big options[].preview strings are still streaming — the
+// 2026-07-04 blank-popup regression; a strictly-longer length heuristic missed it).
 //
-// 兜底：仅当这是「当前 pending 的那条 ask」(toolId === lastPendingAskId) 且权威 questions 更完整
-// （streamed 为空 / 更短）时，用权威副本。历史里已解析完整的块 toolId 不等于 lastPendingAskId，
-// 或权威副本不更长时，一律沿用 streamed —— 不改历史视图行为，零回归。
+// So: for the currently pending ask (toolId === lastPendingAskId, id-matched), always
+// prefer the authoritative copy. It is complete by construction, and the submit path
+// (handleAskQuestionSubmit in askFlowController) maps answer indices through the same
+// authoritative _askHookQuestions copy — rendering it keeps rendered indices aligned
+// with the mapping array. Historical blocks never match lastPendingAskId and always
+// keep their own streamed questions (history view unchanged).
+//
+// Legacy/no-id servers use placeholder pendingAsk ids ('__ask__', 'ask_<ts>_<rnd>')
+// that can never equal the real tool_use id. There the authoritative copy is only
+// borrowed when the streamed render would otherwise be completely empty — it can fill
+// a blank popup but never override visible content (a stale legacy pendingAsk must
+// not inject a previous ask's questions over a rendered one).
 export function resolveAskQuestions(streamedQuestions, toolId, lastPendingAskId, pendingAsk) {
   const streamed = Array.isArray(streamedQuestions) ? streamedQuestions : [];
-  if (!pendingAsk || toolId == null || pendingAsk.id !== toolId || toolId !== lastPendingAskId) {
+  if (!pendingAsk || toolId == null || toolId !== lastPendingAskId) {
+    return streamed;
+  }
+  const idMatches = pendingAsk.id === toolId;
+  if (!idMatches && !(isPlaceholderAskId(pendingAsk.id) && streamed.length === 0)) {
     return streamed;
   }
   const authoritative = Array.isArray(pendingAsk.questions) ? pendingAsk.questions : [];
-  return authoritative.length > streamed.length ? authoritative : streamed;
+  if (authoritative.length === 0) return streamed; // defensive: WS handlers guarantee non-empty
+  if (streamed.length > authoritative.length) return streamed; // never shrink (belt-and-braces)
+  return authoritative;
 }

@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
-import { Input, Segmented, Button, Popover, Tooltip } from 'antd';
+import { Input, Segmented, Button, Popover } from 'antd';
 import { t } from '../../i18n';
 import ConfirmRemoveButton from '../common/ConfirmRemoveButton';
 import styles from './SystemTextModal.module.css';
 
-// 「系统提示词修改」模态里的模型页签条(参照 UltraplanPanel 的 Chrome-tab strip 交互)：
-// Default 页签 + 每个模型条目一个页签(带作用域徽标/未保存圆点/悬停删除×) + 「+ 添加模型」
-// Popover(名称 + 作用域,回车确认) + 右端「?」帮助 Tooltip。
-// 纯展示组件:选中态/条目列表/校验都由父组件持有(onAdd 返回错误文案或 null)。
+// Model tab strip inside the "Edit System Prompt" modal (strictly aligned with
+// UltraPlanModal's Chrome-tab strip): a Default tab + one tab per model entry
+// (scope badge / unsaved dot / hover delete ×) + an "+ Add model" Popover
+// (name + scope, Enter confirms). The "?" help sits next to the modal title
+// (rendered by SystemTextModal).
+// Pure presentational component: selection, entry list, and validation live in
+// the parent (onAdd returns an error message or null).
 export default function ModelPromptTabs({
   entries,          // [{ name, scope: 'global'|'workspace' }]
   activeKey,        // 'default' | `${scope}:${name}`
@@ -110,9 +113,6 @@ export default function ModelPromptTabs({
           + {t('ui.expert.systemText.addModel')}
         </button>
       </Popover>
-      <Tooltip title={t('ui.expert.systemText.modelHelp')} trigger={['hover', 'click']} placement="bottomRight">
-        <span className={styles.helpBtn} aria-label={t('ui.expert.systemText.modelHelp')}>?</span>
-      </Tooltip>
     </div>
   );
 }

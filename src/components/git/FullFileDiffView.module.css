@@ -27,7 +27,7 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--color-diff-add);
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
 }
 
 .deletedBadge {
@@ -38,7 +38,7 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--color-error);
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
 }
 
 .codeContainer {
@@ -46,7 +46,7 @@
   overflow: hidden;
   display: flex;
   min-height: 0;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
 }

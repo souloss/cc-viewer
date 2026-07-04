@@ -239,7 +239,7 @@
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 0.9em;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .markdownPreview pre {
   background: var(--bg-container);
@@ -371,7 +371,7 @@
   padding: 0 16px;
   text-align: right;
   color: var(--text-disabled);
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: nowrap;

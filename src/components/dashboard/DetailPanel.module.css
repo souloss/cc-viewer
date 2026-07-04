@@ -68,7 +68,7 @@
   color: var(--text-primary);
   text-align: right;
   padding: 4px 8px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
 }
 
@@ -79,7 +79,7 @@
   justify-content: center;
   color: var(--text-primary);
   padding: 4px 8px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   border-left: 1px solid var(--border-secondary);
   min-width: 100px;
@@ -88,7 +88,7 @@
 .tokenHitRateLabel {
   color: var(--text-tertiary);
   font-size: 10px;
-  font-family: sans-serif;
+  font-family: var(--font-ui);
 }
 
 .tokenRowBorder td {
@@ -223,7 +223,7 @@
   min-height: 26px;
   height: auto;
   padding: 0 8px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .reminderSelect :global(.ant-select-selection-placeholder) {
@@ -249,7 +249,7 @@
 .reminderLabel {
   color: var(--text-tertiary);
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .cacheTabContent {
@@ -296,7 +296,7 @@
   display: flex;
   align-items: center;
   font-size: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--text-light);
   margin-bottom: 12px;
   flex-shrink: 0;
@@ -356,7 +356,7 @@
   border-radius: 4px;
   padding: 8px;
   margin: 4px 0;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 .cacheHighlightSvg {
@@ -379,7 +379,7 @@
   border-radius: 4px;
   padding: 8px;
   margin: 4px 0;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
 }
 
 /* Ant Design Tabs flex fill */

@@ -26,6 +26,17 @@ const FALLBACK_ID_PREFIX = 'ask_';
 const LEGACY_PLACEHOLDER_ID = '__ask__';
 
 /**
+ * True when the given pending-ask id is a placeholder that can never equal a real
+ * tool_use id: the LEGACY single-slot '__ask__' or a server-generated 'ask_<ts>_<rnd>'
+ * fallback id. Consumers (e.g. resolveAskQuestions) use this to apply the same
+ * owner-wildcard semantics as shouldPortalAskForm on the legacy paths.
+ */
+export function isPlaceholderAskId(id) {
+  return id === LEGACY_PLACEHOLDER_ID
+    || (typeof id === 'string' && id.startsWith(FALLBACK_ID_PREFIX));
+}
+
+/**
  * @param {*} activeAskId   ApprovalPortalContext.Consumer 提供的 activeAskId（modal 当前 active ask 的 id）
  * @param {*} toolId        当前 ChatMessage 里 tool_use 块的 id（toolu_xxx）
  * @param {*} lastPendingAskId  ChatMessage 收到的 owner-idx 派生信号；非 owner 永远为 null
@@ -38,9 +49,6 @@ export function shouldPortalAskForm(activeAskId, toolId, lastPendingAskId) {
   // owner 通配：__ask__（LEGACY 老 server）∪ ask_*（server fallback）
   // 必须同时满足 owner-idx 锁定（lastPendingAskId === toolId），否则会让历史所有真实 toolId
   // 都被通配命中，重现旧的双份 portal bug
-  const isLegacyPlaceholder = activeAskId === LEGACY_PLACEHOLDER_ID;
-  const isServerFallbackId = typeof activeAskId === 'string'
-    && activeAskId.startsWith(FALLBACK_ID_PREFIX);
-  if ((isLegacyPlaceholder || isServerFallbackId) && lastPendingAskId === toolId) return true;
+  if (isPlaceholderAskId(activeAskId) && lastPendingAskId === toolId) return true;
   return false;
 }

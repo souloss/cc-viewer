@@ -198,6 +198,49 @@ function fatal(message) {
   return e;
 }
 
+// Best-effort cancel notification when Claude Code kills this hook process
+// (user declined the AskUserQuestion at the CLI → SIGTERM). Without it the
+// server-side entry stays `pending` until the waiter-liveness reaper catches it
+// (~90s); with it the modal closes and the store resolves immediately.
+// SIGKILL is uncatchable — the reaper remains the backstop.
+// Nothing is written to stdout here: Claude Code has already abandoned the hook,
+// and the normal answer/deny output contract stays byte-identical on live paths.
+let activeAskId = null;
+
+function postCancelBestEffort(id, reason) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    try {
+      const body = JSON.stringify({ reason });
+      const creq = httpClient.request({
+        hostname: '127.0.0.1',
+        port: Number(port),
+        path: `/api/ask-hook/${encodeURIComponent(id)}/cancel`,
+        method: 'POST',
+        rejectUnauthorized: false,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, (res) => { res.resume(); res.on('end', done); res.on('error', done); });
+      // Hard bound: this process is dying — never hang on a wedged socket.
+      const t = setTimeout(() => { try { creq.destroy(); } catch {} done(); }, 800);
+      if (typeof t.unref === 'function') t.unref();
+      creq.on('error', done);
+      creq.on('close', done);
+      creq.write(body);
+      creq.end();
+    } catch { done(); }
+  });
+}
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.once(sig, async () => {
+    if (activeAskId) {
+      await postCancelBestEffort(activeAskId, 'hook process exited');
+    }
+    process.exit(sig === 'SIGINT' ? 130 : 143);
+  });
+}
+
 async function pollUntilAnswered(askId) {
   let networkRetries = 0;
   let server5xxRetries = 0;
@@ -259,7 +302,9 @@ try {
   // Phase 3: server 看到 X-Ask-Poll-Mode 立即返 ack；旧 server 忽略 header 仍走 long-poll。
   // capability='short-poll' → 进入 GET 循环；否则按 long-poll 返回值（answers / cancelled）直接处理。
   if (data?.capability === 'short-poll' && data?.id) {
+    activeAskId = data.id; // arm the SIGTERM/SIGINT best-effort cancel
     data = await pollUntilAnswered(data.id);
+    activeAskId = null; // final answer/cancel obtained — nothing left to cancel
   }
   // 用户在 cc-viewer web UI 主动取消（点 Cancel 按钮 / 在输入框打字打断 pending ask）。
   // server.js 的 ask-cancel handler 会给 hook res 回 200 + { cancelled: true, reason }。

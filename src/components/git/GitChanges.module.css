@@ -243,7 +243,7 @@
   padding: 1px 5px;
   border-radius: 8px;
   flex-shrink: 0;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
 }
 
 .statInsert {
@@ -305,7 +305,7 @@
 }
 
 .commitHash {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
   background: var(--bg-elevated);

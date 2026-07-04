@@ -425,3 +425,76 @@ describe('ask-bridge.js', () => {
     });
   });
 });
+
+describe('SIGTERM/SIGINT best-effort cancel notification', () => {
+  const Q = [{ question: 'Q?', header: 'H', options: [{ label: 'A', description: '' }], multiSelect: false }];
+  const STDIN = JSON.stringify({ tool_input: { questions: Q } });
+
+  function spawnBridge(port) {
+    const child = spawn(process.execPath, [bridgePath], {
+      env: { ...process.env, CCVIEWER_PORT: String(port) },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, stdout })));
+    child.stdin.write(STDIN);
+    child.stdin.end();
+    return { child, closed };
+  }
+
+  async function runSignalCase(signal, expectedExit) {
+    const server = createServer();
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    let cancelBody = null;
+    let cancelSeen;
+    const cancelArrived = new Promise((resolve) => { cancelSeen = resolve; });
+    let firstGet;
+    const firstGetArrived = new Promise((resolve) => { firstGet = resolve; });
+    server.on('request', (req, res) => {
+      if (req.method === 'POST' && req.url === '/api/ask-hook') {
+        req.resume();
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'sig-id', capability: 'short-poll' }));
+        });
+      } else if (req.method === 'GET' && req.url.startsWith('/api/ask-hook/sig-id/result')) {
+        firstGet();
+        // hang: never answer — the bridge is parked waiting, like a real pending ask
+      } else if (req.method === 'POST' && req.url === '/api/ask-hook/sig-id/cancel') {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          cancelBody = body;
+          res.writeHead(204);
+          res.end();
+          cancelSeen();
+        });
+      } else {
+        res.writeHead(404); res.end();
+      }
+    });
+
+    const { child, closed } = spawnBridge(port);
+    await firstGetArrived;
+    child.kill(signal);
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('cancel POST never arrived')), 2000));
+    await Promise.race([cancelArrived, timeout]);
+    const { code, stdout } = await closed;
+    await new Promise((resolve) => server.close(resolve));
+    return { code, stdout, cancelBody };
+  }
+
+  it('SIGTERM after the ask is armed → POSTs /cancel with reason, exits 143, nothing on stdout', async () => {
+    const { code, stdout, cancelBody } = await runSignalCase('SIGTERM', 143);
+    assert.equal(code, 143);
+    assert.equal(stdout.trim(), '', 'signal path must not write to stdout');
+    assert.equal(JSON.parse(cancelBody).reason, 'hook process exited');
+  });
+
+  it('SIGINT after the ask is armed → POSTs /cancel, exits 130', async () => {
+    const { code } = await runSignalCase('SIGINT', 130);
+    assert.equal(code, 130);
+  });
+});

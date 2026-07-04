@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { t } from '../../i18n';
 import { ApprovalPortalContext } from '../chat/ApprovalPortalContext';
 import { playEvent as playVoiceEvent, playChimeFallback } from '../../utils/voicePackPlayer';
+import AskQuestionForm from '../chat/AskQuestionForm';
+import { shouldRenderAskFallback, ASK_FALLBACK_GRACE_MS } from '../../utils/askFallback';
 import styles from './ApprovalModal.module.css';
 
 const KIND_PRIORITY = ['ptyPlan', 'ask'];
@@ -103,12 +105,56 @@ export default function ApprovalModal({
     if (!ready && slotsReady) setSlotsReady(false);
   });
 
+  const askId = _idForKind('ask', approvalGlobal);
+  const askPendingVisible = visibleKinds.includes('ask');
+
   const ctxValue = useMemo(() => ({
     askSlot: slotsReady ? askSlotRef.current : null,
     ptyPlanSlot: slotsReady ? ptyPlanSlotRef.current : null,
-    activeAskId: visibleKinds.includes('ask') ? _idForKind('ask', approvalGlobal) : null,
+    activeAskId: askPendingVisible ? askId : null,
     activePtyPlanId: visibleKinds.includes('ptyPlan') ? _idForKind('ptyPlan', approvalGlobal) : null,
-  }), [slotsReady, visibleKinds, approvalGlobal]);
+  }), [slotsReady, visibleKinds, askPendingVisible, askId, approvalGlobal]);
+
+  // Fallback form support: the modal body is normally filled by the transcript
+  // tool_use block portaling into the ask slot. When nothing portals in (stale
+  // replayed ask whose block is old history, or a fresh ask before transcript
+  // ingest), render an AskQuestionForm directly from the pending-ask broadcast
+  // so the user always gets working Submit/Cancel. See src/utils/askFallback.js.
+  const [askSlotOccupied, setAskSlotOccupied] = useState(false);
+  const [askGraceElapsed, setAskGraceElapsed] = useState(false);
+
+  // Occupancy: observe the ask slot's children. Re-arms per ask id (queue
+  // promotion swaps the portal child) and per modal open/close. The sync initial
+  // read catches an already-portaled form on reopen so the fallback never flashes.
+  useLayoutEffect(() => {
+    const node = askSlotRef.current;
+    if (!askPendingVisible || !node) {
+      setAskSlotOccupied(false);
+      return undefined;
+    }
+    const update = () => setAskSlotOccupied(node.childElementCount > 0);
+    update();
+    const mo = new MutationObserver(update);
+    mo.observe(node, { childList: true });
+    return () => { mo.disconnect(); };
+  }, [askPendingVisible, askId]);
+
+  // Grace delay: give the real portal one commit cycle (slotsReady flip →
+  // consumer re-render → portal mount) plus ingest jitter before falling back.
+  useEffect(() => {
+    setAskGraceElapsed(false);
+    if (!askPendingVisible) return undefined;
+    const timer = setTimeout(() => setAskGraceElapsed(true), ASK_FALLBACK_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [askPendingVisible, askId]);
+
+  const askFallbackVisible = shouldRenderAskFallback({
+    isAskActive: askPendingVisible,
+    slotOccupied: askSlotOccupied,
+    graceElapsed: askGraceElapsed,
+    questions: approvalGlobal?.ask?.ask?.questions,
+    submitHandler: approvalGlobal?.ask?.handlers?.submit,
+  });
 
   // ESC = minimise（pending 保留）
   // Cmd/Ctrl+ESC = cancel（仅对 ask 类型生效，等价 terminal Claude Code 的 onAbort）—
@@ -238,6 +284,21 @@ export default function ApprovalModal({
             <div className={styles.body}>
               <div ref={ptyPlanSlotRef} className={`${styles.slot}${activeKind !== 'ptyPlan' ? ' ' + styles.slotHidden : ''}`} />
               <div ref={askSlotRef} className={`${styles.slot}${activeKind !== 'ask' ? ' ' + styles.slotHidden : ''}`} />
+              {askFallbackVisible && (
+                // Invariant: shouldRenderAskFallback already verified a non-empty
+                // questions array and a function submit handler — keep it that way
+                // before loosening the non-optional accesses below.
+                <div className={`${styles.slot}${activeKind !== 'ask' ? ' ' + styles.slotHidden : ''}`}>
+                  <AskQuestionForm
+                    key={askId}
+                    questions={approvalGlobal.ask.ask.questions}
+                    onSubmit={(answers) => approvalGlobal.ask.handlers.submit(answers, askId, approvalGlobal.ask.ask.questions)}
+                    onCancel={approvalGlobal.ask.handlers.cancel
+                      ? () => approvalGlobal.ask.handlers.cancel(askId, 'User aborted')
+                      : undefined}
+                  />
+                </div>
+              )}
             </div>
             {activeKind === 'ask' && approvalGlobal?.ask?.handlers?.cancel && (
               <div className={styles.footer}>

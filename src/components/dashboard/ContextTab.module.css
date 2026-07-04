@@ -146,7 +146,7 @@
 }
 
 .itemLabel {
-  font-family: monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -167,7 +167,7 @@
   color: var(--text-disabled);
   flex-shrink: 0;
   margin-left: 4px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* ── 右侧内容区 ── */
@@ -248,7 +248,7 @@
   margin-left: auto;
   font-size: 10px;
   color: var(--text-disabled);
-  font-family: monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
 }
 
@@ -370,13 +370,13 @@
 .toolName {
   color: var(--text-primary);
   font-weight: 500;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .toolId {
   color: var(--text-disabled);
   font-size: 10px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   margin-left: auto;
 }
 
@@ -441,7 +441,7 @@
   padding: 3px 10px;
   background: var(--bg-container);
   border-bottom: 1px solid var(--border-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 /* ── Block separator ── */
@@ -500,7 +500,7 @@
 .toolDiffTag {
   margin-left: 6px;
   font-size: 9px;
-  font-family: sans-serif;
+  font-family: var(--font-ui);
   text-decoration: none;
   opacity: 0.85;
 }
@@ -508,7 +508,7 @@
 .toolDiffSummary {
   margin-left: 6px;
   font-size: 11px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   display: inline-flex;
   gap: 4px;
   flex-shrink: 0;

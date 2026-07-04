@@ -737,9 +737,14 @@ export class AskFlowController {
   }
 
   /**
-   * WS reopen 后：重发缓存的 _pendingCancelIds + 拉 /api/pending-asks 恢复断连期间的 ask UI。
-   * 注：注入沿用原 ChatView `{ data: JSON.stringify(...) }` 形态（见原 _onTerminalWsState）；
-   * 该形态无顶层 .type，handleWsMessage 不会处理 —— 与重构前行为一致（latent no-op，已另行标记）。
+   * After a WS reopen: resend cached _pendingCancelIds and pull /api/pending-asks to
+   * restore ask UI missed during the disconnect (including disk-only entries orphaned
+   * by a server restart — the ApprovalModal fallback form renders them so the user
+   * can answer or durably cancel).
+   *
+   * Historical note: this injection used to wrap entries as `{ data: JSON.stringify(...) }`
+   * (the raw-socket-event shape), but handleWsMessage dispatches on the PARSED message's
+   * `.type`, so the wrapper made recovery a silent no-op. Pass the message object directly.
    */
   onWsOpen() {
     if (this.host.isUnmounted()) return;
@@ -755,14 +760,14 @@ export class AskFlowController {
         .then(data => {
           if (this.host.isUnmounted() || !data || !Array.isArray(data.pendingAsks)) return;
           for (const ask of data.pendingAsks) {
-            if (!ask || !ask.id || !Array.isArray(ask.questions)) continue;
-            this.handleWsMessage({ data: JSON.stringify({
+            if (!ask || !ask.id || !Array.isArray(ask.questions) || ask.questions.length === 0) continue;
+            this.handleWsMessage({
               type: 'ask-hook-pending', id: ask.id, questions: ask.questions,
               startedAt: ask.createdAt, timeoutMs: 24 * 60 * 60 * 1000,
-            }) });
+            });
           }
         })
-        .catch(() => { /* 静默：旧 server 无此端点 → ws replay 仍覆盖大多数场景 */ });
+        .catch(() => { /* silent: old servers lack this endpoint → ws replay still covers most cases */ });
     } catch {}
   }
 

@@ -377,7 +377,7 @@
   padding: 0 10px;
   margin: 2px 4px 2px 0;
   font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  font-family: var(--font-mono);
   color: var(--text-disabled-faint);
   background: var(--bg-code);
   border-radius: 14px;
@@ -431,7 +431,7 @@
 .simplifiedToolResultText {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-muted);
@@ -457,7 +457,7 @@
 }
 
 .simplifiedToolResultImagePlaceholder {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-tertiary);
   background: var(--bg-base-pure);
@@ -728,7 +728,7 @@
   padding: 6px 8px;
   background: var(--color-bg-elevated, rgba(0, 0, 0, 0.04));
   border-radius: 3px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   font-size: 10px;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1369,7 +1369,7 @@
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
-  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
 }

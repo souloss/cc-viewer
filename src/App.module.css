@@ -765,7 +765,7 @@
   font-size: 11px;
   color: var(--text-muted);
   margin-bottom: 8px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 
 .mobilePromptCard {

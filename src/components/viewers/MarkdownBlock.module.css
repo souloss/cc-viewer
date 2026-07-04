@@ -142,7 +142,7 @@
      40ms 约 2~3 帧，小于典型 chunk 节流 (100ms)，不会与 chunk 重绘反复叠加。 */
   animation: cursorEnter 40ms ease-out, cursorBlinkInline 1s step-end infinite 40ms;
   user-select: none;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   vertical-align: baseline;
 }
 

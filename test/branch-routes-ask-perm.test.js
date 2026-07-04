@@ -32,7 +32,8 @@ const askStore = await import('../server/lib/ask-store.js');
 
 const pendingAsksHandler = askPermRoutes.find(r => r.path === '/api/pending-asks').handler;
 const askHookHandler = askPermRoutes.find(r => r.path === '/api/ask-hook' && r.method === 'POST').handler;
-const askHookResultRoute = askPermRoutes.find(r => r.predicate);
+// Locate by probing the predicate (not by array position) so route order stays free.
+const askHookResultRoute = askPermRoutes.find(r => r.predicate && r.predicate('/api/ask-hook/x/result', 'GET'));
 const askHookResultHandler = askHookResultRoute.handler;
 const permHookHandler = askPermRoutes.find(r => r.path === '/api/perm-hook').handler;
 const streamChunkHandler = askPermRoutes.find(r => r.path === '/api/stream-chunk').handler;
@@ -96,8 +97,10 @@ function makeDeps(over = {}) {
   const wss = over.terminalWss === undefined ? makeWss() : over.terminalWss;
   const persisted = [];
   const deleted = [];
+  const spCancels = [];
   return {
-    _wss: wss, _persisted: persisted, _deleted: deleted,
+    _wss: wss, _persisted: persisted, _deleted: deleted, _spCancels: spCancels,
+    notifyShortPollCancel: (id, reason) => spCancels.push({ id, reason }),
     pendingAskHooks: new Map(),
     pendingPermHooks: new Map(),
     shortPollListeners: new Map(),
@@ -521,5 +524,162 @@ describe('ask-perm 分支补洞: 路由 predicate', () => {
     assert.equal(p('/api/ask-hook/abc', 'GET'), false);
     // 方法非 GET
     assert.equal(p('/api/ask-hook/abc/result', 'POST'), false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Waiter-liveness tracking + POST /api/ask-hook/:id/cancel (reaper support, see
+// server/lib/ask-reaper.js). English comments per current CLAUDE.md convention.
+const askHookCancelRoute = askPermRoutes.find(
+  (r) => r.predicate && r.predicate('/api/ask-hook/x/cancel', 'POST')
+);
+const askHookCancelHandler = askHookCancelRoute.handler;
+
+async function driveCancel(id, body, { deps, res } = {}) {
+  deps = deps || makeDeps();
+  res = res || makeRes();
+  const req = makeReq();
+  askHookCancelHandler(req, res, { pathname: `/api/ask-hook/${id}/cancel` }, true, deps);
+  if (body !== null && body !== undefined) req.emit('data', typeof body === 'string' ? body : JSON.stringify(body));
+  req.emit('end');
+  await new Promise((r) => setTimeout(r, 10));
+  return { deps, res };
+}
+
+describe('ask-perm: waiter liveness seeding/refresh', () => {
+  it('short-poll POST seeds askWaiterLastPoll; long-poll POST does not', async () => {
+    const deps = makeDeps({ askWaiterLastPoll: new Map() });
+    await drivePost(askHookHandler, { questions: [{ question: 'q', options: [] }], toolUseId: 'toolu_live1' },
+      { req: makeReq({ headers: { 'x-ask-poll-mode': 'short' } }), deps });
+    assert.ok(deps.askWaiterLastPoll.get('toolu_live1') > 0);
+    clearTimeout(deps.pendingAskHooks.get('toolu_live1').timer);
+
+    const deps2 = makeDeps({ askWaiterLastPoll: new Map() });
+    await drivePost(askHookHandler, { questions: [{ question: 'q', options: [] }], toolUseId: 'toolu_live2' },
+      { req: makeReq(), deps: deps2 });
+    assert.equal(deps2.askWaiterLastPoll.has('toolu_live2'), false);
+    clearTimeout(deps2.pendingAskHooks.get('toolu_live2').timer);
+  });
+
+  it('GET /result refreshes askWaiterLastPoll even when the entry is unknown (404 path)', async () => {
+    const deps = makeDeps({ askWaiterLastPoll: new Map() });
+    const res = makeRes();
+    await askHookResultHandler(makeReq(), res, { pathname: '/api/ask-hook/toolu_ghost/result?wait=1000' }, true, deps);
+    await waitUntil(() => res.ended);
+    assert.equal(res.status, 404);
+    assert.ok(deps.askWaiterLastPoll.get('toolu_ghost') > 0);
+  });
+
+  it('handlers stay safe when deps lack askWaiterLastPoll (optional chaining)', async () => {
+    const deps = makeDeps(); // no askWaiterLastPoll key
+    const { res } = await drivePost(askHookHandler, { questions: [{ question: 'q', options: [] }], toolUseId: 'toolu_nomap' },
+      { req: makeReq({ headers: { 'x-ask-poll-mode': 'short' } }), deps });
+    assert.equal(res.status, 200);
+    const res2 = makeRes();
+    await askHookResultHandler(makeReq(), res2, { pathname: '/api/ask-hook/toolu_nomap/result?wait=1000' }, true, deps);
+    // no throw = pass; entry exists in memory so a listener got registered
+    clearTimeout(deps.pendingAskHooks.get('toolu_nomap').timer);
+    for (const set of deps.shortPollListeners.values()) {
+      for (const l of set) { l.finished = true; clearTimeout(l.tid); }
+    }
+  });
+});
+
+describe('ask-perm: POST /api/ask-hook/:id/cancel', () => {
+  beforeEach(async () => {
+    await askStore.replaceAll({});
+  });
+
+  it('cancel and /result predicates never overlap (method + path discriminators)', () => {
+    assert.notEqual(askHookCancelRoute, undefined);
+    // A URL that matches one predicate must not match the other, in both directions,
+    // so registration order can never change dispatch behavior.
+    assert.equal(askHookCancelRoute.predicate('/api/ask-hook/x/result', 'GET'), false);
+    assert.equal(askHookResultRoute.predicate('/api/ask-hook/x/cancel', 'POST'), false);
+    // Substring-bearing ids stay disambiguated by HTTP method.
+    assert.equal(askHookResultRoute.predicate('/api/ask-hook/cancel_abc/result?wait=1', 'GET'), true);
+    assert.equal(askHookCancelRoute.predicate('/api/ask-hook/cancel_abc/result?wait=1', 'GET'), false);
+    assert.equal(askHookCancelRoute.predicate('/api/ask-hook/result_abc/cancel', 'POST'), true);
+    assert.equal(askHookResultRoute.predicate('/api/ask-hook/result_abc/cancel', 'POST'), false);
+  });
+
+  it('memory short-poll entry: 204, memory cleared, disk cancelled, WS broadcast, liveness dropped', async () => {
+    const deps = makeDeps({ askWaiterLastPoll: new Map() });
+    await drivePost(askHookHandler, { questions: [{ question: 'q', options: [] }], toolUseId: 'toolu_c1' },
+      { req: makeReq({ headers: { 'x-ask-poll-mode': 'short' } }), deps });
+    assert.ok(deps.pendingAskHooks.has('toolu_c1'));
+    const { res } = await driveCancel('toolu_c1', { reason: 'hook process exited' }, { deps });
+    assert.equal(res.status, 204);
+    assert.equal(deps.pendingAskHooks.has('toolu_c1'), false);
+    assert.equal(deps.askWaiterLastPoll.has('toolu_c1'), false);
+    await waitUntil(() => askStore.loadAskStore()['toolu_c1']?.status === 'cancelled');
+    const row = askStore.loadAskStore()['toolu_c1'];
+    assert.equal(row.status, 'cancelled');
+    assert.equal(row.cancelReason, 'hook process exited');
+    assert.ok(deps._wss._sent.some((m) => m.type === 'ask-hook-cancelled' && m.id === 'toolu_c1'));
+    assert.deepEqual(deps._spCancels, [{ id: 'toolu_c1', reason: 'hook process exited' }], 'hanging poll listeners must be woken');
+  });
+
+  it('memory long-poll entry: hanging res receives {cancelled:true}, persistAskDelete called', async () => {
+    const deps = makeDeps();
+    const hookRes = makeRes();
+    await drivePost(askHookHandler, { questions: [{ question: 'q', options: [] }], toolUseId: 'toolu_lp1' },
+      { req: makeReq(), res: hookRes, deps });
+    assert.ok(deps.pendingAskHooks.has('toolu_lp1'));
+    assert.equal(hookRes.ended, false, 'long-poll res still hanging');
+    const { res } = await driveCancel('toolu_lp1', { reason: 'bye' }, { deps });
+    assert.equal(res.status, 204);
+    await waitUntil(() => hookRes.ended);
+    assert.equal(hookRes.json.cancelled, true);
+    assert.equal(hookRes.json.reason, 'bye');
+    assert.ok(deps._deleted.includes('toolu_lp1'));
+  });
+
+  it('disk-only entry: markCancelled lands, broadcast fires', async () => {
+    await askStore.setEntry('toolu_disk1', { questions: [{ question: 'q' }], createdAt: Date.now(), status: 'pending' });
+    const { deps, res } = await driveCancel('toolu_disk1', undefined);
+    assert.equal(res.status, 204);
+    await waitUntil(() => askStore.loadAskStore()['toolu_disk1']?.status === 'cancelled');
+    assert.equal(askStore.loadAskStore()['toolu_disk1'].cancelReason, 'hook process exited');
+    assert.ok(deps._wss._sent.some((m) => m.type === 'ask-hook-cancelled' && m.id === 'toolu_disk1'));
+    assert.deepEqual(deps._spCancels, [{ id: 'toolu_disk1', reason: 'hook process exited' }], 'disk-only branch keeps WS-handler parity');
+  });
+
+  it('already-final disk entry: 204 but NO broadcast (first-write-wins respected)', async () => {
+    await askStore.setEntry('toolu_done1', { questions: [{ question: 'q' }], createdAt: Date.now(), status: 'pending' });
+    await askStore.markAnswered('toolu_done1', { q: 'a' });
+    const { deps, res } = await driveCancel('toolu_done1', { reason: 'late' });
+    assert.equal(res.status, 204);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(askStore.loadAskStore()['toolu_done1'].status, 'answered');
+    assert.equal(deps._wss._sent.some((m) => m.type === 'ask-hook-cancelled'), false);
+  });
+
+  it('invalid id → 400; oversized body → 413 emitted from the data handler (real destroy never fires end)', async () => {
+    const { res } = await driveCancel('bad*id', { reason: 'x' });
+    assert.equal(res.status, 400);
+    const deps = makeDeps();
+    const res2 = makeRes();
+    const req2 = makeReq();
+    req2.destroy = () => {}; // real Node semantics: destroy() does NOT emit 'end'
+    askHookCancelHandler(req2, res2, { pathname: '/api/ask-hook/toolu_big/cancel' }, true, deps);
+    req2.emit('data', 'x'.repeat(5000));
+    await waitUntil(() => res2.ended);
+    assert.equal(res2.status, 413);
+    // a late chunk after the reject must not throw or double-respond
+    req2.emit('data', 'y');
+    assert.equal(res2.status, 413);
+  });
+
+  it('reason is sliced to 500 chars and non-JSON body falls back to the default reason', async () => {
+    await askStore.setEntry('toolu_r1', { questions: [{ question: 'q' }], createdAt: Date.now(), status: 'pending' });
+    await driveCancel('toolu_r1', { reason: 'r'.repeat(600) });
+    await waitUntil(() => askStore.loadAskStore()['toolu_r1']?.status === 'cancelled');
+    assert.equal(askStore.loadAskStore()['toolu_r1'].cancelReason.length, 500);
+
+    await askStore.setEntry('toolu_r2', { questions: [{ question: 'q' }], createdAt: Date.now(), status: 'pending' });
+    await driveCancel('toolu_r2', 'not json');
+    await waitUntil(() => askStore.loadAskStore()['toolu_r2']?.status === 'cancelled');
+    assert.equal(askStore.loadAskStore()['toolu_r2'].cancelReason, 'hook process exited');
   });
 });

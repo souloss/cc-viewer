@@ -1,5 +1,5 @@
 // Ask / permission hook bridge routes (moved verbatim from server.js handleRequest).
-import { loadAskStore, consumeIfFinal as askStoreConsumeIfFinal } from '../lib/ask-store.js';
+import { loadAskStore, consumeIfFinal as askStoreConsumeIfFinal, markCancelled as askStoreMarkCancelled } from '../lib/ask-store.js';
 import { runWaterfallHook, runParallelHook } from '../lib/plugin-loader.js';
 import { sendEventToClients } from '../lib/log-watcher.js';
 
@@ -128,6 +128,9 @@ function askHook(req, res, parsedUrl, isLocal, deps) {
       const _placeholderEntry = { questions, res, timer: null, createdAt: Date.now(), shortPoll: shortPollMode };
       deps.pendingAskHooks.set(id, _placeholderEntry);
       deps.persistAskEntry(id, _placeholderEntry);
+      // Seed waiter liveness for the reaper (ask-reaper.js). Optional chaining:
+      // older deps stubs and third-party callers may not provide the map.
+      if (shortPollMode) deps.askWaiterLastPoll?.set(id, Date.now());
 
       // res.on('close') 提前注册：handler 用 entry.timer 守卫（占位期 timer:null → 仅 delete Map）
       // Phase 3: short-poll 模式下 res 主动 end，close 不视为 client cancel；entry 由 24h timer 兜底清理。
@@ -237,6 +240,10 @@ async function askHookResult(req, res, parsedUrl, isLocal, deps) {
     }
     const qs = new URLSearchParams(m[2] || '');
     const wait = Math.max(1000, Math.min(60000, parseInt(qs.get('wait') || '30000', 10)));
+    // Refresh waiter liveness on every poll arrival (see ask-reaper.js). Unconditional:
+    // even a poll that ends in 404/final proves the waiter process is alive; the reaper
+    // GCs records for ids that are no longer pending.
+    deps.askWaiterLastPoll?.set(id, Date.now());
 
     // 1) disk 命中 answered/cancelled：浏览器答得早过 GET 到达 → 立即返并消费（一次性）
     // 用 consumeIfFinal 单次 withLock 内判 status 决定是否 delete —— 旧设计的
@@ -287,6 +294,81 @@ async function askHookResult(req, res, parsedUrl, isLocal, deps) {
       }
     } catch {}
   }
+}
+
+// POST /api/ask-hook/:id/cancel — best-effort cancel from a dying hook process
+// (ask-bridge SIGTERM/SIGINT handler) or any client that wants to durably resolve
+// a pending ask. Mirrors the WS ask-cancel handler in server.js for the hook path.
+// Auth: standard request prelude (loopback-exempt), same as the sibling ask-hook routes.
+function askHookCancel(req, res, parsedUrl, isLocal, deps) {
+  const m = parsedUrl.pathname.match(/^\/api\/ask-hook\/([^/?]+)\/cancel$/);
+  const id = m ? decodeURIComponent(m[1]) : '';
+  if (!id || id.length > 256 || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid id' }));
+    return;
+  }
+  let body = '';
+  let bodyTooLarge = false;
+  req.on('data', (chunk) => {
+    if (bodyTooLarge) return;
+    body += chunk;
+    if (body.length > 4096) {
+      // Respond here, not in 'end': req.destroy() never emits 'end' in real Node,
+      // so a deferred 413 would be dead code (mirrors permHook's in-data rejection).
+      bodyTooLarge = true;
+      try { if (!res.headersSent) { res.writeHead(413, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Request body too large' })); } } catch {}
+      req.destroy();
+    }
+  });
+  req.on('end', async () => {
+    if (bodyTooLarge) return;
+    let reason = 'hook process exited';
+    try {
+      const parsed = body ? JSON.parse(body) : {};
+      if (typeof parsed.reason === 'string' && parsed.reason) reason = parsed.reason.slice(0, 500);
+    } catch {}
+    // Respond fast: the caller may be a process that is about to die.
+    try { if (!res.headersSent) { res.writeHead(204); res.end(); } } catch {}
+    try {
+      let handled = false;
+      const entry = deps.pendingAskHooks.get(id);
+      if (entry) {
+        if (entry.timer) clearTimeout(entry.timer);
+        deps.pendingAskHooks.delete(id);
+        deps.askWaiterLastPoll?.delete(id);
+        if (entry.shortPoll) {
+          const wrote = await askStoreMarkCancelled(id, reason);
+          if (wrote) deps.notifyShortPollCancel?.(id, reason);
+          handled = wrote;
+        } else {
+          // Long-poll: end the hanging hook response so the bridge unblocks.
+          try {
+            if (entry.res && !entry.res.headersSent) {
+              entry.res.writeHead(200, { 'Content-Type': 'application/json' });
+              entry.res.end(JSON.stringify({ cancelled: true, reason }));
+            }
+          } catch {}
+          deps.persistAskDelete(id);
+          handled = true;
+        }
+      } else {
+        // Disk-only (e.g. entry orphaned by a previous server process). Wake any
+        // hanging poll listeners too — parity with the WS ask-cancel handler.
+        handled = await askStoreMarkCancelled(id, reason);
+        if (handled) deps.notifyShortPollCancel?.(id, reason);
+      }
+      if (handled) {
+        if (deps.terminalWss) {
+          const cmsg = JSON.stringify({ type: 'ask-hook-cancelled', id, reason });
+          deps.terminalWss.clients.forEach((c) => {
+            if (c.readyState === 1) try { c.send(cmsg); } catch {}
+          });
+        }
+        deps.notifyParentPending({ type: 'ask-hook-cancelled', id });
+      }
+    } catch {}
+  });
 }
 
 // Permission hook bridge: receive tool permission request from perm-bridge.js, long-poll for user decision
@@ -447,6 +529,7 @@ export const askPermRoutes = [
   { method: 'GET', match: 'exact', path: '/api/pending-asks', handler: pendingAsks },
   { method: 'POST', match: 'exact', path: '/api/ask-hook', handler: askHook },
   { predicate: (url, method) => url.startsWith('/api/ask-hook/') && url.includes('/result') && method === 'GET', handler: askHookResult },
+  { predicate: (url, method) => url.startsWith('/api/ask-hook/') && url.includes('/cancel') && method === 'POST', handler: askHookCancel },
   { method: 'POST', match: 'exact', path: '/api/perm-hook', handler: permHook },
   { method: 'POST', match: 'exact', path: '/api/stream-chunk', handler: streamChunk },
 ];

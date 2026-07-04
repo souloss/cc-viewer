@@ -37,7 +37,7 @@ const { loadPlugins } = await import('../server/lib/plugin-loader.js');
 // ── 路由 handler 提取 ──────────────────────────────────────────────────────────
 const pendingAsksHandler = askPermRoutes.find(r => r.path === '/api/pending-asks').handler;
 const askHookHandler = askPermRoutes.find(r => r.path === '/api/ask-hook' && r.method === 'POST').handler;
-const askHookResultHandler = askPermRoutes.find(r => r.predicate).handler;
+const askHookResultHandler = askPermRoutes.find(r => r.predicate && r.predicate('/api/ask-hook/x/result', 'GET')).handler; // probe, not array position
 const permHookHandler = askPermRoutes.find(r => r.path === '/api/perm-hook').handler;
 const streamChunkHandler = askPermRoutes.find(r => r.path === '/api/stream-chunk').handler;
 

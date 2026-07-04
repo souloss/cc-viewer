@@ -9,8 +9,9 @@ import { execFile, exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { isPathContained } from './lib/file-api.js';
-import { setEntry as askStoreSetEntry, deleteEntry as askStoreDeleteEntry, pruneStale as askStorePruneStale, markAnswered as askStoreMarkAnswered, markCancelled as askStoreMarkCancelled } from './lib/ask-store.js';
-import { ASK_TIMEOUT_MS } from './lib/ask-constants.js';
+import { setEntry as askStoreSetEntry, deleteEntry as askStoreDeleteEntry, pruneStale as askStorePruneStale, markAnswered as askStoreMarkAnswered, markCancelled as askStoreMarkCancelled, loadAskStore as askStoreLoad } from './lib/ask-store.js';
+import { ASK_TIMEOUT_MS, ASK_WAITER_REAP_INTERVAL_MS, ASK_WAITER_LIVENESS_MS } from './lib/ask-constants.js';
+import { reapDeadAskWaiters, sweepOrphanedDiskAsks } from './lib/ask-reaper.js';
 import { sdkApprovalCloseType } from './lib/sdk-adapter.js';
 import { DIST_DIR, NODE_MODULES } from './_paths.js';
 import { createDispatcher } from './routes/_dispatch.js';
@@ -194,6 +195,11 @@ function _persistAskDelete(id) {
 // Phase 3: short-poll listener registry. Hangs GET /api/ask-hook/:id/result responses
 // until either an answer/cancel arrives or wait ms elapses (then 204).
 const shortPollListeners = new Map(); // id -> Set<{ res, tid, finished }>
+
+// Waiter-liveness tracking for short-poll asks (see server/lib/ask-reaper.js).
+// Memory-only BY DESIGN: persisting it would bump the ask-store SCHEMA_VERSION;
+// the reaper's boot-time orphan sweep covers restarts instead.
+const askWaiterLastPoll = new Map(); // id -> ms of last POST create / GET result poll
 
 function _notifyShortPollAnswer(id, answers) {
   const set = shortPollListeners.get(id);
@@ -493,6 +499,8 @@ const deps = {
   pendingAskHooks,
   pendingPermHooks,
   shortPollListeners,
+  askWaiterLastPoll,
+  notifyShortPollCancel: _notifyShortPollCancel,
   editorSessions,
   gitRestoreLocks,
   liveStreamLastSeq: _liveStreamLastSeq,
@@ -863,6 +871,56 @@ export async function startViewer() {
     askStorePruneStale(ASK_HOOK_TIMEOUT_MS).catch(() => {});
   }, 60 * 60 * 1000);
   _pruneAskStoreInterval.unref();
+
+  // Waiter-liveness reaper: resolves short-poll asks whose hook process (ask-bridge)
+  // died without notifying us (e.g. AskUserQuestion declined at the CLI → SIGTERM).
+  // Keys on waiter liveness, never on wall-clock ask age — the "GUI effectively
+  // no-timeout" contract is untouched. See server/lib/ask-reaper.js.
+  const _reaperDeps = {
+    pendingAskHooks,
+    shortPollListeners,
+    askWaiterLastPoll,
+    markCancelled: askStoreMarkCancelled,
+    loadAskStore: askStoreLoad,
+    notifyShortPollCancel: _notifyShortPollCancel,
+    // terminalWss is assigned later in startServer — resolve at call time via closure.
+    broadcastCancelled: (id, reason) => {
+      if (!terminalWss) return;
+      const cmsg = JSON.stringify({ type: 'ask-hook-cancelled', id, reason });
+      terminalWss.clients.forEach((c) => {
+        if (c.readyState === 1) try { c.send(cmsg); } catch {}
+      });
+    },
+    notifyParentPending: _notifyParentPending,
+  };
+  const _reaperState = { lastSweepAt: Date.now() };
+  _askReaperTimer = setInterval(() => {
+    reapDeadAskWaiters(_reaperDeps, _reaperState).catch(() => {});
+  }, ASK_WAITER_REAP_INTERVAL_MS);
+  _askReaperTimer.unref();
+  // One-shot boot sweep for disk-only orphans left by a previous server process.
+  // Delayed one liveness window so a bridge that survived our restart can re-poll
+  // and prove ownership first; skipped when another cc-viewer instance is running.
+  // Also skipped entirely under custom CCV_START_PORT/CCV_MAX_PORT: the lsof scan
+  // covers only OUR range, so an instance on a different custom range would be
+  // invisible and its live asks could be falsely swept. The memory-owned reaper
+  // and the ApprovalModal fallback UI still cover orphans in that setup.
+  const _customPortRange = !!(process.env.CCV_START_PORT || process.env.CCV_MAX_PORT);
+  const _bootTime = Date.now();
+  if (!_customPortRange) {
+    _askOrphanSweepTimer = setTimeout(() => {
+      sweepOrphanedDiskAsks({
+        ..._reaperDeps,
+        bootTime: _bootTime,
+        ownPid: process.pid,
+        portRange: [START_PORT, MAX_PORT],
+        // Async on purpose: a wedged lsof would otherwise block the event loop
+        // (and every in-flight request) for up to the full timeout.
+        lsofImpl: async (cmd) => (await execAsync(cmd, { timeout: 2000, encoding: 'utf-8' })).stdout,
+      }).catch(() => {});
+    }, ASK_WAITER_LIVENESS_MS);
+    _askOrphanSweepTimer.unref();
+  }
 
   // 通过插件 hook 获取 HTTPS 证书选项
   let httpsOptions = null;
@@ -2109,6 +2167,9 @@ export function broadcastTurnEnd(sessionId = null, ts = Date.now()) {
 // 流式状态 SSE 推送定时器：检测 streamingState 变化并广播给所有客户端。
 // rising-edge → turn_end cancel（丢弃 pending，不 flush）由 _observeStreamingTick 统一处理。
 let _streamingStatusTimer = null;
+// Waiter-liveness reaper timers (armed in startServer, cleared in the stop path).
+let _askReaperTimer = null;
+let _askOrphanSweepTimer = null;
 // 启动后 30s 的更新检查 timer 句柄。必须可清理:
 //  - .unref() 防止它把事件循环 keep-alive 30s(测试进程靠 --test-force-exit 兜底是时序侥幸);
 //  - _doStop 里 clearTimeout 防止 stop/start 循环(Electron tab / 测试)泄漏多个 pending 检查。
@@ -2199,6 +2260,14 @@ async function _doStop() {
   if (_streamingStatusTimer) {
     clearInterval(_streamingStatusTimer);
     _streamingStatusTimer = null;
+  }
+  if (_askReaperTimer) {
+    clearInterval(_askReaperTimer);
+    _askReaperTimer = null;
+  }
+  if (_askOrphanSweepTimer) {
+    clearTimeout(_askOrphanSweepTimer);
+    _askOrphanSweepTimer = null;
   }
   if (_updateCheckTimer) {
     clearTimeout(_updateCheckTimer);

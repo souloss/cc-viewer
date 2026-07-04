@@ -15,7 +15,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldPortalAskForm } from '../src/utils/askPortalMatcher.js';
+import { shouldPortalAskForm, isPlaceholderAskId } from '../src/utils/askPortalMatcher.js';
 
 describe('shouldPortalAskForm — null / undefined 早退', () => {
   it('activeAskId === null → false', () => {
@@ -79,5 +79,20 @@ describe('shouldPortalAskForm — 非法 / 不匹配 activeAskId', () => {
     // 这是 owner 锁定存在的原因：否则会重现双份 portal bug
     assert.equal(shouldPortalAskForm('__ask__', 'toolu_historical', 'toolu_current'), false);
     assert.equal(shouldPortalAskForm('ask_1_2', 'toolu_historical', 'toolu_current'), false);
+  });
+});
+
+describe('isPlaceholderAskId — placeholder id taxonomy', () => {
+  it('true for legacy __ask__ and ask_* server fallback ids', () => {
+    assert.equal(isPlaceholderAskId('__ask__'), true);
+    assert.equal(isPlaceholderAskId('ask_1700000000000_x9'), true);
+    assert.equal(isPlaceholderAskId('ask_'), true);
+  });
+  it('false for real tool ids, null/undefined, non-strings, and arbitrary strings', () => {
+    assert.equal(isPlaceholderAskId('toolu_abc'), false);
+    assert.equal(isPlaceholderAskId(null), false);
+    assert.equal(isPlaceholderAskId(undefined), false);
+    assert.equal(isPlaceholderAskId(123), false);
+    assert.equal(isPlaceholderAskId('question'), false);
   });
 });

@@ -537,8 +537,10 @@ class ChatMessage extends React.Component {
   }
 
   _renderTool_AskQuestion(tu, inp) {
-      // streamed 块的 questions 在流式装配未完成时可能为空/不全；对「当前 pending」那条 ask 用
-      // 权威 pendingAsk.questions 兜底，避免大 payload（多问题）弹窗空白。详见 resolveAskQuestions。
+      // The streamed block's questions can be empty/hollow while stream assembly is still
+      // in flight; for the currently-pending ask, fall back to the authoritative
+      // pendingAsk.questions so large payloads (multi-question, big previews) never render
+      // a blank popup. See resolveAskQuestions for the full selection rules.
       const questions = resolveAskQuestions(inp.questions, tu.id, this.props.lastPendingAskId, this.props.pendingAsk);
       const { askAnswerMap, toolResultMap } = this.props;
       const selectedAnswers = askAnswerMap?.[tu.id] || {};

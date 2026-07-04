@@ -60,6 +60,9 @@
   --accentText: var(--color-primary);
   --accentTextContrast: #ffffff;
 
+  /* Intentionally shadows MDXEditor's own element-level --font-mono (set on the
+     editor root by the library stylesheet, which would beat the inherited :root
+     value from global.css). Keep this literal in sync with --font-mono there. */
   --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
 }
 

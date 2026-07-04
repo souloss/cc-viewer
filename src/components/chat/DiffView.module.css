@@ -61,7 +61,7 @@
 
 .diffBody {
   display: flex;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   background: var(--bg-container);

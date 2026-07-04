@@ -55,7 +55,7 @@
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 0.9em;
-  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .modalBody pre {
   background: var(--bg-container);
@@ -110,7 +110,7 @@
   min-height: 200px;
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
   border: 1px solid var(--border-secondary);

@@ -314,7 +314,7 @@
   background: var(--bg-elevated);
   color: var(--text-secondary);
   font-size: 15px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
   cursor: pointer;
   user-select: none;
   -webkit-tap-highlight-color: #00000000;

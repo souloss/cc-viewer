@@ -96,7 +96,7 @@ export default function ImAppendSystemModal({ open, platform, onClose }) {
           onChange={(e) => setContent(e.target.value)}
           autoSize={{ minRows: 16, maxRows: 28 }}
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 13 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}
         />
       )}
     </Modal>
