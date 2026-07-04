@@ -128,7 +128,58 @@ function nameToColorIndex(name) {
   return ((hash % AVATAR_BG_VAR_COUNT) + AVATAR_BG_VAR_COUNT) % AVATAR_BG_VAR_COUNT;
 }
 
-export function getTeammateAvatar(name) {
+// Removes SMIL <animate> elements from an avatar SVG string. DESIGN.md's
+// degradation rule guarantees the static markup IS the finished portrait
+// (all animate elements are self-closing and hold their hidden states inside
+// the animate itself), so the stripped string renders the complete image.
+// The narrow regex (only self-closing <animate>) is intentionally coupled to
+// test/teammate-svg-assets.test.js, whose element allowlist and self-closing
+// assertion forbid animateTransform/animateMotion/<set> and open-form
+// <animate> — keep both in sync if that allowlist ever relaxes.
+export function stripSvgAnimations(svg) {
+  return svg.replace(/<animate\b[^>]*\/>/g, '');
+}
+
+// Static (animation-stripped) variant per role, computed once so the strip
+// regex does not rerun on every render of every old row.
+const _staticSvgCache = new Map();
+
+function getStaticSvg(role, svg) {
+  let cached = _staticSvgCache.get(role);
+  if (cached === undefined) {
+    cached = stripSvgAnimations(svg);
+    _staticSvgCache.set(role, cached);
+  }
+  return cached;
+}
+
+// Policy: a teammate avatar plays its one-shot draw-in only when its message
+// timestamp is within windowMs of the newest item's timestamp. Missing or
+// unparseable timestamps animate (today's behavior). latestTs may be an ISO
+// string or epoch ms.
+export function shouldAnimateTeammateAvatar(msgTs, latestTs, windowMs = 60000) {
+  const msgMs = typeof msgTs === 'number' ? msgTs : Date.parse(msgTs);
+  const latestMs = typeof latestTs === 'number' ? latestTs : Date.parse(latestTs);
+  if (Number.isNaN(msgMs) || Number.isNaN(latestMs)) return true;
+  return latestMs - msgMs <= windowMs;
+}
+
+// Scan helper for ChatView.buildAllItems: given [{ts, isTeammateAvatar}] in
+// render order, returns the max parseable timestamp (epoch ms; NaN entries
+// skipped) and the index of the last teammate-avatar row (-1 if none).
+export function pickAvatarAnimationTargets(entries) {
+  let latestMs = NaN;
+  let newestTeammateIdx = -1;
+  for (let i = 0; i < entries.length; i++) {
+    const { ts, isTeammateAvatar } = entries[i];
+    const ms = typeof ts === 'number' ? ts : Date.parse(ts);
+    if (!Number.isNaN(ms) && (Number.isNaN(latestMs) || ms > latestMs)) latestMs = ms;
+    if (isTeammateAvatar) newestTeammateIdx = i;
+  }
+  return { latestMs, newestTeammateIdx };
+}
+
+export function getTeammateAvatar(name, { animated = true } = {}) {
   let clean = (name || '').trim();
   // Strip "Teammate: " prefix (from formatTeammateLabel)
   clean = clean.replace(/^Teammate:\s*/i, '');
@@ -138,5 +189,6 @@ export function getTeammateAvatar(name) {
   const entry = ROLE_MAP[role];
   // SVG 表达角色，CSS 变量引用表达个体身份——浏览器按当前 [data-theme] 选值
   const color = `var(--avatar-bg-${nameToColorIndex(clean)})`;
-  return { svg: entry.svg, color, role };
+  const svg = animated ? entry.svg : getStaticSvg(role, entry.svg);
+  return { svg, color, role };
 }

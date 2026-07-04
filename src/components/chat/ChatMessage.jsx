@@ -185,6 +185,7 @@ class ChatMessage extends React.Component {
       p.activePlanPrompt !== n.activePlanPrompt || p.activeDangerousPrompt !== n.activeDangerousPrompt ||
       p.activePtyPlanId !== n.activePtyPlanId ||
       p.requestIndex !== n.requestIndex || p.cacheTotalTokens !== n.cacheTotalTokens || p.label !== n.label || p.isTeammate !== n.isTeammate ||
+      p.animateAvatar !== n.animateAvatar ||
       p.isHistoryLog !== n.isHistoryLog ||
       p.userProfile !== n.userProfile || p.modelInfo !== n.modelInfo || p.imSenderMap !== n.imSenderMap || p.imAgent !== n.imAgent ||
       p.resultText !== n.resultText || p.toolName !== n.toolName ||
@@ -1574,7 +1575,7 @@ class ChatMessage extends React.Component {
           </div>
           {this.renderHighlightBubble(styles.bubbleAssistant, innerContent)}
         </div>
-        {(() => { const ta = this.props.isTeammate ? getTeammateAvatar(label) : null; return (
+        {(() => { const ta = this.props.isTeammate ? getTeammateAvatar(label, { animated: this.props.animateAvatar !== false }) : null; return (
           <div className={styles.avatar} style={{ background: ta ? ta.color : 'var(--bg-sub-avatar)' }}
             dangerouslySetInnerHTML={{ __html: ta ? ta.svg : getSvgAvatar(this._getSubAvatarType()) }}
           />
@@ -1585,7 +1586,7 @@ class ChatMessage extends React.Component {
 
   renderSubAgentMessage() {
     const { label, resultText, toolName, toolInput, images, workflow } = this.props;
-    const tmAvatar = this.props.isTeammate ? getTeammateAvatar(label) : null;
+    const tmAvatar = this.props.isTeammate ? getTeammateAvatar(label, { animated: this.props.animateAvatar !== false }) : null;
     return (
       <div className={styles.messageRow}>
         <div className={styles.avatar} style={{ background: tmAvatar ? tmAvatar.color : 'var(--bg-sub-avatar)' }}
@@ -1604,7 +1605,7 @@ class ChatMessage extends React.Component {
   renderTeammateMessage() {
     const { text, label, timestamp } = this.props;
     const timeStr = this.formatTime(timestamp);
-    const ta = getTeammateAvatar(label);
+    const ta = getTeammateAvatar(label, { animated: this.props.animateAvatar !== false });
 
     return (
       <div className={styles.messageRowEnd}>

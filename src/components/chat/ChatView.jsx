@@ -13,6 +13,7 @@ import { getModelInfo, getEffectiveModel, resolveProducerModelInfo, AUTO_APPROVE
 import { formatPromptNavTime } from '../../utils/formatters';
 import { buildPromptNavItems } from '../../utils/promptNav';
 import { getTeammateAvatar } from '../../utils/teammateAvatars';
+import { applyAvatarAnimationTargets } from '../../utils/avatarAnimationPostPass';
 import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeammateNames, extractDisplayText } from '../../utils/contentFilter';
 import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../../utils/requestType';
 import { playEvent as playVoiceEvent } from '../../utils/voicePackPlayer';
@@ -1708,6 +1709,9 @@ class ChatView extends React.Component {
     // 跨 session + LR 跟踪当前活跃的 ExitPlanMode tool_use id（最末非 null 即为当前 pending）。
     // 写入 this._currentLastPendingPlanId 供 componentDidUpdate 派生 pendingPtyPlan 用。
     let buildLpid = null;
+    // Timestamp of the Last Response block (lives outside allItems) — folded
+    // into the avatar-animation latest-timestamp scan below.
+    let lastResponseTs = null;
 
     const startSi = onlyCurrentSession ? mainAgentSessions.length - 1 : 0;
     mainAgentSessions.forEach((session, si) => {
@@ -2047,6 +2051,7 @@ class ChatView extends React.Component {
             const entryCacheTotal = entryReqIdx != null
               ? (requestCacheTokenMap?.get(entryReqIdx) ?? 0)
               : null;
+            lastResponseTs = session.entryTimestamp || null;
             this._lastResponseItems = (
               <React.Fragment key="last-response-group">
                 <Divider className={styles.lastResponseDivider}>
@@ -2067,6 +2072,11 @@ class ChatView extends React.Component {
     this._tsItemMap = tsItemMap;
     // 镜像本轮最末活跃 lpid 给 componentDidUpdate 派生 pendingPtyPlan 用
     this._currentLastPendingPlanId = buildLpid;
+
+    // Avatar animation loading strategy: stale teammate rows are cloned to
+    // static so a refresh of a long session does not start hundreds of SMIL
+    // timelines at once (see avatarAnimationPostPass.js for the policy).
+    applyAvatarAnimationTargets(allItems, lastResponseTs);
 
     return allItems;
   }
@@ -3494,7 +3504,7 @@ class ChatView extends React.Component {
             if (st === 'explore' || st === 'search') avatarType = 'sub-search';
             else if (st === 'plan') avatarType = 'sub-plan';
           }
-          const tmA = isTeammate ? getTeammateAvatar(label) : null;
+          const tmA = isTeammate ? getTeammateAvatar(label, { animated: false }) : null;
           collectedRolesMap.set(key, { key, name: label.length > 12 ? label.slice(0, 12) + '…' : label, avatarType, avatarSvg: tmA ? tmA.svg : undefined, color: tmA ? tmA.color : 'rgba(255,255,255,0.1)' });
         }
       }
