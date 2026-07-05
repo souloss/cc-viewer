@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.339 (2026-07-05)
 
 - fix(chat): repaired a crash introduced by the decomposition tranche below — `buildAllItems`'s Last Response `<ChatMessage key="resp-asst">` still referenced `_localAsk`, a variable that was renamed to `_localAskForSession` in that scope during the extraction (`_localAsk` only exists inside `renderSessionMessages`), so any transcript reaching the Last Response block threw `ReferenceError: _localAsk is not defined` on every render pass
 - refactor(chat): ChatView decomposition, first tranche set (4,144 → 3,699 lines, −445) — behavior-preserving extractions following the established host-adapter controller pattern, each shipped with unit tests, sequenced ascending-risk:
