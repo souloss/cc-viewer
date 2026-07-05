@@ -7,7 +7,7 @@ const _ccvSkipArgs = ['--version', '-v', '--v', '--help', '-h', 'doctor', 'insta
 const _ccvSkip = _ccvSkipArgs.includes(process.argv[2]);
 
 import './lib/proxy-env.js';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, existsSync, watchFile } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, existsSync, watchFile, openSync, readSync, closeSync } from 'node:fs';
 import { AsyncWriteQueue } from './lib/async-write-queue.js';
 import { renameSyncWithRetry } from './lib/file-api.js';
 import http from 'node:http';
@@ -16,7 +16,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel } from './lib/interceptor-core.js';
+import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs, parseRotationContextHead } from './lib/interceptor-core.js';
 
 
 
@@ -241,6 +241,7 @@ function resolveResumeChoice(choice) {
         unlinkSync(tempFile);
       }
       LOG_FILE = recentFile;
+      seedSpawnRegistryFromLogHead(LOG_FILE);
     } else {
       // new: 将临时文件 rename 为正式新日志文件名（空文件直接删除）
       const newPath = tempFile.replace('_temp.jsonl', '.jsonl');
@@ -387,6 +388,7 @@ const _initPromise = (async () => {
       // 仅在干净退出时才 rename，SIGKILL 下丢失）。
       if (process.env.CCV_IM_PLATFORM) {
         LOG_FILE = recentLog;
+        seedSpawnRegistryFromLogHead(LOG_FILE);
         return;
       }
       // Leader / 普通进程：走 resume 交互流程
@@ -425,6 +427,11 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
     _projectName = projectName;
     _logDir = dir;
     LOG_FILE = recentLog;
+    // Same lifecycle as the single-project boot paths: start this workspace's
+    // registry fresh, then re-seed from the resumed segment's head sentinel so
+    // the next rotation's carry-forward stays complete after a restart/switch.
+    _agentSpawnRegistry.clear();
+    seedSpawnRegistryFromLogHead(LOG_FILE);
     // workspace 切换后，重读该 workspace 的 active-profile.json（可能和上一个 workspace 不同）
     _loadProxyProfile();
     return { filePath: recentLog, dir, projectName, resumed: true };
@@ -446,6 +453,8 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
   _projectName = projectName;
   _logDir = dir;
   LOG_FILE = filePath;
+  // Fresh file for a fresh workspace context — no carried names apply.
+  _agentSpawnRegistry.clear();
   _loadProxyProfile(); // 同上
 
   return { filePath, dir, projectName, resumed: false };
@@ -456,11 +465,56 @@ export function resetWorkspace() {
   _projectName = '';
   _logDir = '';
   LOG_FILE = '';
+  // Workspace context gone: drop carried teammate names — the registry is
+  // module-global, and without this a rotation in the NEXT workspace would
+  // write a sentinel carrying THIS workspace's names (unbounded growth +
+  // cross-workspace leakage into the route's teammateNames snapshot).
+  _agentSpawnRegistry.clear();
   _loadProxyProfile(); // workspace 上下文消失，回落到 profile.json.active
 }
 
 // Windows NTFS + Defender 下大文件 I/O 代价远高于 Mac/Linux，降低分割阈值减轻压力
 const MAX_LOG_SIZE = (process.platform === 'win32' ? 150 : 300) * 1024 * 1024;
+
+// Agent-spawn registry: prompt-prefix(60) → teammate name, accumulated from
+// mainAgent responses as they are written. Carried into the next segment via
+// the rotation-context sentinel so post-split viewers can still resolve
+// teammate names whose spawn turn lives in the previous file. The pure
+// extraction/parsing lives in interceptor-core.js (unit-tested there).
+const _agentSpawnRegistry = new Map();
+
+function collectAgentSpawns(entry) {
+  try {
+    if (!entry || !entry.mainAgent) return;
+    for (const [prefix, name] of extractAgentSpawnPairs(entry.response?.body)) {
+      _agentSpawnRegistry.set(prefix, name);
+    }
+  } catch { }
+}
+
+// Boot re-seed: when resuming an existing log whose FIRST frame is a
+// rotation-context sentinel, load its carried names so a restarted leader
+// still writes a complete sentinel at the next rotation. Bounded read of the
+// file head only — never a whole-segment scan (segments reach 300MB).
+function seedSpawnRegistryFromLogHead(file) {
+  try {
+    if (!file || !existsSync(file)) return;
+    const fd = openSync(file, 'r');
+    let head;
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      head = buf.toString('utf-8', 0, n);
+    } finally {
+      closeSync(fd);
+    }
+    const entry = parseRotationContextHead(head);
+    if (!entry || !Array.isArray(entry.teammateNames)) return;
+    for (const pair of entry.teammateNames) {
+      if (Array.isArray(pair) && pair[0] && pair[1]) _agentSpawnRegistry.set(pair[0], pair[1]);
+    }
+  } catch { }
+}
 
 async function checkAndRotateLogFile() {
   // Teammate 不做日志轮转，由 leader 负责
@@ -470,7 +524,17 @@ async function checkAndRotateLogFile() {
   } catch { return; }
   await _writeQueue.flush();
   const { filePath } = generateNewLogFilePath();
-  const result = rotateLogFile(LOG_FILE, filePath, MAX_LOG_SIZE);
+  // Sentinel is baked into the new file's CREATION (rotateLogFile initial
+  // content): queueing it after the fact races the watcher's rotation-follow
+  // and can leave it undelivered. Synthetic url gives it a stable dedup key.
+  const sentinel = JSON.stringify({
+    ccvRotationContext: 1,
+    url: 'ccv://rotation-context',
+    from: basename(LOG_FILE),
+    teammateNames: [..._agentSpawnRegistry.entries()],
+    timestamp: new Date().toISOString(),
+  }) + '\n---\n';
+  const result = rotateLogFile(LOG_FILE, filePath, MAX_LOG_SIZE, sentinel);
   if (result.rotated) {
     LOG_FILE = result.newFile;
     // 重置 delta 状态，强制下一条 mainAgent 请求写完整 checkpoint
@@ -480,6 +544,12 @@ async function checkAndRotateLogFile() {
       _mainAgentDeltaCount = 0;
     }
   }
+}
+
+// Exposed for the /api/prev-segment-teammates route (belt-and-braces seed
+// delivery when the in-band sentinel falls outside the client's load window).
+export function getAgentSpawnRegistrySnapshot() {
+  return [..._agentSpawnRegistry.entries()];
 }
 
 // 从环境变量 ANTHROPIC_BASE_URL 提取域名用于请求匹配
@@ -1014,6 +1084,8 @@ export function setupInterceptor() {
                       // 直接使用组装后的 message 对象作为 response.body
                       // 如果组装失败（例如非标准 SSE），则使用原始流内容
                       requestEntry.response.body = assembledMessage || fullContent;
+                      // Must run before the post-write `response = null` release.
+                      collectAgentSpawns(requestEntry);
 
 
                       // 移除在途请求标记，保持原始报文
@@ -1139,6 +1211,7 @@ export function setupInterceptor() {
             body: responseData
           };
 
+          collectAgentSpawns(requestEntry);
 
           delete requestEntry.inProgress;
           delete requestEntry.requestId;

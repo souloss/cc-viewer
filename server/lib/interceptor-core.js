@@ -15,6 +15,44 @@ const SUBAGENT_BILLING_RE = /cc_is_subagent=true\b/;
 // 两处服务端实现(本文件 + kv-cache-analyzer)由 test/interceptor-core-mainagent.test.js 互校防漂移；
 // 前端 contentFilter 那份由 test/content-filter-unit.test.js 单测覆盖。
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
+// Exported for server/lib/teammate-detect.js (previous-segment backfill filter).
+export { TEAMMATE_SYSTEM_RE, SUBAGENT_BILLING_RE };
+
+// Rotation carry-forward: prompt-prefix → teammate-name pairs extracted from a
+// mainAgent response body's Agent tool_use blocks. Prefix normalization MUST
+// match src/utils/contentFilter.js (trimStart BEFORE slice, length 60) —
+// pinned by test/interceptor.test.js parity cases.
+export const TEAMMATE_PROMPT_PREFIX_LEN = 60;
+
+export function extractAgentSpawnPairs(responseBody) {
+  const pairs = [];
+  // The interceptor's stream path can fall back to a raw string body.
+  if (!responseBody || typeof responseBody !== 'object') return pairs;
+  const content = responseBody.content;
+  if (!Array.isArray(content)) return pairs;
+  for (const block of content) {
+    if (!block || block.type !== 'tool_use' || block.name !== 'Agent') continue;
+    const inp = block.input;
+    if (!inp || !inp.name || typeof inp.prompt !== 'string') continue;
+    const prefix = inp.prompt.trimStart().slice(0, TEAMMATE_PROMPT_PREFIX_LEN);
+    if (prefix) pairs.push([prefix, inp.name]);
+  }
+  return pairs;
+}
+
+// Parses the first frame of a log-file head string; returns the entry when it
+// is a rotation-context sentinel, else null. Callers pass a BOUNDED head read
+// (never a whole segment).
+export function parseRotationContextHead(headString) {
+  try {
+    const frameEnd = headString.indexOf('\n---\n');
+    if (frameEnd <= 0) return null;
+    const entry = JSON.parse(headString.slice(0, frameEnd));
+    return entry && entry.ccvRotationContext ? entry : null;
+  } catch {
+    return null;
+  }
+}
 
 export function getSystemText(body) {
   const system = body?.system;
@@ -443,21 +481,29 @@ export function fingerprintMsg(m) {
 
 /**
  * Rotate log file when it exceeds maxSize.
- * Creates an empty new file (no content migration) and appends '\n' to old file
+ * Creates a new file (no content migration) and appends '\n' to old file
  * to trigger fs.watchFile callback for watcher migration.
+ *
+ * initialContent (optional) is written INTO the new file at creation time —
+ * used for the rotation-context sentinel. It must be baked into creation
+ * rather than queued afterwards: the old-file trigger byte below fires the
+ * watcher's rotation-follow after a short debounce, and a late-flushing
+ * queued write can land between the new file's initial stream read and its
+ * lastByteOffset snapshot, in which case it is never delivered to clients.
  *
  * @param {string} currentFile - current log file path
  * @param {string} newFile - new log file path to rotate to
  * @param {number} maxSize - max file size in bytes
+ * @param {string} [initialContent] - content the new file is created with
  * @returns {{ rotated: boolean, oldFile?: string, newFile?: string }}
  */
-export function rotateLogFile(currentFile, newFile, maxSize) {
+export function rotateLogFile(currentFile, newFile, maxSize, initialContent = '') {
   try {
     if (!existsSync(currentFile)) return { rotated: false };
     const size = statSync(currentFile).size;
     if (size < maxSize) return { rotated: false };
-    // 不迁移旧内容，创建空新文件（立即创建，避免 watcher 时序窗口）
-    try { writeFileSync(newFile, ''); } catch { }
+    // 不迁移旧内容，创建新文件（立即创建，避免 watcher 时序窗口）
+    try { writeFileSync(newFile, initialContent); } catch { }
     // 触发旧文件 watcher 回调，使其检测到文件变更并切换到新文件
     try { appendFileSync(currentFile, '\n'); } catch { }
     return { rotated: true, oldFile: currentFile, newFile };

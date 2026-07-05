@@ -511,3 +511,60 @@ export async function readPagedEntries(filePath, { before, limit }) {
   const oldestTimestamp = extractTimestamp(sliced[0]) || '';
   return { entries: sliced, hasMore, oldestTimestamp, count: sliced.length };
 }
+
+/**
+ * Scan a whole segment and collect the parsed entries matching `predicate`,
+ * for the post-rotation teammate backfill (/api/prev-segment-teammates).
+ *
+ * - `rawPrefilter(rawString)`: cheap substring gate evaluated BEFORE
+ *   JSON.parse, so multi-MB MainAgent checkpoint frames are skipped without
+ *   parsing.
+ * - Last-write-wins dedup by timestamp|url (a request's inProgress and final
+ *   writes share one key; the later frame replaces the earlier).
+ * - `maxBytes` budget applied NEWEST-first over the raw sizes: when the
+ *   matches exceed the budget, the oldest are dropped and `truncated` is set.
+ *
+ * Returns { entries, truncated } with entries in chronological (file) order.
+ */
+export async function collectFilteredRawEntriesAsync(filePath, predicate, {
+  maxBytes = 64 * 1024 * 1024,
+  rawPrefilter = null,
+  yieldEvery = 50,
+} = {}) {
+  const matched = new Map(); // dedupKey -> { size, entry }, insertion order = file order
+  let nokey = 0;
+  let totalBytes = 0;
+  let truncated = false;
+  let parsedCount = 0;
+  for await (const raw of iterateRawEntriesAsync(filePath)) {
+    if (rawPrefilter && !rawPrefilter(raw)) continue;
+    // Real team logs defeat the prefilter for most BYTES (leader checkpoints
+    // embed the SendMessage tool text), so parses can total >1s on a 300MB
+    // segment — yield periodically to keep the live proxy's event loop
+    // responsive during the scan.
+    if (yieldEvery > 0 && ++parsedCount % yieldEvery === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    let entry;
+    try { entry = JSON.parse(raw); } catch { continue; }
+    if (!entry || !predicate(entry)) continue;
+    const key = extractDedupKey(raw) || `__nokey_${nokey++}`;
+    const prev = matched.get(key);
+    if (prev) totalBytes -= prev.size;
+    matched.set(key, { size: raw.length, entry });
+    totalBytes += raw.length;
+    // Enforce the budget DURING the scan (newest wins): evicting the oldest
+    // keys keeps transient memory bounded even on teammate-heavy segments —
+    // not just the response size.
+    while (totalBytes > maxBytes && matched.size > 1) {
+      const oldestKey = matched.keys().next().value;
+      totalBytes -= matched.get(oldestKey).size;
+      matched.delete(oldestKey);
+      truncated = true;
+    }
+  }
+  return {
+    entries: [...matched.values()].map((it) => it.entry),
+    truncated,
+  };
+}

@@ -2,7 +2,7 @@ import { existsSync, realpathSync, unlinkSync, readdirSync, readFileSync, writeF
 import { readFile, writeFile, appendFile, stat, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { renameSyncWithRetry } from './file-api.js';
-import { join, sep } from 'node:path';
+import { join, sep, dirname, basename } from 'node:path';
 import { reconstructEntries } from './delta-reconstructor.js';
 import { streamReconstructedEntriesAsync } from './log-stream.js';
 import { archiveJsonl, resolveJsonlPath } from './jsonl-archive.js';
@@ -95,6 +95,39 @@ export async function listLocalLogs(logDir, currentProjectName, { instanceId = n
     }
   }
   return { ...grouped, _currentProject: currentProjectName || '' };
+}
+
+/**
+ * Locate the log segment immediately preceding currentFile in the same
+ * directory, for the post-rotation teammate backfill. Ownership is enforced
+ * via logFileMatcher(projectName, instanceId) — a naive "older file in the
+ * same dir" scan would cross --pid instances and return another
+ * conversation's log. Archived (.jsonl.zip) predecessors are valid results:
+ * readers resolve them transparently via resolveJsonlPath. Returns the
+ * absolute path, or null when there is no strictly-older owned segment.
+ */
+export function findPreviousSegment(currentFile, projectName, instanceId = null) {
+  try {
+    if (!currentFile || !projectName) return null;
+    const dir = dirname(currentFile);
+    const currentTs = parseLogTs(basename(currentFile));
+    if (!currentTs || !existsSync(dir)) return null;
+    const owns = logFileMatcher(projectName, instanceId);
+    let best = null;
+    let bestTs = '';
+    for (const f of readdirSync(dir)) {
+      if (!isLogFileName(f) || !owns(f)) continue;
+      const ts = parseLogTs(f);
+      if (!ts || ts >= currentTs) continue;
+      if (ts > bestTs || (ts === bestTs && best !== null && f > basename(best))) {
+        best = join(dir, f);
+        bestTs = ts;
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
 }
 
 export async function readLocalLog(logDir, file) {
@@ -190,6 +223,9 @@ export async function mergeLogFiles(logDir, files) {
     await streamReconstructedEntriesAsync(filePath, async (segment) => {
       let chunk = '';
       for (const entry of segment) {
+        // Rotation-context sentinels describe a predecessor relationship that a
+        // merged file no longer has — drop them from the merge product.
+        if (entry.ccvRotationContext) continue;
         // 乱序/断裂条目若未被补偿回填（messages 仍是裸 delta 切片），丢弃不写：
         // 剥除 _deltaFormat 后它会伪装成旧格式全量条目，未来读取时把累积状态
         // 重置成几条切片，比丢掉这条（内容已被更新条目取代）破坏大得多

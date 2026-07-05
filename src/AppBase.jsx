@@ -8,10 +8,10 @@ import OpenFolderIcon from './components/common/OpenFolderIcon';
 import LogTable from './components/viewers/LogTable';
 import { t, getLang, setLang } from './i18n';
 import { SettingsContext } from './contexts/SettingsContext';
-import { formatTokenCount, filterRelevantRequests, isRelevantRequest, appendCacheLossMap, extractCachedContent } from './utils/helpers';
+import { formatTokenCount, filterRelevantRequests, isRelevantRequest, visibleRequests, appendCacheLossMap, extractCachedContent } from './utils/helpers';
 import { snapToPreset, stepPreset } from './utils/displayScaleHelper';
 import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
-import { isMainAgent, isSessionBoundary } from './utils/contentFilter';
+import { isMainAgent, isSessionBoundary, setTeammateNameSeeds, clearTeammateNameSeeds } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
 import { publish as publishWorkflowUpdate } from './utils/workflowStore';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
@@ -573,6 +573,16 @@ class AppBase extends React.Component {
    *  同步与分帧路径共用此方法 —— mergeMainAgentSessions 的调用序列/参数/
    *  _sessionId 赋值因此与抽取前完全相同（sessionMerge 脆弱区零语义变化）。 */
   _processOneEntry(entry, i, st) {
+    // Rotation-context sentinel (first frame of a post-rotation segment):
+    // capture the carry-forward payload, seed the teammate-name registry, and
+    // never treat it as a renderable request (isRelevantRequest also rejects
+    // it as belt-and-braces for other filter paths).
+    if (entry && entry.ccvRotationContext) {
+      this._rotationContext = entry;
+      if (Array.isArray(entry.teammateNames)) setTeammateNameSeeds(entry.teammateNames);
+      return;
+    }
+
     // requestIndex
     this._requestIndexMap.set(`${entry.timestamp}|${entry.url}`, i);
 
@@ -699,6 +709,17 @@ class AppBase extends React.Component {
   async _runSseColdIngest(rawEntries, { isIncremental, unlockContextBar }) {
     const myToken = ++this._ingestToken;
     this._ingestRunning = true;
+    // Seed lifecycle: reset carried teammate-name seeds ONLY on non-incremental
+    // baseline loads (workspace switches land here too). Incremental reloads
+    // (SSE reconnect ?since=, mobile cache merge) carry no sentinel and must
+    // not wipe seeds they cannot re-deliver. The route re-delivers context
+    // after this load, and an in-window sentinel re-seeds during processing.
+    if (!isIncremental) {
+      clearTeammateNameSeeds();
+      this._rotationContext = null;
+      this._backfillDoneFor = null;
+      this._backfillCount = 0;
+    }
     const ctl = this._makeIngestCtl(myToken);
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
@@ -759,6 +780,15 @@ class AppBase extends React.Component {
         if (isMobile && this.state.projectName) {
           saveEntries(this.state.projectName, entries);
         }
+        // Post-rotation teammate backfill — desktop baseline loads only. The
+        // route decides whether rotation context exists (the in-band sentinel
+        // may sit outside the load window on long post-rotation files), so
+        // the call is unconditional up to the guards; "no context" is a
+        // silent no-op. Mobile is excluded in v1: persisting pre-split
+        // entries would corrupt the _oldestTs paging cursor.
+        if (!isIncremental && !isMobile && !this._isLocalLog && !newState.hasMoreHistory) {
+          this._fetchPrevSegmentTeammates();
+        }
       });
     }
   }
@@ -767,6 +797,13 @@ class AppBase extends React.Component {
   async _runLocalLogIngest(rawEntries) {
     const myToken = ++this._ingestToken;
     this._ingestRunning = true;
+    // History-switcher loads must not inherit live-session seeds or fire a
+    // stale backfill; a historical post-rotation segment self-seeds from its
+    // own head sentinel during processing.
+    clearTeammateNameSeeds();
+    this._rotationContext = null;
+    this._backfillDoneFor = null;
+    this._backfillCount = 0;
     const ctl = this._makeIngestCtl(myToken);
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
@@ -1091,6 +1128,60 @@ class AppBase extends React.Component {
     this._loadingCountTimer = requestAnimationFrame(step);
   }
 
+  /**
+   * Post-rotation teammate backfill: fetch teammate-only entries from the
+   * previous log segment and prepend them so pre-split teammate rows reappear.
+   * One-shot per rotation context; superseded fetches (workspace switch / new
+   * cold ingest mid-flight) are dropped via the ingest token, mirroring the
+   * reload-token discipline used elsewhere.
+   */
+  async _fetchPrevSegmentTeammates() {
+    const ctxKey = this._rotationContext?.from || '__probe__';
+    if (this._backfillDoneFor === ctxKey) return;
+    const tok = this._ingestToken;
+    let lines;
+    try {
+      const res = await fetch(apiUrl('/api/prev-segment-teammates'));
+      if (!res.ok) return;
+      const text = await res.text();
+      lines = text.split('\n').filter(Boolean).map((l) => {
+        try { return JSON.parse(l); } catch { return null; }
+      }).filter(Boolean);
+    } catch { return; }
+    if (this._ingestToken !== tok || this._unmounted) return; // superseded mid-flight
+    if (!lines || lines.length === 0) return;
+    this._backfillDoneFor = ctxKey;
+    const ctx = lines[0];
+    const done = lines[lines.length - 1];
+    // The route's context line is the primary seed channel — the in-band
+    // sentinel may be outside the client's load window entirely.
+    if (Array.isArray(ctx?.teammateNames) && ctx.teammateNames.length > 0) {
+      setTeammateNameSeeds(ctx.teammateNames);
+    }
+    if (!done || done.error || !done.prevSegment) return; // not post-rotation / no predecessor
+    const entries = lines.slice(1, -1).filter((e) => e && e.timestamp && e.url && !e.done);
+    const fresh = entries.filter((e) => !this._requestIndexMap.has(`${e.timestamp}|${e.url}`));
+    if (fresh.length === 0) return;
+    // Prepend precedent (loadMoreHistory): merge → slim → reprocess → commit.
+    const reconstructed = reconstructEntries(fresh);
+    const merged = [...reconstructed, ...this.state.requests];
+    this._batchSlim(merged);
+    const { mainAgentSessions } = this._processEntries(merged);
+    if (this._ingestToken !== tok || this._unmounted) return;
+    this._backfillCount = (this._backfillCount || 0) + reconstructed.length;
+    this.setState((prev) => {
+      // Shift by the count of rows the ACTIVE view actually gained —
+      // selectedIndex indexes visibleRequests, which depends on showAll.
+      const addedVisible = visibleRequests(reconstructed, prev.showAll).length;
+      return {
+        requests: merged,
+        mainAgentSessions,
+        // Keep the DetailPanel selection on the same logical row.
+        selectedIndex: prev.selectedIndex == null ? null : prev.selectedIndex + addedVisible,
+      };
+    });
+  }
+
   async loadMoreHistory() {
     if (!this.state.hasMoreHistory || this._loadingMore) return;
     // 防御 _hasMoreHistory=true 而 _oldestTs 为 null 的不一致状态：
@@ -1110,7 +1201,14 @@ class AppBase extends React.Component {
       const data = await res.json();
       if (Array.isArray(data.entries) && data.entries.length > 0) {
         const reconstructed = reconstructEntries(data.entries);
-        const merged = [...reconstructed, ...this.state.requests];
+        // Paged current-file entries are OLDER than the current baseline but
+        // NEWER than any backfilled previous-segment block — splice them after
+        // the backfilled head so the array stays time-ordered (the sub-agent
+        // interleave cursor depends on it).
+        const bf = this._backfillCount || 0;
+        const merged = bf > 0
+          ? [...this.state.requests.slice(0, bf), ...reconstructed, ...this.state.requests.slice(bf)]
+          : [...reconstructed, ...this.state.requests];
         this._batchSlim(merged);
         const { mainAgentSessions } = this._processEntries(merged);
         this._oldestTs = data.oldestTimestamp;
@@ -1139,11 +1237,19 @@ class AppBase extends React.Component {
             loadingMore: false,
           });
         } else {
-          this.setState({
-            requests: merged,
-            mainAgentSessions,
-            hasMoreHistory: !!data.hasMore && !!data.oldestTimestamp,
-            loadingMore: false,
+          this.setState((prev) => {
+            // Count against the ACTIVE view: raw pages contain non-relevant
+            // entries that showAll displays but the default view hides.
+            const addedVisible = visibleRequests(reconstructed, prev.showAll).length;
+            return {
+              requests: merged,
+              mainAgentSessions,
+              hasMoreHistory: !!data.hasMore && !!data.oldestTimestamp,
+              loadingMore: false,
+              // Keep the DetailPanel selection on the same logical row after the
+              // prepend (pre-existing latent flaw, fixed alongside the backfill).
+              selectedIndex: prev.selectedIndex == null ? null : prev.selectedIndex + addedVisible,
+            };
           });
           if (isMobile && this.state.projectName) {
             saveEntries(this.state.projectName, merged);
@@ -1714,6 +1820,13 @@ class AppBase extends React.Component {
       }
 
       for (const rawEntry of batch) {
+        // Rotation-context sentinel on the LIVE path (rotation while this
+        // client is connected): capture + seed, never enter state.requests.
+        if (rawEntry && rawEntry.ccvRotationContext) {
+          this._rotationContext = rawEntry;
+          if (Array.isArray(rawEntry.teammateNames)) setTeammateNameSeeds(rawEntry.teammateNames);
+          continue;
+        }
         // v3: intern body.tools / body.system → pool 共享引用，消除 fullEntry 累积
         // v5: 同时 intern body.messages 内 tool_result block.content（lazy-clone 三层
         //     messages/content/block）。下方 L1170-1175 mutate `messages[i]._timestamp`
@@ -1853,7 +1966,7 @@ class AppBase extends React.Component {
         this._autoSelectTimer = setTimeout(() => {
           this.setState(s => {
             if (s.selectedIndex === null && s.requests.length > 0) {
-              const filtered = s.showAll ? s.requests : filterRelevantRequests(s.requests);
+              const filtered = visibleRequests(s.requests, s.showAll);
               return filtered.length > 0 ? { selectedIndex: filtered.length - 1 } : null;
             }
             return null;
@@ -2289,7 +2402,7 @@ class AppBase extends React.Component {
   handleFilterIrrelevantChange = (checked) => {
     this.setState(prev => {
       const newShowAll = !checked;
-      const newFiltered = newShowAll ? prev.requests : filterRelevantRequests(prev.requests);
+      const newFiltered = visibleRequests(prev.requests, newShowAll);
       return {
         showAll: newShowAll,
         selectedIndex: newFiltered.length > 0 ? newFiltered.length - 1 : null,
@@ -2648,7 +2761,7 @@ class AppBase extends React.Component {
     if (this._filteredSource !== requests || this._filteredShowAll !== showAll) {
       this._filteredSource = requests;
       this._filteredShowAll = showAll;
-      this._filteredRequests = showAll ? requests : filterRelevantRequests(requests);
+      this._filteredRequests = visibleRequests(requests, showAll);
     }
     const filteredRequests = this._filteredRequests;
 

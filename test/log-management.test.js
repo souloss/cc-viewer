@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { validateLogPath, listLocalLogs, readLocalLog, deleteLogFiles, mergeLogFiles } from '../server/lib/log-management.js';
@@ -186,5 +186,76 @@ describe('mergeLogFiles', () => {
       () => mergeLogFiles(tmpDir, ['proj/../evil.jsonl', 'proj/b.jsonl']),
       (e) => e.code === 'INVALID_INPUT'
     );
+  });
+});
+
+// ─────────────────────────── findPreviousSegment ───────────────────────────
+describe('findPreviousSegment', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-prevseg-')); });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  const touch = (name, content = '{"timestamp":"t","url":"u"}\n---\n') => {
+    writeFileSync(join(tmpDir, name), content);
+    return join(tmpDir, name);
+  };
+
+  it('returns the newest strictly-older owned segment', async () => {
+    const { findPreviousSegment } = await import('../server/lib/log-management.js');
+    touch('proj_20260601_100000.jsonl');
+    const expected = touch('proj_20260602_100000.jsonl');
+    const current = touch('proj_20260603_100000.jsonl');
+    assert.equal(findPreviousSegment(current, 'proj'), expected);
+  });
+
+  it('returns null when there is no older segment or for a lone file', async () => {
+    const { findPreviousSegment } = await import('../server/lib/log-management.js');
+    const current = touch('proj_20260601_100000.jsonl');
+    assert.equal(findPreviousSegment(current, 'proj'), null);
+  });
+
+  it('respects --pid instance ownership and never crosses instances', async () => {
+    const { findPreviousSegment } = await import('../server/lib/log-management.js');
+    touch('proj_20260601_100000.jsonl');            // untagged — not owned by pid instance
+    const owned = touch('777__proj_20260602_100000.jsonl');
+    const current = touch('777__proj_20260603_100000.jsonl');
+    assert.equal(findPreviousSegment(current, 'proj', '777'), owned);
+    // Untagged instance must not see pid-tagged files either.
+    const untaggedCurrent = touch('proj_20260604_100000.jsonl');
+    assert.equal(findPreviousSegment(untaggedCurrent, 'proj', null), join(tmpDir, 'proj_20260601_100000.jsonl'));
+  });
+
+  it('includes archived .jsonl.zip predecessors and ignores foreign files', async () => {
+    const { findPreviousSegment } = await import('../server/lib/log-management.js');
+    const zipped = touch('proj_20260601_100000.jsonl.zip', 'zip-bytes');
+    touch('notes.txt', 'hello');
+    touch('otherproj_20260602_100000.jsonl');
+    const current = touch('proj_20260603_100000.jsonl');
+    assert.equal(findPreviousSegment(current, 'proj'), zipped);
+  });
+
+  it('is null-safe on garbage input', async () => {
+    const { findPreviousSegment } = await import('../server/lib/log-management.js');
+    assert.equal(findPreviousSegment('', 'proj'), null);
+    assert.equal(findPreviousSegment(join(tmpDir, 'proj_nots.jsonl'), 'proj'), null);
+    assert.equal(findPreviousSegment(join(tmpDir, 'proj_20260601_100000.jsonl'), ''), null);
+  });
+});
+
+// ───────────────────── mergeLogFiles drops rotation sentinels ─────────────────────
+describe('mergeLogFiles rotation-sentinel strip', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-mergesent-')); });
+  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('merged output contains the real entries but no ccvRotationContext frames', async () => {
+    const sentinel = JSON.stringify({ ccvRotationContext: 1, url: 'ccv://rotation-context', from: 'proj_20260601_100000.jsonl', teammateNames: [['p', 'alice']], timestamp: '2026-06-02T00:00:00.000Z' });
+    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('2026-06-01T00:00:01Z', '/v1/messages')]);
+    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [sentinel, makeEntry('2026-06-02T00:00:01Z', '/v1/messages')]);
+    await mergeLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl', 'proj/proj_20260602_100000.jsonl']);
+    const merged = readFileSync(join(tmpDir, 'proj', 'proj_20260601_100000.jsonl'), 'utf-8');
+    assert.ok(!merged.includes('ccvRotationContext'));
+    assert.ok(merged.includes('2026-06-01T00:00:01Z'));
+    assert.ok(merged.includes('2026-06-02T00:00:01Z'));
   });
 });

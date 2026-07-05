@@ -1,10 +1,11 @@
 // Local log management routes (moved verbatim from server.js handleRequest).
-import { existsSync, realpathSync, statSync, createReadStream } from 'node:fs';
+import { existsSync, realpathSync, statSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { LOG_DIR } from '../../findcc.js';
-import { _projectName } from '../interceptor.js';
-import { listLocalLogs, deleteLogFiles, mergeLogFiles, archiveLogFiles, validateLogPath } from '../lib/log-management.js';
-import { countLogEntries, streamRawEntriesAsync, readTailEntries } from '../lib/log-stream.js';
+import { _projectName, LOG_FILE, getAgentSpawnRegistrySnapshot } from '../interceptor.js';
+import { listLocalLogs, deleteLogFiles, mergeLogFiles, archiveLogFiles, validateLogPath, findPreviousSegment } from '../lib/log-management.js';
+import { countLogEntries, streamRawEntriesAsync, readTailEntries, collectFilteredRawEntriesAsync } from '../lib/log-stream.js';
+import { isTeammateLikeEntry } from '../lib/teammate-detect.js';
 
 async function localLogs(req, res, parsedUrl, isLocal, deps) {
   try {
@@ -207,6 +208,113 @@ function archiveLogs(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// Bounded head read: returns the parsed first frame of a live log file when it
+// is a rotation-context sentinel, else null. Never scans past the first frame.
+function readHeadRotationContext(file) {
+  try {
+    if (!file || !existsSync(file)) return null;
+    const fd = openSync(file, 'r');
+    let head;
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      head = buf.toString('utf-8', 0, n);
+    } finally {
+      closeSync(fd);
+    }
+    const frameEnd = head.indexOf('\n---\n');
+    if (frameEnd <= 0) return null;
+    const entry = JSON.parse(head.slice(0, frameEnd));
+    return entry && entry.ccvRotationContext ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
+// Cheap substring gate evaluated before JSON.parse: every teammate shape
+// carries at least one of these markers in its raw JSON (external tag,
+// proxy-mode system marker, native SDK prompt). Giant MainAgent checkpoint
+// frames are skipped without parsing.
+function teammateRawPrefilter(raw) {
+  return raw.includes('"teammate"')
+    || raw.includes('agent in a team')
+    || raw.includes('Agent Teammate Communication')
+    || raw.includes('You are a Claude agent');
+}
+
+// Single-flight + short-TTL cache for the previous-segment scan. A real
+// predecessor is ~300MB and the parse pass transiently costs hundreds of MB of
+// RSS; every non-incremental cold load triggers the route, so concurrent
+// viewers / rapid refreshes must share one scan. Keyed by path+size+mtime —
+// the old segment can still GROW (external teammates keep appending to it),
+// which changes the key and forces a rescan.
+const PREV_SCAN_TTL_MS = 60 * 1000;
+let _prevScanCache = null; // { key, promise, expiresAt }
+
+function collectPrevSegmentCached(prev, predicate, opts) {
+  let st = null;
+  try { st = statSync(prev); } catch { }
+  const key = `${prev}|${st ? st.size : 0}|${st ? st.mtimeMs : 0}`;
+  const now = Date.now();
+  if (_prevScanCache && _prevScanCache.key === key && _prevScanCache.expiresAt > now) {
+    return _prevScanCache.promise;
+  }
+  const promise = collectFilteredRawEntriesAsync(prev, predicate, opts);
+  _prevScanCache = { key, promise, expiresAt: now + PREV_SCAN_TTL_MS };
+  promise.catch(() => {
+    if (_prevScanCache && _prevScanCache.promise === promise) _prevScanCache = null;
+  });
+  return promise;
+}
+
+/**
+ * Post-rotation teammate backfill. Resolves the previous segment of the
+ * server's OWN live LOG_FILE (no client-supplied filenames — no traversal
+ * surface) and streams NDJSON:
+ *   line 1: { rotationContext, teammateNames }  (context; teammateNames merges
+ *           the head sentinel's carry-forward with the in-process spawn
+ *           registry — the sentinel may sit outside the client's load window)
+ *   lines:  one backfill entry per line (teammate-like, renderable only)
+ *   last:   { done: true, truncated, prevSegment }
+ */
+async function prevSegmentTeammates(req, res, parsedUrl, isLocal, deps) {
+  res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+  try {
+    const current = LOG_FILE;
+    const sentinel = readHeadRotationContext(current);
+    const names = new Map(sentinel?.teammateNames?.filter((p) => Array.isArray(p) && p[0]) || []);
+    for (const [prefix, name] of getAgentSpawnRegistrySnapshot()) names.set(prefix, name);
+    res.write(JSON.stringify({
+      rotationContext: sentinel ? { from: sentinel.from || null } : null,
+      teammateNames: [...names.entries()],
+    }) + '\n');
+    // No live file (workspace pre-select) or resume placeholder → context only.
+    if (!current || current.endsWith('_temp.jsonl')) {
+      res.end(JSON.stringify({ done: true, truncated: false, prevSegment: null }) + '\n');
+      return;
+    }
+    const instanceId = (deps && deps.instanceId) || null;
+    const prev = findPreviousSegment(current, _projectName, instanceId);
+    if (!prev) {
+      res.end(JSON.stringify({ done: true, truncated: false, prevSegment: null }) + '\n');
+      return;
+    }
+    const { entries, truncated } = await collectPrevSegmentCached(prev, (entry) => (
+      !entry.inProgress && !entry.isHeartbeat && !entry.isCountTokens
+      && !entry.ccvRotationContext
+      && !(entry._deltaFormat && entry.mainAgent && !entry.teammate)
+      && !!entry.timestamp
+      && Array.isArray(entry.response?.body?.content) && entry.response.body.content.length > 0
+      && isTeammateLikeEntry(entry)
+    ), { rawPrefilter: teammateRawPrefilter });
+    for (const entry of entries) res.write(JSON.stringify(entry) + '\n');
+    res.end(JSON.stringify({ done: true, truncated, prevSegment: basename(prev) }) + '\n');
+  } catch (err) {
+    // Headers already sent — terminate the NDJSON stream with an error line.
+    try { res.end(JSON.stringify({ done: true, error: err?.message || 'internal error' }) + '\n'); } catch { }
+  }
+}
+
 export const logsRoutes = [
   { method: 'GET', match: 'exact', path: '/api/local-logs', handler: localLogs },
   { method: 'GET', match: 'exact', path: '/api/download-log', handler: downloadLog },
@@ -214,4 +322,5 @@ export const logsRoutes = [
   { method: 'POST', match: 'exact', path: '/api/delete-logs', handler: deleteLogs },
   { method: 'POST', match: 'exact', path: '/api/merge-logs', handler: mergeLogs },
   { method: 'POST', match: 'exact', path: '/api/archive-logs', handler: archiveLogs },
+  { method: 'GET', match: 'exact', path: '/api/prev-segment-teammates', handler: prevSegmentTeammates },
 ];

@@ -15,7 +15,7 @@ import CountryFlag from './components/common/CountryFlag';
 import UsageWindowPill from './components/dashboard/UsageWindowPill';
 import { extractLatestPlanUsage } from './utils/rateLimitParser';
 import { t } from './i18n';
-import { filterRelevantRequests, findPrevMainAgentTimestamp } from './utils/helpers';
+import { filterRelevantRequests, visibleRequests, findPrevMainAgentTimestamp } from './utils/helpers';
 import { isMainAgent } from './utils/contentFilter';
 import { classifyRequest } from './utils/requestType';
 import { apiUrl } from './utils/apiUrl';
@@ -158,7 +158,7 @@ class App extends AppBase {
 
   handleViewInChat = () => {
     this.setState(prev => {
-      const filteredRequests = prev.showAll ? prev.requests : filterRelevantRequests(prev.requests);
+      const filteredRequests = visibleRequests(prev.requests, prev.showAll);
       const selectedReq = filteredRequests[prev.selectedIndex];
       if (!selectedReq) return null;
       let targetTs = null;
@@ -187,7 +187,7 @@ class App extends AppBase {
       const newMode = prev.viewMode === 'raw' ? 'chat' : 'raw';
       if (newMode === 'raw') {
         if (prev.selectedIndex === null) {
-          const filtered = prev.showAll ? prev.requests : filterRelevantRequests(prev.requests);
+          const filtered = visibleRequests(prev.requests, prev.showAll);
           return {
             viewMode: newMode,
             selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
@@ -196,7 +196,7 @@ class App extends AppBase {
         }
         return { viewMode: newMode, scrollCenter: true };
       }
-      const filtered = prev.showAll ? prev.requests : filterRelevantRequests(prev.requests);
+      const filtered = visibleRequests(prev.requests, prev.showAll);
       const selectedReq = prev.selectedIndex != null ? filtered[prev.selectedIndex] : null;
       if (selectedReq) {
         let targetTs = null;
@@ -236,7 +236,7 @@ class App extends AppBase {
   handleCacheHighlightDone = () => { this.setState({ pendingCacheHighlight: null }); };
 
   handleNavigateCacheMsg = (msgIdx) => {
-    const filteredRequests = this.state.showAll ? this.state.requests : filterRelevantRequests(this.state.requests);
+    const filteredRequests = visibleRequests(this.state.requests, this.state.showAll);
     let targetIdx = -1;
     for (let i = filteredRequests.length - 1; i >= 0; i--) {
       if (isMainAgent(filteredRequests[i])) { targetIdx = i; break; }

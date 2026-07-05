@@ -1038,3 +1038,60 @@ describe('interceptor', () => {
     });
   });
 });
+
+// ─────────── rotation carry-forward: spawn-pair extraction + sentinel ───────────
+describe('rotation carry-forward (interceptor-core)', () => {
+  it('extractAgentSpawnPairs pulls prefix→name pairs with client-parity normalization', async () => {
+    const { extractAgentSpawnPairs, TEAMMATE_PROMPT_PREFIX_LEN } = await import('../server/lib/interceptor-core.js');
+    // Leading whitespace must be trimmed BEFORE slicing (parity with
+    // src/utils/contentFilter.js prefix building).
+    const prompt = '   You are the researcher. Investigate the failing pipeline and report everything.';
+    const body = {
+      content: [
+        { type: 'tool_use', name: 'Agent', input: { name: 'researcher', prompt } },
+        { type: 'tool_use', name: 'Bash', input: { command: 'ls' } },
+        { type: 'tool_use', name: 'Agent', input: { name: 'no-prompt' } },
+        { type: 'text', text: 'hello' },
+      ],
+    };
+    const pairs = extractAgentSpawnPairs(body);
+    assert.equal(pairs.length, 1);
+    assert.equal(pairs[0][1], 'researcher');
+    assert.equal(pairs[0][0], prompt.trimStart().slice(0, TEAMMATE_PROMPT_PREFIX_LEN));
+  });
+
+  it('extractAgentSpawnPairs tolerates raw-string and missing bodies', async () => {
+    const { extractAgentSpawnPairs } = await import('../server/lib/interceptor-core.js');
+    assert.deepEqual(extractAgentSpawnPairs('raw sse fallback text'), []);
+    assert.deepEqual(extractAgentSpawnPairs(null), []);
+    assert.deepEqual(extractAgentSpawnPairs({}), []);
+  });
+
+  it('rotateLogFile bakes initialContent into the new file at creation', async () => {
+    const { rotateLogFile, parseRotationContextHead } = await import('../server/lib/interceptor-core.js');
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-rot-'));
+    const oldFile = join(dir, 'proj_20260101_000000.jsonl');
+    const newFile = join(dir, 'proj_20260102_000000.jsonl');
+    writeFileSync(oldFile, 'x'.repeat(2048));
+    const sentinel = JSON.stringify({
+      ccvRotationContext: 1, url: 'ccv://rotation-context',
+      from: 'proj_20260101_000000.jsonl',
+      teammateNames: [['prefix-a', 'alice']],
+      timestamp: '2026-01-02T00:00:00.000Z',
+    }) + '\n---\n';
+    const result = rotateLogFile(oldFile, newFile, 1024, sentinel);
+    assert.equal(result.rotated, true);
+    const head = readFileSync(newFile, 'utf-8');
+    assert.ok(head.startsWith('{"ccvRotationContext":1'));
+    const parsed = parseRotationContextHead(head);
+    assert.ok(parsed);
+    assert.deepEqual(parsed.teammateNames, [['prefix-a', 'alice']]);
+  });
+
+  it('parseRotationContextHead ignores non-sentinel heads and garbage', async () => {
+    const { parseRotationContextHead } = await import('../server/lib/interceptor-core.js');
+    assert.equal(parseRotationContextHead('{"timestamp":"t","url":"/v1/messages"}\n---\n'), null);
+    assert.equal(parseRotationContextHead('not json\n---\n'), null);
+    assert.equal(parseRotationContextHead('no frame separator at all'), null);
+  });
+});

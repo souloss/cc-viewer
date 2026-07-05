@@ -193,13 +193,19 @@ describe('log-watcher gap', () => {
     const names = events.map((e) => e.name);
     assert.ok(names.includes('load_start'));
     assert.ok(names.includes('load_end'));
-    // 轮转后 newFile 被纳入 watch，oldFile 被移除
+    // 轮转后 newFile 被纳入 watch；oldFile 保持被 watch —— 外部进程 teammate 启动时
+    // 解析一次 leader 日志路径后就一直向旧段追加，取消 watch 会让它们的轮转后条目
+    // 在 live 路径彻底不可见（client 端 dedup 吸收重复帧）。
     assert.equal(getWatchedFiles().has(newFile), true, 'rotated-to file is now watched');
-    assert.equal(getWatchedFiles().has(oldFile), false, 'old file unwatched after rotation');
+    assert.equal(getWatchedFiles().has(oldFile), true, 'old file STAYS watched after rotation');
     // load_start 报告了新文件的条目总数
     const ls = events.find((e) => e.name === 'load_start');
     assert.equal(ls.data.incremental, false);
-    void data;
+    // 旧段追加（模拟外部 teammate 完成写入）仍会被广播
+    const before = data.length;
+    appendFileSync(oldFile, rec(JSON.stringify({ timestamp: 'late-teammate', url: '/u', teammate: 'tm' })));
+    const gotLate = await waitFor(() => data.length > before && data.some((d) => d && d.timestamp === 'late-teammate'), { timeout: 7000 });
+    assert.ok(gotLate, 'old-segment append still broadcasts after rotation');
   });
 
   // ── unwatchLogFile 单文件移除 + startWatching 入口 ────────────────────────
@@ -234,7 +240,8 @@ describe('log-watcher gap', () => {
     // 先广播的新条目应已送达
     assert.ok(data.some((d) => d.timestamp === 'a-new'), 'fresh entry streamed before rotation');
     assert.equal(getWatchedFiles().has(b), true);
-    assert.equal(getWatchedFiles().has(a), false);
+    // 旧段保持被 watch（外部 teammate 轮转后仍向旧段写入，见 _switchToRotatedFile 注释）
+    assert.equal(getWatchedFiles().has(a), true);
   });
 
   // ── 目录 watcher 创建失败 → 退回 watchFile 轮询；卸载走 polling 分支 (322-325 / 252-257 / 270-272) ──

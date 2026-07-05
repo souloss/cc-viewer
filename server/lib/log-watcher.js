@@ -115,7 +115,11 @@ export function sendChunkToClients(clients, dataJson) {
 // --- 轮转切换（抽取公共逻辑） ---
 
 async function _switchToRotatedFile(logFile, currentLogFile, clients, opts) {
-  _unwatchSingleFile(logFile);
+  // Deliberately KEEP the old file watched: external-process teammates resolve
+  // the leader log once at boot and continue appending to the previous segment
+  // after rotation. Unwatching it would make their post-rotation entries
+  // invisible live; client dedup absorbs any replayed frames. watchedFiles is
+  // a multi-file Map, so watching both segments is supported.
   const total = await countLogEntries(currentLogFile);
   sendEventToClients(clients, 'load_start', { total, incremental: false });
   await streamReconstructedEntriesAsync(currentLogFile, (segment) => {
