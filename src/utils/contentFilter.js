@@ -501,10 +501,41 @@ export function extractTeammateName(body) {
 
 // 持久化注册表：Agent tool_use prompt 前缀 → teammate name
 const _promptRegistry = new Map();
-// 已扫描的 MainAgent 请求索引上限，避免重复扫描
-let _registryScanIdx = 0;
+// Requests whose response has been scanned for Agent tool_use blocks. A request
+// is only added once its response is present, so a spawn turn that completes
+// LATE (it was in-flight and therefore excluded from the filtered array, then
+// INSERTED mid-array on completion) still gets scanned — the old positional
+// cursor skipped it forever. WeakSet cannot be cleared, so it is recreated on
+// session switch.
+let _registryScanned = new WeakSet();
 // 用首条请求的 timestamp 标识会话，切换时自动 reset
 let _registrySessionKey = null;
+
+// Rotation carry-forward seeds (prompt-prefix → name pairs delivered by the
+// rotation-context sentinel / the /api/prev-segment-teammates context line).
+// Kept SEPARATE from _promptRegistry and re-merged after every sessionKey
+// clear: the scanned registry is wiped whenever requests[0] changes (rotation
+// reloads, backfill prepends), and the spawn turns backing these names live in
+// a previous, unloaded log segment — they can never be re-scanned here.
+const _seedRegistry = new Map();
+
+export function setTeammateNameSeeds(pairs) {
+  _seedRegistry.clear();
+  if (!Array.isArray(pairs)) return;
+  for (const pair of pairs) {
+    if (Array.isArray(pair) && pair[0] && pair[1]) _seedRegistry.set(pair[0], pair[1]);
+  }
+}
+
+export function clearTeammateNameSeeds() {
+  _seedRegistry.clear();
+}
+
+function _mergeSeedsIntoRegistry() {
+  for (const [prefix, name] of _seedRegistry) {
+    if (!_promptRegistry.has(prefix)) _promptRegistry.set(prefix, name);
+  }
+}
 
 const PROMPT_PREFIX_LEN = 60;
 const TM_TAG_RE = /<teammate-message[^>]*>/;
@@ -565,25 +596,34 @@ export function resolveTeammateNames(requests) {
   const sessionKey = requests[0]?.timestamp || null;
   if (sessionKey !== _registrySessionKey) {
     _promptRegistry.clear();
-    _registryScanIdx = 0;
+    _registryScanned = new WeakSet();
     _registrySessionKey = sessionKey;
   }
+  // Seeds re-merge after every clear (and on first run) — scanned entries win
+  // over seeds when both exist for the same prefix (see _mergeSeedsIntoRegistry).
+  _mergeSeedsIntoRegistry();
 
-  // Step 1: 增量扫描 MainAgent response 中的 Agent tool_use，建立 prompt → name 映射
-  for (let i = _registryScanIdx; i < requests.length; i++) {
-    const req = requests[i];
-    if (!req.mainAgent) continue;
+  // Step 1: scan MainAgent responses for Agent tool_use blocks, building the
+  // prompt-prefix → name map. Full walk with O(1) WeakSet skips; a request is
+  // marked scanned ONLY when its response exists, so it is re-visited (cheap,
+  // two property reads) until the response arrives, then scanned exactly once.
+  // Map.set overwrites, so a re-scan is idempotent anyway.
+  for (const req of requests) {
+    if (_registryScanned.has(req)) continue;
+    if (!req.mainAgent) { _registryScanned.add(req); continue; }
     const content = req.response?.body?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (block.type !== 'tool_use' || block.name !== 'Agent') continue;
-      const inp = block.input;
-      if (!inp || !inp.name || !inp.prompt) continue;
-      const prefix = inp.prompt.trimStart().slice(0, PROMPT_PREFIX_LEN);
-      if (prefix) _promptRegistry.set(prefix, inp.name);
+    if (!req.response) continue;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type !== 'tool_use' || block.name !== 'Agent') continue;
+        const inp = block.input;
+        if (!inp || !inp.name || !inp.prompt) continue;
+        const prefix = inp.prompt.trimStart().slice(0, PROMPT_PREFIX_LEN);
+        if (prefix) _promptRegistry.set(prefix, inp.name);
+      }
     }
+    _registryScanned.add(req);
   }
-  _registryScanIdx = requests.length;
 
   if (_promptRegistry.size === 0) return;
 

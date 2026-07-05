@@ -24,6 +24,7 @@ import { isImageFile } from '../../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../../utils/fileExpandedPathsStorage';
 import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, getToolResultCache, setToolResultCache, buildSubAgentResultMap, createEmptyGlobalIndexState, appendToGlobalToolResultIndex } from '../../utils/toolResultBuilder';
 import { refreshCachedItemProp } from '../../utils/refreshCachedItemProp';
+import { refreshResolvedModelInfo, healUnresolvedTeammateEntries, needsFullReqRescan } from '../../utils/identityHeal';
 import { resolveBubbleProducerTs } from '../../utils/sessionManager';
 import { TeamButton, TeamModal } from '../dashboard/TeamSessionPanel';
 import { WorkflowButton, WorkflowRunsModal } from '../dashboard/WorkflowRunsPanel';
@@ -1228,7 +1229,14 @@ class ChatView extends React.Component {
     return !this.props.cliMode && !this.props.sdkMode;
   }
 
-  renderSessionMessages(messages, keyPrefix, resolveModelInfo, tsToIndex, requestCacheTokenMap, startIdx = 0) {
+  // teammateIdentity: only set by _buildTeammateFallbackItems (teammate session
+  // logs). Assistant rows then carry the TEAMMATE's identity (label + portrait
+  // via ChatMessage's teammate branch) instead of the model identity — a model
+  // logo + model name on those rows reads as the MainAgent speaking in the
+  // teammate's own log. animateAvatar:false keeps a long historic transcript
+  // from mass-playing draw-ins (the fallback path returns before the
+  // avatar-animation post-pass, and raw body.messages carry no timestamps).
+  renderSessionMessages(messages, keyPrefix, resolveModelInfo, tsToIndex, requestCacheTokenMap, startIdx = 0, teammateIdentity = null) {
     const { userProfile, collapseToolResults, expandThinking, showFullToolContent, showThinkingSummaries, onViewRequest } = this.props;
     const isHistoryLog = this._getIsHistoryLog();
     // 增量 / WeakMap 缓存
@@ -1448,7 +1456,7 @@ class ChatView extends React.Component {
           // 只在有非系统内容时才渲染
           if (filteredContent.length > 0) {
             renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={filteredContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" isTeammate={teammateIdentity ? true : undefined} label={teammateIdentity?.label} animateAvatar={teammateIdentity ? false : undefined} content={filteredContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
             );
           }
         } else if (typeof content === 'string') {
@@ -1456,7 +1464,7 @@ class ChatView extends React.Component {
           const dispText = extractDisplayText(content);
           if (dispText) {
             renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" content={[{ type: 'text', text: dispText }]} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" isTeammate={teammateIdentity ? true : undefined} label={teammateIdentity?.label} animateAvatar={teammateIdentity ? false : undefined} content={[{ type: 'text', text: dispText }]} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
             );
           }
         }
@@ -1493,13 +1501,13 @@ class ChatView extends React.Component {
           messages: req.body.messages,
           response: req.response,
           timestamp: req.timestamp,
+          model: getEffectiveModel(req),
         });
       }
     }
 
     if (teammateMap.size === 0) return [];
 
-    const nullModelInfoResolver = () => null; // teammate 不需要 model 头像
     const allItems = [];
     let si = 0;
     for (const [name, session] of teammateMap) {
@@ -1508,7 +1516,18 @@ class ChatView extends React.Component {
           <Text className={styles.sessionDividerText}>{name}</Text>
         </Divider>
       );
-      const { items: msgs } = this.renderSessionMessages(session.messages, `tm${si}`, nullModelInfoResolver, {}, this._reqScanCache.requestCacheTokenMap);
+      // Assistant rows carry the TEAMMATE's identity: label (name + model
+      // short-name via formatTeammateLabel) and teammate portrait, rendered by
+      // ChatMessage's assistant teammate branch. modelInfo is supplied only as
+      // the label fallback — rendering the model logo/name directly made these
+      // rows read as the MainAgent speaking in the teammate's own log.
+      // (Replaces both the v1.6.171 null resolver, which showed "MainAgent"
+      // everywhere, and the first fix iteration, which showed model identity.)
+      // Raw body.messages carry no _timestamp, so the resolver ignores ts.
+      const tmModelInfo = getModelInfo(session.model);
+      const tmModelResolver = (ts, role) => (role === 'assistant' ? tmModelInfo : null);
+      const tmLabel = formatTeammateLabel(name, session.model);
+      const { items: msgs } = this.renderSessionMessages(session.messages, `tm${si}`, tmModelResolver, {}, this._reqScanCache.requestCacheTokenMap, 0, { label: tmLabel });
       allItems.push(...msgs);
 
       // 渲染 response content（如果有）
@@ -1518,7 +1537,7 @@ class ChatView extends React.Component {
           const lastItems = respContent
             .filter(b => b.type === 'text' && b.text)
             .map((b, bi) => (
-              <ChatMessage key={`tm-resp-${si}-${bi}`} role="assistant" content={[b]} timestamp={session.timestamp} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} onViewRequest={onViewRequest} onOpenFile={this.handleOpenToolFilePath} isHistoryLog={isHistoryLog} />
+              <ChatMessage key={`tm-resp-${si}-${bi}`} role="assistant" isTeammate label={tmLabel} animateAvatar={false} content={[b]} timestamp={session.timestamp} modelInfo={tmModelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} onViewRequest={onViewRequest} onOpenFile={this.handleOpenToolFilePath} isHistoryLog={isHistoryLog} />
             ));
           if (lastItems.length > 0) {
             this._lastResponseItems = lastItems;
@@ -1546,14 +1565,28 @@ class ChatView extends React.Component {
     // 增量扫描 requests（tsToIndex + modelName 增量，subAgentEntries 可按需全量重扫）
     const cache = this._reqScanCache;
     if (requests) {
+      // Identity guard: a mid-array INSERTION (an in-flight producer turn
+      // completing enters the filtered array below the cursor) shifts every
+      // index after it — the incremental scan would then build stale
+      // tsToIndex/modelNameByReqIdx and subAgentEntries with wrong
+      // requestIndex values, and the inserted turn's own row would never be
+      // built. Detect via object identity of the last-scanned request and
+      // force a full rescan. Accepted residual: a mid-array REPLACEMENT with
+      // an unchanged element at processedCount-1 does not fire the guard —
+      // worst case a stale token badge, not the identity bug.
+      const fullRescan = needsFullReqRescan(requests, cache.processedCount, cache.lastScannedReq);
       // tsToIndex / modelName: 只追加不修改，增量扫描
-      const startIdx = (requests.length >= cache.processedCount) ? cache.processedCount : 0;
+      const startIdx = (!fullRescan && requests.length >= cache.processedCount) ? cache.processedCount : 0;
       if (startIdx === 0) {
         cache.tsToIndex = {};
         cache.modelName = null;
         cache.completedModelName = null;
         cache.modelNameByReqIdx = [];
         cache.requestCacheTokenMap = new Map();
+        cache.subAgentEntries = [];
+        cache.subAgentProcessedCount = 0;
+        cache.globalIndexState = createEmptyGlobalIndexState();
+        cache.globalIndexProcessedCount = 0;
       }
       // carry-over 初值：从上轮末态继承，保证流式追加时非 MainAgent 或无 body.model 的 req 也能拿到"最近活跃模型"
       let lastModelName = cache.modelName;
@@ -1585,9 +1618,14 @@ class ChatView extends React.Component {
         }
       }
       cache.processedCount = requests.length;
+      cache.lastScannedReq = requests.length > 0 ? requests[requests.length - 1] : null;
 
       // Teammate 名称解析：在 classifyRequest 之前注入 req.teammate（prompt 内容匹配）
       resolveTeammateNames(requests);
+      // Heal labels baked into surviving entries before the registry resolved
+      // (or baked from a raw id) — entries carry the request object reference,
+      // which survives filtered-array rebuilds and insertions.
+      healUnresolvedTeammateEntries(cache.subAgentEntries);
 
       // subAgentEntries: response 可能被原地更新，从 subAgentProcessedCount 开始扫描
       // 回退一位重扫尾项：上一轮尾项的 classifyRequest(req, undefined) 可能因缺少 nextReq 而误判
@@ -1628,6 +1666,11 @@ class ChatView extends React.Component {
                 : formatRequestTag(cls.type, cls.subType),
               isTeammate: isTeammateEntry,
               requestIndex: i,
+              // All teammate entries stay healable: a truthy cls.subType can
+              // be a raw id upgraded to a real name later. Object reference,
+              // not index — indices shift on mid-array insertion.
+              unresolved: isTeammateEntry,
+              req,
             });
           }
         }
@@ -1818,6 +1861,11 @@ class ChatView extends React.Component {
         // 刷新持有相应 tool_use 的旧 element 的 prop，避免 React 因 element 引用未变跳过 SCU 让卡片永远停在 pending 视图。
         msgs = refreshCachedItemProp(sc.items, sc.planApprovalMap, mergedPlanApprovalMap, 'ExitPlanMode', 'planApprovalMap');
         msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
+        // Heal rows whose modelInfo was baked null before the request scan
+        // could resolve the producer (post-refresh race). The resolver closes
+        // over caches rebuilt earlier in THIS call; the write-back below
+        // persists healed elements, so later FULL HITs are same-ref and free.
+        msgs = refreshResolvedModelInfo(msgs, resolveModelInfo);
         lastPendingAskId = sc.lastPendingAskId;
         lastPendingPlanId = sc.lastPendingPlanId;
       } else if (sc && sc.session === session && session.messages.length > sc.msgsLen) {
@@ -1826,6 +1874,8 @@ class ChatView extends React.Component {
         // 旧段同样要刷新 planApprovalMap / askAnswerMap prop（同 FULL HIT 理由）
         msgs = refreshCachedItemProp(sc.items, sc.planApprovalMap, mergedPlanApprovalMap, 'ExitPlanMode', 'planApprovalMap').slice();
         msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
+        // Same modelInfo healing for the reused old segment (see FULL HIT above).
+        msgs = refreshResolvedModelInfo(msgs, resolveModelInfo);
         lastPendingAskId = result.lastPendingAskId;
         lastPendingPlanId = result.lastPendingPlanId;
         // 增量 result 范围内若无新 pending plan/ask，但 sc 旧值仍未 resolved → 保留 sc 值，

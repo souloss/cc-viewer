@@ -1216,3 +1216,172 @@ describe('isPostClearCheckpoint (re-export)', () => {
     assert.equal(CF.isPostClearCheckpoint(entry, 1), false);
   });
 });
+
+// ─────────────── resolveTeammateNames: late-completing spawn turn ───────────────
+// Regression tests for the scanned-WeakSet cursor (replaced the positional
+// _registryScanIdx, which permanently skipped a spawn turn that completed late
+// and was INSERTED mid-array into the filtered requests before the cursor).
+describe('resolveTeammateNames late-spawn scanning', () => {
+  const SDK_SYSTEM2 = 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.';
+  const MAIN_SYSTEM2 = 'You are Claude Code, Anthropic\'s official CLI for Claude.';
+
+  function mkSpawnMain(name, prompt, timestamp, withResponse) {
+    const req = {
+      mainAgent: true,
+      timestamp,
+      body: { system: MAIN_SYSTEM2, tools: [], messages: [] },
+    };
+    if (withResponse) {
+      req.response = { body: { content: [{ type: 'tool_use', name: 'Agent', input: { name, prompt } }] } };
+    }
+    return req;
+  }
+  function mkTm(prompt, timestamp) {
+    return {
+      timestamp,
+      body: {
+        system: SDK_SYSTEM2,
+        tools: [{ name: 'SendMessage' }],
+        messages: [{ role: 'user', content: `<teammate-message teammate_id="lead">${prompt}` }],
+      },
+    };
+  }
+
+  it('a spawn turn whose response arrives LATE (same object mutated) is scanned once complete', () => {
+    const PROMPT = 'You are the tracer. Follow the failing request through every layer and report back.';
+    const ts = 'session-late-mut-' + Math.random();
+    const main = mkSpawnMain('tracer', PROMPT, ts, false); // in-flight: no response yet
+    const tm = mkTm(PROMPT, ts);
+    CF.resolveTeammateNames([main, tm]);
+    assert.equal(tm.teammate, undefined, 'cannot resolve before the spawn response exists');
+    // Response arrives on the same object (still unscanned — only responded
+    // requests enter the scanned set).
+    main.response = { body: { content: [{ type: 'tool_use', name: 'Agent', input: { name: 'tracer', prompt: PROMPT } }] } };
+    CF.resolveTeammateNames([main, tm]);
+    assert.equal(tm.teammate, 'tracer');
+  });
+
+  it('a spawn turn INSERTED mid-array after other requests were scanned is still picked up', () => {
+    const PROMPT = 'You are the mapper. Chart every module boundary in the repository and summarize.';
+    const ts = 'session-late-ins-' + Math.random();
+    const bystander = mkSpawnMain('unrelated', 'Completely different prompt that matches nothing at all in this run.', ts, true);
+    const tm = mkTm(PROMPT, ts);
+    // First pass: the spawn turn is absent (in-flight turns are excluded from
+    // the filtered array). Under the old positional cursor this pass advanced
+    // the cursor past the future insertion point.
+    CF.resolveTeammateNames([bystander, tm]);
+    assert.equal(tm.teammate, undefined);
+    // The spawn turn completes and is inserted mid-array, BELOW the cursor.
+    const spawn = mkSpawnMain('mapper', PROMPT, ts, true);
+    CF.resolveTeammateNames([bystander, spawn, tm]);
+    assert.equal(tm.teammate, 'mapper');
+  });
+
+  it('already-scanned requests are skipped (idempotent registry, no re-scan churn)', () => {
+    const PROMPT = 'You are the checker agent. Validate all invariants twice and then file a summary.';
+    const ts = 'session-idem-' + Math.random();
+    const main = mkSpawnMain('checker', PROMPT, ts, true);
+    const tm = mkTm(PROMPT, ts);
+    const requests = [main, tm];
+    CF.resolveTeammateNames(requests);
+    assert.equal(tm.teammate, 'checker');
+    // Mutating the already-scanned response must have no effect (scanned set
+    // holds the object; Map.set overwrites make re-scans harmless anyway).
+    main.response.body.content[0].input.name = 'not-rescanned';
+    CF.resolveTeammateNames(requests);
+    assert.equal(tm.teammate, 'checker');
+  });
+});
+
+// ─────────────── teammate-name seeds (rotation carry-forward) ───────────────
+// Seeds delivered by the rotation-context sentinel / backfill route must
+// survive every registry reset: the scanned registry is wiped whenever
+// requests[0] changes (rotation reload, backfill prepend), and the spawn
+// turns behind these names live in an unloaded previous segment.
+describe('teammate-name seeds', () => {
+  const SDK_SYSTEM3 = 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.';
+  const mkTm3 = (prompt, timestamp) => ({
+    timestamp,
+    body: {
+      system: SDK_SYSTEM3,
+      tools: [{ name: 'SendMessage' }],
+      messages: [{ role: 'user', content: `<teammate-message teammate_id="lead">${prompt}` }],
+    },
+  });
+
+  it('resolves names from seeds alone (empty scanned registry, Step 2 still runs)', () => {
+    const PROMPT = 'You are the seeded one. Perform the carried-over duty with great care.';
+    CF.setTeammateNameSeeds([[PROMPT.slice(0, 60), 'seeded-one']]);
+    try {
+      const tm = mkTm3(PROMPT, 'session-seed-' + Math.random());
+      CF.resolveTeammateNames([tm]);
+      assert.equal(tm.teammate, 'seeded-one');
+    } finally {
+      CF.clearTeammateNameSeeds();
+    }
+  });
+
+  it('seeds survive a sessionKey change (prepend / rotation reload)', () => {
+    const PROMPT = 'You are the survivor. Keep resolving across registry resets forever.';
+    CF.setTeammateNameSeeds([[PROMPT.slice(0, 60), 'survivor']]);
+    try {
+      const tmA = mkTm3(PROMPT, 'session-sk-a-' + Math.random());
+      CF.resolveTeammateNames([tmA]); // sessionKey = tmA.timestamp
+      const tmB = mkTm3(PROMPT, 'session-sk-b-' + Math.random());
+      // Different first-request timestamp → registry cleared → seeds must re-merge.
+      CF.resolveTeammateNames([tmB, tmA]);
+      assert.equal(tmB.teammate, 'survivor');
+    } finally {
+      CF.clearTeammateNameSeeds();
+    }
+  });
+
+  it('repeated calls with the same sessionKey (incremental re-ingest, no sentinel) keep seeds', () => {
+    const PROMPT = 'You are the increment. Remain resolvable after quiet reconnect merges.';
+    CF.setTeammateNameSeeds([[PROMPT.slice(0, 60), 'increment']]);
+    try {
+      const ts = 'session-inc-' + Math.random();
+      const anchor = mkTm3('Anchor prompt long enough to hold the session key stable here.', ts);
+      CF.resolveTeammateNames([anchor]);
+      CF.resolveTeammateNames([anchor]); // simulated incremental pass — no clear happens
+      const late = mkTm3(PROMPT, ts + '-later');
+      CF.resolveTeammateNames([anchor, late]);
+      assert.equal(late.teammate, 'increment');
+    } finally {
+      CF.clearTeammateNameSeeds();
+    }
+  });
+
+  it('scanned Agent tool_use entries override seed pairs for the same prefix', () => {
+    const PROMPT = 'You are the contested. Two sources disagree about your actual name.';
+    const prefix = PROMPT.slice(0, 60);
+    CF.setTeammateNameSeeds([[prefix, 'seed-name']]);
+    try {
+      const ts = 'session-ovr-' + Math.random();
+      const spawner = {
+        mainAgent: true,
+        timestamp: ts,
+        body: { system: 'You are Claude Code, Anthropic\'s official CLI for Claude.', tools: [], messages: [] },
+        response: { body: { content: [{ type: 'tool_use', name: 'Agent', input: { name: 'scanned-name', prompt: PROMPT } }] } },
+      };
+      const tm = mkTm3(PROMPT, ts + '-tm');
+      CF.resolveTeammateNames([spawner, tm]);
+      assert.equal(tm.teammate, 'scanned-name');
+    } finally {
+      CF.clearTeammateNameSeeds();
+    }
+  });
+
+  it('setTeammateNameSeeds replaces wholesale and tolerates malformed input', () => {
+    CF.setTeammateNameSeeds([['p1', 'a']]);
+    CF.setTeammateNameSeeds([['p2', 'b'], null, ['', 'x'], ['p3']]);
+    try {
+      const tm = mkTm3('p1' + ' filler text to satisfy prefix extraction length rules ok', 'session-rep-' + Math.random());
+      CF.resolveTeammateNames([tm]);
+      assert.equal(tm.teammate, undefined, 'replaced-away seed must not resolve');
+      assert.doesNotThrow(() => CF.setTeammateNameSeeds('garbage'));
+    } finally {
+      CF.clearTeammateNameSeeds();
+    }
+  });
+});

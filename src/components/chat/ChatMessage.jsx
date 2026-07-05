@@ -1516,17 +1516,26 @@ class ChatMessage extends React.Component {
   }
 
   renderAssistantMessage() {
-    const { content, toolResultMap = {}, modelInfo, timestamp, requestIndex, onViewRequest, showTrailingCursor, cacheTotalTokens, showFullToolContent, imAgent } = this.props;
+    const { content, toolResultMap = {}, modelInfo, timestamp, requestIndex, onViewRequest, showTrailingCursor, cacheTotalTokens, showFullToolContent, imAgent, isTeammate, label } = this.props;
     const innerContent = this.renderAssistantContent(content, toolResultMap);
 
     if (innerContent.length === 0) return null;
 
+    // Teammate session logs render the transcript's assistant turns with the
+    // TEAMMATE's identity (portrait + name label) — model identity here would
+    // read as the MainAgent speaking in the teammate's own log. Main-view
+    // assistant rows never carry isTeammate/label, so this branch is inert
+    // outside _buildTeammateFallbackItems.
+    const ta = isTeammate && label ? getTeammateAvatar(label, { animated: this.props.animateAvatar !== false }) : null;
+
     return (
       <div className={styles.messageRow}>
-        {imAgent ? this.renderImAgentAvatar(imAgent) : <ModelAvatar modelInfo={modelInfo} streaming={!!showTrailingCursor} />}
+        {ta
+          ? <div className={styles.avatar} style={{ background: ta.color }} dangerouslySetInnerHTML={{ __html: ta.svg }} />
+          : (imAgent ? this.renderImAgentAvatar(imAgent) : <ModelAvatar modelInfo={modelInfo} streaming={!!showTrailingCursor} />)}
         <div className={styles.contentCol}>
           <AssistantLabel
-            name={imAgent ? imAgent.name : (modelInfo?.name || 'MainAgent')}
+            name={ta ? label : (imAgent ? imAgent.name : (modelInfo?.name || 'MainAgent'))}
             timeStr={this.formatTime(timestamp)}
             requestIndex={requestIndex}
             onViewRequest={onViewRequest}
