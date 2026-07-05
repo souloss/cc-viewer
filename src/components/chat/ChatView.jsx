@@ -18,8 +18,7 @@ import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeam
 import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../../utils/requestType';
 import { playEvent as playVoiceEvent } from '../../utils/voicePackPlayer';
 import { buildChunksForAnswer, buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../../utils/ptyChunkBuilder';
-import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer, pickPlanApproveOptionNumber } from '../../utils/promptClassifier';
-import { stripAnsi, splitTrailingAnsiCarry, detectPromptInBuffer, isFalsePositiveQuestion } from '../../utils/promptDetect';
+import { isPlanApprovalPrompt, isDangerousOperationPrompt, pickPlanApproveOptionNumber } from '../../utils/promptClassifier';
 import { reportSwallowed } from '../../utils/errorReport';
 import { isImageFile } from '../../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../../utils/fileExpandedPathsStorage';
@@ -46,9 +45,13 @@ import { StickyBottomController } from '../../utils/stickyBottomController';
 import { AskFlowController, ASK_KIND, LEGACY_ASK_PLACEHOLDER_ID } from './controllers/askFlowController';
 import { UltraplanController } from '../../utils/ultraplanController';
 import { shouldDeferSend, reduceUploading } from './uploadDeferLogic';
+import { computeMessagesPending, healStalePendingIds, computeLrOwnership, filterLrContent, hasVisibleLrContent, collectLrAskQuestions } from './interactionOwnership';
 import { ScrollHighlightController } from './controllers/scrollHighlightController';
 import { PermissionController } from './controllers/permissionController';
 import { ToolFileChangeController } from './controllers/toolFileChangeController';
+import { SplitDragController, TERMINAL_WIDTH_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY } from './controllers/splitDragController';
+import { PtyPromptController } from './controllers/ptyPromptController';
+import { TERMINAL_CHAR_WIDTH, RESIZER_WIDTH_PX } from '../../utils/splitDragCalc';
 import { isMobile, isIOS, isPad } from '../../env';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
@@ -80,7 +83,6 @@ const UPLOAD_DEFER_TIMEOUT_MS = 10000;
 
 // 免审批下 PTY 子代理 prompt 去重时窗：同一 prompt 在该窗口内被反复检测时只放行一次，
 // 挡住 PTY 慢回显/重绘导致的二次自动放行（_promptSubmitting 仅 500ms，不足以覆盖）。
-const AUTO_ALLOW_PTY_DEDUPE_MS = 2000;
 
 const MOBILE_ITEM_LIMIT = 240;
 const IOS_ITEM_LIMIT = 150;
@@ -198,7 +200,7 @@ class ChatView extends React.Component {
 
 
     // 从 localStorage 读取用户偏好的终端宽度（像素）
-    const savedWidth = localStorage.getItem('cc-viewer-terminal-width');
+    const savedWidth = localStorage.getItem(TERMINAL_WIDTH_STORAGE_KEY);
     const initialTerminalWidth = savedWidth ? parseFloat(savedWidth) : null;
 
     this.state = {
@@ -209,7 +211,7 @@ class ChatView extends React.Component {
       highlightTs: null,
       highlightFading: false,
       highlightVisibleIdx: -1,
-      sidebarWidth: parseInt(localStorage.getItem('cc-viewer-sidebar-width'), 10) || 240,
+      sidebarWidth: parseInt(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY), 10) || 240,
       terminalWidth: initialTerminalWidth || 624, // 默认 80cols * 7.8px
       needsInitialSnap: initialTerminalWidth === null, // 标记是否需要初始化吸附
       inputEmpty: true,
@@ -291,20 +293,14 @@ class ChatView extends React.Component {
     this._prevItemsLen = 0;
     this._scrollTargetIdx = null;
     this._scrollTargetRef = React.createRef();
-    this._resizing = false;
-    this._dragTarget = null; // 'terminal' | 'sidebar'
     // _inputWs 现在是 getter(挂在原型),不在 constructor 上设字段,避免覆盖 getter
     this._unsubWsHandler = null;
     this._unsubWsState = null;
     this._inputRef = React.createRef();
-    this._ptyBuffer = '';
-    this._ptyAnsiCarry = ''; // 跨 write 撕裂的半截 ANSI 序列缓带（字节流层面，prompt 清空不重置）
-    this._ptyDataSeq = 0; // increments on every PTY output event
-    this._ptyDebounceTimer = null;
     this._stopOptimisticTimer = null; // 乐观停止兜底定时器
-    this._currentPtyPrompt = null; // 同步跟踪 ptyPrompt，避免闭包捕获旧 state
+    // PTY byte-stream state (buffer/carry/debounce/current-prompt mirror/auto-allow
+    // dedupe) is owned by this._ptyPrompt (PtyPromptController), see end of constructor.
     // 全部 ask 状态机字段 + 方法由 this._askFlow（AskFlowController）持有，见构造末尾。
-    // ChatView 不再直接读写这些字段（唯一例外：_detectPrompt 读 this._askFlow._askSubmitting）。
     this._mobileExtraItems = 0;
     this._mobileSliceOffset = 0;
     this._totalItemCount = 0;
@@ -354,9 +350,9 @@ class ChatView extends React.Component {
       ctxSend: (obj) => this.context?.send?.(obj),
       ctxIsOpen: () => this.context?.isOpen?.(),
       addMessageHandler: (fn) => this.context.addMessageHandler(fn),
-      getCurrentPtyPrompt: () => this._currentPtyPrompt,
-      setCurrentPtyPrompt: (v) => { this._currentPtyPrompt = v; },
-      clearPtyDebounce: () => { if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer); },
+      getCurrentPtyPrompt: () => this._ptyPrompt.getCurrent(),
+      setCurrentPtyPrompt: (v) => this._ptyPrompt.setCurrent(v),
+      clearPtyDebounce: () => this._ptyPrompt.clearDebounce(),
       sendUserMessageImmediate: (text, ta, skip) => this._sendUserMessageImmediate(text, ta, skip),
       takePendingFlush: (askId) => {
         if (!this._pendingFlushQueue || this._pendingFlushQueue.length === 0) return null;
@@ -426,6 +422,26 @@ class ChatView extends React.Component {
       getProjectDir: () => this._projectDirCache,
       setPendingFileRefresh: () => { this._pendingFileRefresh = true; },
       setPendingGitRefresh: () => { this._pendingGitRefresh = true; },
+    });
+
+    // Terminal/sidebar drag-resize lifecycle (see ./controllers/splitDragController;
+    // pure snap geometry in utils/splitDragCalc.js).
+    this._splitDrag = new SplitDragController({
+      getState: () => this.state,
+      setState: (update) => this.setState(update),
+      getSplitRect: () => this.innerSplitRef.current?.getBoundingClientRect() ?? null,
+      persistWidth: (key, px) => this._persistWidth(key, px),
+    });
+
+    // PTY prompt detection (buffer/carry/debounce/dedupe — see ./controllers/ptyPromptController).
+    this._ptyPrompt = new PtyPromptController({
+      getState: () => this.state,
+      setState: (update, cb) => this.setState(update, cb),
+      isInstantAutoApprove: () => this.props.autoApproveSeconds === AUTO_APPROVE_INSTANT,
+      isAskSubmitting: () => this._askFlow._askSubmitting,
+      permissionAutoAllow: (perm) => this._permission.autoAllow(perm),
+      scrollToBottom: () => this.scrollToBottom(),
+      now: () => Date.now(),
     });
   }
 
@@ -888,6 +904,7 @@ class ChatView extends React.Component {
 
   componentWillUnmount() {
     this._unmounted = true;
+    this._splitDrag.dispose();
     if (this._planAutoTimer) { clearInterval(this._planAutoTimer); this._planAutoTimer = null; }
     // 缓发超时 timer + 残留上传占位的 objectURL 清扫(卸载中 drain/超时回调已各自 _unmounted 守卫)。
     clearTimeout(this._sendDeferTimer);
@@ -919,7 +936,7 @@ class ChatView extends React.Component {
     } catch {}
     if (this._queueTimer) clearTimeout(this._queueTimer);
     if (this._autoFillRafId) { cancelAnimationFrame(this._autoFillRafId); this._autoFillRafId = null; }
-    if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
+    this._ptyPrompt.dispose();
     this._toolFileMonitor.dispose();
     if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
     if (this._planFeedbackTimer) clearTimeout(this._planFeedbackTimer);
@@ -1272,67 +1289,21 @@ class ChatView extends React.Component {
       ? this.state.ptyPromptHistory.slice().reverse().find(p => isDangerousOperationPrompt(p) && p.status === 'active') || null
       : null;
 
-    // P1: 只允许最后一个 pending 的 ExitPlanMode 卡片交互
-    let lastPendingPlanId = null;
-    // P2: 只允许最后一个 pending 的 AskUserQuestion 卡片交互
-    let lastPendingAskId = null;
-    // 收集历史中所有 AskUserQuestion block ID，用于 Last Response 去重
-    const historyAskIds = new Set();
     // 合并 localAskAnswers 到历史 askAnswerMap，使提交后立即显示已回答。
     // 派生统一走 _getMergedAskAnswerMap（per keyPrefix），保证 FULL HIT 路径与 cache miss 路径
     // 拿到同一引用，prop diff 才能正确触发 AskUserQuestion 卡片重渲。
     const _localAsk = this.state.localAskAnswers || {};
     const mergedAskAnswerMap = this._getMergedAskAnswerMap(messages, keyPrefix, _localAsk);
-    // 记录"持有 lastPendingAskId/PlanId 的 message 索引"——streaming 期间同一 toolId 可能出现在
-    // 多条 assistant message（增量 push 而不是 mutate），若每条 message 都拿到 msgLastAskId=X，
-    // 会让多个 ChatMessage 都进 isInteractive=true 路径，把多份 AskQuestionForm portal 到 modal askSlot。
-    // 用 owner index 锁定只有一条 message 拿到 lastPendingAskId。
-    let lastPendingAskOwnerIdx = -1;
-    let lastPendingPlanOwnerIdx = -1;
-    // 先扫历史 askIds(全量,用于 Last Response 去重),不参与 lastPending* 派生。
-    for (let _mi = 0; _mi < messages.length; _mi++) {
-      const msg = messages[_mi];
-      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
-            historyAskIds.add(block.id);
-          }
-        }
-      }
-    }
-    // lastPendingPlanId / lastPendingAskId:**只考虑"最后一条 assistant message"内的工具**。
-    // 原因:ExitPlanMode V2 / plan-mode 工具不会有常规 tool_result 文本(后端用 system 注入接管),
-    //   planApprovalMap[id] 永远 undefined,旧实现把每一个这样的 plan 都标 pending → 历史里任何
-    //   旧 plan 都会无限弹 modal,刷新刷新都跳出来。
-    // 真理:plan/ask 一旦被处理(approved/rejected/answered),Claude 才能继续 turn。所以**只要后面
-    //   还有 assistant message,前面那条 plan/ask 一定已被处理**,不应再视为 pending。
-    let lastAssistantIdx = -1;
-    for (let _mi = messages.length - 1; _mi >= 0; _mi--) {
-      const m = messages[_mi];
-      if (m && m.role === 'assistant' && Array.isArray(m.content) && m.content.length > 0) {
-        lastAssistantIdx = _mi;
-        break;
-      }
-    }
-    if (lastAssistantIdx >= 0) {
-      const lastMsg = messages[lastAssistantIdx];
-      for (const block of lastMsg.content) {
-        if (block.type === 'tool_use' && block.name === 'ExitPlanMode') {
-          const approval = planApprovalMap[block.id];
-          if (!approval || approval.status === 'pending') {
-            lastPendingPlanId = block.id;
-            lastPendingPlanOwnerIdx = lastAssistantIdx;
-          }
-        }
-        if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
-          const answers = mergedAskAnswerMap[block.id];
-          if (!answers || Object.keys(answers).length === 0) {
-            lastPendingAskId = block.id;
-            lastPendingAskOwnerIdx = lastAssistantIdx;
-          }
-        }
-      }
-    }
+    // Pending ask/plan arbitration is centralized in interactionOwnership.js
+    // (last-assistant-only rule + owner-index locking so exactly one bubble
+    // gets the pending id). MERGED maps by design — see the module header.
+    // (A dead full-history historyAskIds scan that lived here was removed —
+    // it was filled but never read; the LR block builds its own sets.)
+    const _pending = computeMessagesPending({ messages, planApprovalMap, askAnswerMap: mergedAskAnswerMap });
+    let lastPendingAskId = _pending.lastPendingAskId;
+    let lastPendingPlanId = _pending.lastPendingPlanId;
+    const lastPendingAskOwnerIdx = _pending.askOwnerIdx;
+    const lastPendingPlanOwnerIdx = _pending.planOwnerIdx;
 
     const renderedMessages = [];
 
@@ -1449,25 +1420,23 @@ class ChatView extends React.Component {
         // 避免同 toolId 出现在多条 message 时让多个 ChatMessage 都进 isInteractive 路径并双重 portal
         const msgLastAskId = (mi === lastPendingAskOwnerIdx) ? lastPendingAskId : null;
         const msgLastPlanId = (mi === lastPendingPlanOwnerIdx) ? lastPendingPlanId : null;
+        // Normalize the two content shapes into one block list (null → skip):
+        // array content drops system-text blocks (e.g. SUGGESTION MODE); string
+        // content renders only if text survives chrome-stripping.
+        let asstContent = null;
         if (Array.isArray(content)) {
-          // 过滤掉系统文本块（例如 SUGGESTION MODE）
           const filteredContent = content.filter(block =>
             block.type !== 'text' || !isSystemText(block.text)
           );
-          // 只在有非系统内容时才渲染
-          if (filteredContent.length > 0) {
-            renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" isTeammate={teammateIdentity ? true : undefined} label={teammateIdentity?.label} animateAvatar={teammateIdentity ? false : undefined} content={filteredContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
-            );
-          }
+          if (filteredContent.length > 0) asstContent = filteredContent;
         } else if (typeof content === 'string') {
-          // 过滤字符串类型的系统文本（剥 chrome 后仍有正文才渲染）
           const dispText = extractDisplayText(content);
-          if (dispText) {
-            renderedMessages.push(
-              <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" isTeammate={teammateIdentity ? true : undefined} label={teammateIdentity?.label} animateAvatar={teammateIdentity ? false : undefined} content={[{ type: 'text', text: dispText }]} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
-            );
-          }
+          if (dispText) asstContent = [{ type: 'text', text: dispText }];
+        }
+        if (asstContent) {
+          renderedMessages.push(
+            <ChatMessage key={`${keyPrefix}-asst-${mi}`} role="assistant" isTeammate={teammateIdentity ? true : undefined} label={teammateIdentity?.label} animateAvatar={teammateIdentity ? false : undefined} content={asstContent} toolResultMap={toolResultMap} readContentMap={readContentMap} editSnapshotMap={editSnapshotMap} askAnswerMap={mergedAskAnswerMap} planApprovalMap={planApprovalMap} latestPlanContent={latestPlanContent} planFileContents={this.state.planFileContents} timestamp={ts} displayTs={msg._generatedTs} modelInfo={modelInfo} collapseToolResults={collapseToolResults} expandThinking={expandThinking} showFullToolContent={showFullToolContent} showThinkingSummaries={showThinkingSummaries} ptyPrompt={this.state.ptyPrompt} activePlanPrompt={activePlanPrompt} activePtyPlanId={this.state.pendingPtyPlan?.id ?? null} planAutoApproveCountdown={this.state.planAutoApproveCountdown} onCancelPlanAutoApprove={this.cancelPlanAutoApprove} activeDangerousPrompt={activeDangerousPrompt} lastPendingPlanId={msgLastPlanId} lastPendingAskId={msgLastAskId} onPlanApprovalClick={this.handlePromptOptionClick} onPlanFeedbackSubmit={this.handlePlanFeedbackSubmit} onDangerousApprovalClick={this.handlePromptOptionClick} onAskQuestionSubmit={this.handleAskQuestionSubmit} onAskQuestionCancel={this.handleAskCancel} pendingAsk={this.state.pendingAsk} askMetaMap={this.state.askMetaMap} cliMode={this.props.cliMode} onOpenFile={this.handleOpenToolFilePath} cacheTotalTokens={cacheTotalTokens} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+          );
         }
       }
     }
@@ -1802,59 +1771,24 @@ class ChatView extends React.Component {
       const _localAskForSession = this.state.localAskAnswers || {};
       const mergedAskAnswerMap = this._getMergedAskAnswerMap(session.messages, `s${si}`, _localAskForSession);
 
-      // === 预判：Last Response 是否将持有 ask / plan 交互权 ===
-      // 防 messages-side ChatMessage 与 LR <ChatMessage key="resp-asst"> 同时进入 isInteractive 路径，
-      // 双 portal 进 ApprovalModal askSlot / ptyPlanSlot（multi-agent-room 等场景的双卡空白 bug）。
-      // LR 只在最后一个 session 出现（与 L1479 同源）。
-      let lrWillOwnAsk = false;
-      let lrWillOwnPlan = false;
-      let lrHistoryAskIds = null;
-      let lrHistoryPlanIds = null;
-      if (si === mainAgentSessions.length - 1 && session.response?.body?.content) {
-        const _resp = session.response.body.content;
-        if (Array.isArray(_resp)) {
-          const _hasInteractiveBlock = _resp.some(b =>
-            b.type === 'tool_use' && (b.name === 'AskUserQuestion' || b.name === 'ExitPlanMode')
-          );
-          const _hasSuggestionMode = _resp.some(b =>
-            b.type === 'text' && typeof b.text === 'string' && b.text.includes('[SUGGESTION MODE:')
-          );
-          const _shouldHide = _hasSuggestionMode && !_hasInteractiveBlock;
-          if (!_shouldHide && _hasInteractiveBlock) {
-            lrHistoryAskIds = new Set();
-            lrHistoryPlanIds = new Set();
-            for (const m of session.messages) {
-              if (m.role === 'assistant' && Array.isArray(m.content)) {
-                for (const b of m.content) {
-                  if (b.type === 'tool_use' && b.name === 'AskUserQuestion') lrHistoryAskIds.add(b.id);
-                  if (b.type === 'tool_use' && b.name === 'ExitPlanMode') lrHistoryPlanIds.add(b.id);
-                }
-              }
-            }
-            const _localAsk = this.state.localAskAnswers || {};
-            // 用本 session 的派生 mergedAskAnswerMap（含 localAsk）做预判，与下面 LR 实际判定（L1675）同源。
-            // 旧版直接读 raw cache 不含 localAsk → 用户快速答题、ack 还没到时预判会误认 LR 持有 ask，
-            // 导致 messages-side 与 LR 同时 isInteractive，双 portal 进 ApprovalModal askSlot。
-            for (const b of _resp) {
-              if (b.type !== 'tool_use') continue;
-              if (b.name === 'AskUserQuestion') {
-                if (lrHistoryAskIds.has(b.id)) continue;
-                const merged = mergedAskAnswerMap[b.id];
-                if (merged && Object.keys(merged).length > 0) continue;
-                const la = _localAsk[b.id];
-                if (!la || Object.keys(la).length === 0) { lrWillOwnAsk = true; }
-              }
-              if (b.name === 'ExitPlanMode') {
-                // ChatMessage:472 ExitPlanMode 仅当 cliMode 才 isInteractive；非 cliMode 下剥夺 messages 端反而双双不可交互
-                if (!this.props.cliMode) continue;
-                if (lrHistoryPlanIds.has(b.id)) continue;
-                const approval = sessionPlanApprovalMap[b.id];
-                if (!approval || approval.status === 'pending') { lrWillOwnPlan = true; }
-              }
-            }
-          }
-        }
-      }
+      // === Last-Response ownership arbitration (single source of truth) ===
+      // ONE computeLrOwnership call decides both the pre-scan flags (lrWillOwn* →
+      // strip the messages side below, preventing the double-portal bug where
+      // messages-side ChatMessage and the LR <ChatMessage key="resp-asst"> both
+      // went interactive) AND the LR block's pending ids (respLastPending*).
+      // Uses this session's MERGED ask map (incl. local optimistic answers) and
+      // the RAW sessionPlanApprovalMap — see interactionOwnership.js header.
+      const lr = computeLrOwnership({
+        isLastSession: si === mainAgentSessions.length - 1,
+        respContent: session.response?.body?.content,
+        messages: session.messages,
+        mergedAskAnswerMap,
+        localAskAnswers: this.state.localAskAnswers || {},
+        sessionPlanApprovalMap,
+        cliMode: this.props.cliMode,
+      });
+      const lrWillOwnAsk = lr.lrWillOwnAsk;
+      const lrWillOwnPlan = lr.lrWillOwnPlan;
 
       if (sc && sc.session === session && sc.msgsLen === session.messages.length) {
         // 完全命中：session 对象不变且消息数不变 → 直接复用。
@@ -1877,22 +1811,18 @@ class ChatView extends React.Component {
         msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
         // Same modelInfo healing for the reused old segment (see FULL HIT above).
         msgs = refreshResolvedModelInfo(msgs, resolveModelInfo);
-        lastPendingAskId = result.lastPendingAskId;
-        lastPendingPlanId = result.lastPendingPlanId;
         // 增量 result 范围内若无新 pending plan/ask，但 sc 旧值仍未 resolved → 保留 sc 值，
-        // 否则会让 modal 在 streaming 间隙短暂关闭再重弹（闪烁）。
-        if (!lastPendingPlanId && sc.lastPendingPlanId) {
-          const prevPlanApproval = sessionPlanApprovalMap[sc.lastPendingPlanId];
-          if (!prevPlanApproval || prevPlanApproval.status === 'pending') {
-            lastPendingPlanId = sc.lastPendingPlanId;
-          }
-        }
-        if (!lastPendingAskId && sc.lastPendingAskId) {
-          const prevAns = mergedAskAnswerMap?.[sc.lastPendingAskId];
-          if (!prevAns || Object.keys(prevAns).length === 0) {
-            lastPendingAskId = sc.lastPendingAskId;
-          }
-        }
+        // 否则会让 modal 在 streaming 间隙短暂关闭再重弹（闪烁）。Heal logic shared
+        // via interactionOwnership.healStalePendingIds (plan checks the RAW map,
+        // ask checks the MERGED map — deliberate asymmetry).
+        ({ lastPendingAskId, lastPendingPlanId } = healStalePendingIds({
+          resultAskId: result.lastPendingAskId,
+          resultPlanId: result.lastPendingPlanId,
+          prevAskId: sc.lastPendingAskId,
+          prevPlanId: sc.lastPendingPlanId,
+          sessionPlanApprovalMap,
+          mergedAskAnswerMap,
+        }));
         // 如果 lastPendingAskId 迁移了，修补旧缓存中持有旧 id 的 ChatMessage
         if (sc.lastPendingAskId && sc.lastPendingAskId !== lastPendingAskId) {
           for (let i = 0; i < msgs.length; i++) {
@@ -2009,69 +1939,19 @@ class ChatView extends React.Component {
       if (si === mainAgentSessions.length - 1 && session.response?.body?.content) {
         const respContent = session.response.body.content;
         if (Array.isArray(respContent)) {
-          // 检查是否需要隐藏 Last Response
-          const hasInteractiveBlock = respContent.some(b =>
-            b.type === 'tool_use' && (b.name === 'AskUserQuestion' || b.name === 'ExitPlanMode')
-          );
-          const hasSuggestionMode = respContent.some(b =>
-            b.type === 'text' && typeof b.text === 'string' && b.text.includes('[SUGGESTION MODE:')
-          );
-          const shouldHide = hasSuggestionMode && !hasInteractiveBlock;
+          // All LR ownership facts (shouldHide, history sets, pending ids) come
+          // from the SAME computeLrOwnership result the pre-scan used — the two
+          // sides can no longer disagree about who owns the interaction.
+          const shouldHide = lr.shouldHide;
 
           if (!shouldHide) {
-            // 收集历史消息中所有 AskUserQuestion block ID，用于 Last Response 去重
-            const historyAskIds = new Set();
-            for (const msg of session.messages) {
-              if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-                for (const block of msg.content) {
-                  if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
-                    historyAskIds.add(block.id);
-                  }
-                }
-              }
-            }
             // Last Response 单独存储，不混入主列表
             if (session.entryTimestamp) tsItemMap[session.entryTimestamp] = allItems.length;
-            let respLastPendingAskId = null;
-            let respLastPendingPlanId = null;
-            const _localAsk = this.state.localAskAnswers || {};
-            for (const block of respContent) {
-              if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
-                // 主历史已含此 toolId → 主历史 ChatMessage 是 owner，LR 不再分配 lastPendingAskId
-                // 否则 streaming 边界双侧各自标记 isInteractive=true，会让 modal askSlot 收到双份 portal。
-                if (historyAskIds.has(block.id)) continue;
-                // 已应答（服务端 ack 写入 mergedAskAnswerMap，或本地乐观 _localAsk）→ 不视为 pending
-                // 与主历史 L924-928 对齐，防 reload 时 LR 残留已答 ask 误触发 modal
-                const merged = mergedAskAnswerMap?.[block.id];
-                if (merged && Object.keys(merged).length > 0) continue;
-                const la = _localAsk[block.id];
-                if (!la || Object.keys(la).length === 0) {
-                  respLastPendingAskId = block.id;
-                }
-              }
-              if (block.type === 'tool_use' && block.name === 'ExitPlanMode') {
-                // 与主历史 L915-921 对齐：只有 planApprovalMap 中 status='pending' 或无 entry 才算未审批
-                // 防 reload 时 LR 残留已 approved/rejected 的 ExitPlanMode 把 buildLpid 错绑成 resolved id
-                // 进而让 ApprovalModal 弹出空 body（ChatMessage isInteractive=false 不 portal）
-                const approval = sessionPlanApprovalMap[block.id];
-                if (!approval || approval.status === 'pending') {
-                  respLastPendingPlanId = block.id;
-                }
-              }
-            }
+            const respLastPendingAskId = lr.respLastPendingAskId;
+            const respLastPendingPlanId = lr.respLastPendingPlanId;
             if (respLastPendingPlanId) buildLpid = respLastPendingPlanId;
             // 收集 Last Response 中所有 AskUserQuestion 的问题文本，用于 prompt 去重
-            this._lastResponseAskQuestions = new Set();
-            for (const block of respContent) {
-              if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
-                const questions = block.input?.questions;
-                if (Array.isArray(questions)) {
-                  for (const q of questions) {
-                    if (q.question) this._lastResponseAskQuestions.add(q.question);
-                  }
-                }
-              }
-            }
+            this._lastResponseAskQuestions = collectLrAskQuestions(respContent);
             const _cachedLR = getToolResultCache(session.messages) || {};
             // 复用 forEach 顶部 hoist 的 sessionPlanApprovalMap，避免重复一次 getToolResultCache 调用 + 同源同值
             const planApprovalMap = sessionPlanApprovalMap;
@@ -2084,20 +1964,9 @@ class ChatView extends React.Component {
               : null;
             // Last Response 过滤：隐藏 tool_use 块，仅保留交互卡片（AskUserQuestion / ExitPlanMode）
             // 去重：如果 AskUserQuestion / ExitPlanMode 已在消息历史中渲染，不再在 Last Response 重复显示
-            // ExitPlanMode 这一向去重之前缺失（始终包含），与 AskUserQuestion 现在对等
-            const lrContent = respContent.filter(b =>
-              b.type !== 'tool_use'
-              || (b.name === 'AskUserQuestion' && !historyAskIds.has(b.id))
-              || (b.name === 'ExitPlanMode' && !(lrHistoryPlanIds && lrHistoryPlanIds.has(b.id)))
-            );
+            const lrContent = filterLrContent(respContent, lr.historyAskIds, lr.historyPlanIds);
             // 如果过滤后没有可见内容，不显示 Last Response 区域
-            const hasVisibleContent = lrContent.some(b => {
-              if (b.type === 'text') return typeof b.text === 'string' && b.text.trim().length > 0;
-              if (b.type === 'tool_use') return true; // AskUserQuestion / ExitPlanMode
-              if (b.type === 'thinking') return typeof b.thinking === 'string' && b.thinking.trim().length > 0;
-              return false;
-            });
-            if (!hasVisibleContent) return;
+            if (!hasVisibleLrContent(lrContent)) return;
             const entryReqIdx = session.entryTimestamp ? tsToIndex[session.entryTimestamp] : undefined;
             const entryCacheTotal = entryReqIdx != null
               ? (requestCacheTokenMap?.get(entryReqIdx) ?? 0)
@@ -2399,7 +2268,7 @@ class ChatView extends React.Component {
   _deleteCustomUltraplanExpert = (...a) => this._ultraplan.deleteExpert(...a);
 
   // 通过 TerminalWsContext 共享单条 ws,本方法接收消息派发。
-  // 注:`data` 分支不能省 — _appendPtyData → _detectPrompt 解析出的 ptyPrompt state 被多处引用
+  // 注:`data` 分支不能省 — _ptyPrompt.appendData → detectPrompt 解析出的 ptyPrompt state 被多处引用
   // (renderDangerApproval / SubAgent 兜底权限面板路由 / handlePlanFeedbackSubmit isDanger 检查 /
   //  _submitViaSequentialQueue 非 danger 类型自检 等)。合并 ws 后 ChatView 仍需要这条解析路径,
   // CPU 开销保留,但网络层 1 条 ws 是仍有收益(改前 2 条同时收同一份 PTY 流)。
@@ -2409,10 +2278,10 @@ class ChatView extends React.Component {
       if (this._askFlow.handleWsMessage(msg)) return;
       if (msg.type === 'data' || msg.type === 'data-resync') {
         // data-resync(反压恢复快照)同样喂给 prompt 检测:洪泛窗口内出现的交互
-        // prompt 仍在快照末尾,_ptyBuffer 自身 4KB 滚动封顶,无内存风险
-        this._appendPtyData(msg.data);
+        // prompt 仍在快照末尾,控制器内部 buffer 自身 4KB 滚动封顶,无内存风险
+        this._ptyPrompt.appendData(msg.data);
       } else if (msg.type === 'exit') {
-          this._clearPtyPrompt();
+          this._ptyPrompt.clearPrompt();
         } else if (msg.type === 'sdk-plan-pending') {
           // SDK mode: ExitPlanMode — show plan approval UI
           this.setState({ pendingPlanApproval: { id: msg.id, input: msg.input } });
@@ -2507,140 +2376,6 @@ class ChatView extends React.Component {
     this._askFlow.resetAskFlagsOnClose();
   };
 
-  _stripAnsi(str) {
-    return stripAnsi(str); // 单一实现迁至 utils/promptDetect.js（测试同源 import）
-  }
-
-  _appendPtyData(raw) {
-    // ANSI 序列可能被 PTY 分片从中间切断：尾部未终结的 CSI/OSC 半截暂存 carry，
-    // 并入下一片再 strip——保证 strip 始终跑在完整序列上（详见 splitTrailingAnsiCarry）
-    const [safe, carry] = splitTrailingAnsiCarry(this._ptyAnsiCarry + raw);
-    this._ptyAnsiCarry = carry;
-    const clean = this._stripAnsi(safe);
-    this._ptyBuffer += clean;
-    this._ptyDataSeq++;
-    // Keep buffer at max 4KB
-    if (this._ptyBuffer.length > 4096) {
-      this._ptyBuffer = this._ptyBuffer.slice(-4096);
-    }
-    if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
-    this._ptyDebounceTimer = setTimeout(() => this._detectPrompt(), 200);
-  }
-
-  _detectPrompt() {
-    const buf = this._ptyBuffer.trimEnd();
-
-    // Linear line-scan parser (see utils/promptDetect.js).
-    const detected = detectPromptInBuffer(buf);
-    const question = detected ? detected.question : null;
-    const options = detected ? detected.options : null;
-
-    if (question && options) {
-      // Skip false positive: file/directory path、status-bar、timing 输出（注意：过滤是
-      // 直接 return，不走下方的 dismiss 分支——与「未检出」语义不同，保持原状）
-      if (isFalsePositiveQuestion(question)) return;
-
-      const prev = this.state.ptyPrompt;
-      const prompt = { question, options };
-
-      // SubAgent permission prompt: route to ToolApprovalPanel instead of renderDangerApproval
-      // when hooks don't fire (subAgent tool calls bypass PreToolUse hooks)
-      if (isDangerousOperationPrompt(prompt) && !this.state.pendingPermission) {
-        // 免审批：子代理权限提示同样从源头放行 —— 直接选「允许」项，不弹 ToolApprovalPanel。
-        // 结构性防重入：免审批不设 pendingPermission（旧的 !pendingPermission 闸失效），仅靠
-        // handlePromptOptionClick 的 _promptSubmitting(500ms) 不足以挡住「PTY 慢回显/重绘期间
-        // 同一 prompt 被反复检测」——用 prompt 签名 + 短时窗去重，避免二次 ↓↵ 打进已变化的焦点。
-        if (this.props.autoApproveSeconds === AUTO_APPROVE_INSTANT) {
-          const sig = `${prompt.question}\x00${(prompt.options || []).map(o => o.text).join('\x01')}`;
-          const now = Date.now();
-          const dup = this._autoAllowedPtySig === sig && (now - (this._autoAllowedPtyAt || 0)) < AUTO_ALLOW_PTY_DEDUPE_MS;
-          if (!dup) {
-            this._autoAllowedPtySig = sig;
-            this._autoAllowedPtyAt = now;
-            this._permission.autoAllow({ source: 'pty', ptyPrompt: prompt });
-          }
-          return;
-        }
-        const toolInfo = parseToolInfoFromBuffer(this._ptyBuffer, question, options);
-        const id = `pty_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        this._currentPtyPrompt = prompt;
-        this.setState(state => {
-          const history = state.ptyPromptHistory.slice();
-          // Mark as 'pty-routed' (not 'active') to avoid triggering renderDangerApproval
-          history.push({ ...prompt, status: 'pty-routed', selectedNumber: null, timestamp: new Date().toISOString() });
-          if (history.length > 200) history.splice(0, history.length - 200);
-          return {
-            pendingPermission: { id, toolName: toolInfo.toolName, input: toolInfo.input, source: 'pty', ptyPrompt: prompt },
-            ptyPromptHistory: history,
-          };
-        });
-        this.scrollToBottom();
-        return;
-      }
-
-      // 同一问题只更新选项（光标移动），不重复推入历史
-      if (prev && prev.question === question) {
-        this._currentPtyPrompt = prompt;
-        this.setState({ ptyPrompt: prompt });
-      } else {
-        // 新提示：先将旧的 active 提示标记为 dismissed
-        this._currentPtyPrompt = prompt;
-        this.setState(state => {
-          const history = state.ptyPromptHistory.slice();
-          if (state.ptyPrompt) {
-            const last = history[history.length - 1];
-            if (last && last.status === 'active') {
-              history[history.length - 1] = { ...last, status: 'dismissed' };
-            }
-          }
-          const ts = new Date().toISOString();
-          const newEntry = { ...prompt, status: 'active', selectedNumber: null, timestamp: ts };
-          history.push(newEntry);
-          // Cap history to prevent unbounded growth
-          if (history.length > 200) history.splice(0, history.length - 200);
-          return { ptyPrompt: prompt, ptyPromptHistory: history };
-        });
-        this.scrollToBottom();
-      }
-      return;
-    }
-    // No match — if there was an active prompt, mark it dismissed
-    // But keep plan approval prompts and AskUserQuestion prompts active
-    if (this.state.ptyPrompt) {
-      if (isPlanApprovalPrompt(this.state.ptyPrompt)) {
-        // Don't dismiss plan approval prompts — they stay active until explicitly answered
-        return;
-      }
-      if (isDangerousOperationPrompt(this.state.ptyPrompt)) {
-        return;
-      }
-      if (this._askFlow._askSubmitting) {
-        // Don't dismiss prompts during AskUserQuestion submission（_detectPrompt 是 PTY 基建，留 ChatView，读控制器 flag）
-        return;
-      }
-      this._currentPtyPrompt = null;
-      this.setState(state => {
-        const history = state.ptyPromptHistory.slice();
-        const last = history[history.length - 1];
-        if (last && last.status === 'active') {
-          history[history.length - 1] = { ...last, status: 'dismissed' };
-        }
-        // Prompt 消失（无匹配）：无论之前是不是 plan，pendingPtyPlan 一并清空作防御。
-        return { ptyPrompt: null, ptyPromptHistory: history, pendingPtyPlan: null };
-      });
-    }
-  }
-
-  _clearPtyPrompt() {
-    this._ptyBuffer = '';
-    this._currentPtyPrompt = null;
-    this._autoAllowedPtySig = null; // 重置免审批去重签名，下一轮 PTY 提示重新判定
-    if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
-    if (this.state.ptyPrompt) {
-      this.setState({ ptyPrompt: null });
-    }
-  }
-
   // ── 「Plan 自动审批」：plan 提交后短倒计时，到点自动选中批准项；期间可取消 ──────────────
   // 倒计时跑在 ChatView（稳定单例，持有 ws / _promptSubmitting / _resolvedPlanIds 守卫与批准入口），
   // 仅把剩余秒数与取消回调下发给 inline 卡片显示。仅 cliMode(PTY) 路径，SDK 模式不接入。
@@ -2729,7 +2464,7 @@ class ChatView extends React.Component {
     sendStep(0);
 
     // 标记历史中最后一个 active 为 answered
-    this._currentPtyPrompt = null;
+    this._ptyPrompt.setCurrent(null);
     // 用户已提交本轮 plan：把当前 pendingPtyPlan.id 加入 _resolvedPlanIds，
     // 防 PTY 答案到 JSONL 之间的窗口期 CDU 把 modal 重弹（lpid 仍指向同一 id 直到 tool_result 写入 planApprovalMap）。
     if (this.state.pendingPtyPlan?.id) {
@@ -2744,8 +2479,7 @@ class ChatView extends React.Component {
       // Atomic clear of pendingPtyPlan so the global modal closes in lockstep with the inline state.
       return { ptyPrompt: null, ptyPromptHistory: history, pendingPtyPlan: null };
     });
-    this._ptyBuffer = '';
-    if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
+    this._ptyPrompt.resetBufferAfterSubmit();
     setTimeout(() => { this._promptSubmitting = false; }, 500);
   };
 
@@ -2797,11 +2531,11 @@ class ChatView extends React.Component {
         setTimeout(() => {
           ws.send(JSON.stringify({ type: 'input', data: '\r' }));
           // 轮询等待 CLI 进入文本输入模式（buffer 变化说明已响应）
-          const startBuf = this._ptyBuffer;
+          const startBuf = this._ptyPrompt.getBuffer();
           let attempts = 0;
           const poll = () => {
             attempts++;
-            if (attempts > 20 || this._ptyBuffer !== startBuf) {
+            if (attempts > 20 || this._ptyPrompt.getBuffer() !== startBuf) {
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'input', data: text }));
                 setTimeout(() => {
@@ -2818,7 +2552,7 @@ class ChatView extends React.Component {
     };
     sendStep(0);
 
-    this._currentPtyPrompt = null;
+    this._ptyPrompt.setCurrent(null);
     // 用户已提交 plan + feedback：守 modal 不被 CDU 重弹（同 handlePromptOptionClick 注释）
     if (this.state.pendingPtyPlan?.id) {
       this._resolvedPlanIds.add(this.state.pendingPtyPlan.id);
@@ -2832,8 +2566,7 @@ class ChatView extends React.Component {
       // Atomic clear of pendingPtyPlan — modal closes together with inline state.
       return { ptyPrompt: null, ptyPromptHistory: history, pendingPtyPlan: null };
     });
-    this._ptyBuffer = '';
-    if (this._ptyDebounceTimer) clearTimeout(this._ptyDebounceTimer);
+    this._ptyPrompt.resetBufferAfterSubmit();
   };
 
   // 委托 → AskFlowController（handleAskCancel 是 public 入口：bubble handlers + ChatMessage props 引用）
@@ -3021,186 +2754,9 @@ class ChatView extends React.Component {
     }
   };
 
-  handleSplitMouseDown = (e) => {
-    e.preventDefault();
-    this._resizing = true;
-    this._dragTarget = 'terminal';
+  handleSplitMouseDown = (e) => this._splitDrag.onTerminalHandleDown(e);
 
-    // 计算吸附线位置（基于终端标准列宽）
-    let snapLines = [];
-    const container = this.innerSplitRef.current;
-    if (container) {
-      const rect = container.getBoundingClientRect();
-      const containerWidth = rect.width;
-
-      // 终端字体：13px Menlo/Monaco，字符宽度约为 7.8px
-      const charWidth = 7.8;
-      // 常见终端列宽：60, 80, 100, 120
-      const terminalWidths = [60, 80, 100, 120];
-      const resizerWidth = 5; // 分隔条宽度
-
-      snapLines = terminalWidths.map(cols => {
-        const terminalPx = cols * charWidth;
-        const totalTerminalWidth = terminalPx + resizerWidth;
-
-        // 只保留合理范围内的吸附线（终端宽度不超过容器的75%，且不小于15%）
-        if (totalTerminalWidth > containerWidth * 0.75 || totalTerminalWidth < containerWidth * 0.15) return null;
-
-        // 吸附线位置 = 容器宽度 - 终端像素宽度 - 分隔条宽度
-        const linePosition = containerWidth - terminalPx - resizerWidth;
-
-        return {
-          cols,
-          terminalPx, // 终端像素宽度
-          linePosition // 吸附线显示位置
-        };
-      }).filter(snap => snap !== null);
-    }
-
-    this.setState({ isDragging: true, snapLines });
-
-    const onMouseMove = (ev) => {
-      if (!this._resizing) return;
-      const container = this.innerSplitRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      const containerWidth = rect.width;
-      // 终端宽度 = 容器右边缘 - 鼠标位置
-      let tw = rect.right - ev.clientX;
-      tw = Math.max(200, Math.min(containerWidth * 0.75, tw));
-
-      // 吸附逻辑
-      let activeSnapLine = null;
-      if (snapLines.length > 0) {
-        const snapThreshold = 60; // 60px 的吸附阈值
-        let minDistance = Infinity;
-        let closestSnap = null;
-
-        for (const snap of snapLines) {
-          const distance = Math.abs(ev.clientX - rect.left - snap.linePosition);
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestSnap = snap;
-          }
-        }
-
-        if (closestSnap && minDistance < snapThreshold) {
-          activeSnapLine = closestSnap;
-        }
-      }
-
-      this.setState({ terminalWidth: tw, activeSnapLine });
-    };
-
-    const onMouseUp = () => {
-      this._resizing = false;
-      this._dragTarget = null;
-
-      // 松开鼠标时，吸附到最近的线
-      if (this.state.activeSnapLine) {
-        const newWidth = this.state.activeSnapLine.terminalPx;
-        // 保存用户偏好到 localStorage
-        localStorage.setItem('cc-viewer-terminal-width', newWidth.toString());
-        this.setState({
-          terminalWidth: newWidth,
-          isDragging: false,
-          activeSnapLine: null,
-          snapLines: [],
-          needsInitialSnap: false
-        });
-      } else {
-        // 用户手动拖拽到非吸附位置，也保存偏好
-        localStorage.setItem('cc-viewer-terminal-width', this.state.terminalWidth.toString());
-        this.setState({
-          isDragging: false,
-          activeSnapLine: null,
-          snapLines: [],
-          needsInitialSnap: false
-        });
-      }
-
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
-
-  handleSidebarMouseDown = (e) => {
-    e.preventDefault();
-    this._resizing = true;
-    this._dragTarget = 'sidebar';
-
-    // 吸附线：180, 240, 300, 360（间距 60px）
-    const sidebarSnapWidths = [180, 240, 300, 360];
-    const container = this.innerSplitRef.current;
-    let snapLines = [];
-    if (container) {
-      const containerWidth = container.getBoundingClientRect().width;
-      snapLines = sidebarSnapWidths
-        .filter(w => w < containerWidth * 0.4)
-        .map(w => ({ cols: w, terminalPx: w, linePosition: w }));
-    }
-
-    this.setState({ isDragging: true, snapLines });
-
-    const onMouseMove = (ev) => {
-      if (!this._resizing) return;
-      const container = this.innerSplitRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      const containerWidth = rect.width;
-      let sw = ev.clientX - rect.left;
-      sw = Math.max(160, Math.min(containerWidth * 0.4, sw));
-
-      // 吸附逻辑（与终端一致，阈值 60px）
-      let activeSnapLine = null;
-      if (snapLines.length > 0) {
-        const snapThreshold = 60;
-        let minDistance = Infinity;
-        let closestSnap = null;
-        for (const snap of snapLines) {
-          const distance = Math.abs(sw - snap.linePosition);
-          if (distance < minDistance) {
-            minDistance = distance;
-            closestSnap = snap;
-          }
-        }
-        if (closestSnap && minDistance < snapThreshold) {
-          activeSnapLine = closestSnap;
-        }
-      }
-
-      this.setState({ sidebarWidth: sw, activeSnapLine });
-    };
-
-    const onMouseUp = () => {
-      this._resizing = false;
-      this._dragTarget = null;
-
-      if (this.state.activeSnapLine) {
-        const newWidth = this.state.activeSnapLine.linePosition;
-        localStorage.setItem('cc-viewer-sidebar-width', newWidth.toString());
-        this.setState({ sidebarWidth: newWidth, isDragging: false, activeSnapLine: null, snapLines: [] });
-      } else {
-        localStorage.setItem('cc-viewer-sidebar-width', this.state.sidebarWidth.toString());
-        this.setState({ isDragging: false, activeSnapLine: null, snapLines: [] });
-      }
-
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
+  handleSidebarMouseDown = (e) => this._splitDrag.onSidebarHandleDown(e);
 
   // 文件详情 scroll 快照：FileContentView 内部 onScroll throttle 后调用；写 instance ref 不触发 re-render。
   // path 守卫：throttle 100ms 内用户切文件 / unmount cleanup flush 时旧实例可能发来旧 path 的 snap，
@@ -3306,14 +2862,18 @@ class ChatView extends React.Component {
     textarea.focus();
   };
 
+  // Guarded width persistence shared by the drag-controller host and _snapToInitialPosition.
+  _persistWidth(key, px) {
+    try { localStorage.setItem(key, String(px)); } catch {}
+  }
+
   _snapToInitialPosition() {
     // 初始化时吸附到 60cols
-    const charWidth = 7.8;
     const targetCols = 60;
-    const terminalPx = targetCols * charWidth; // 468px
+    const terminalPx = targetCols * TERMINAL_CHAR_WIDTH; // 468px
 
     this.setState({ terminalWidth: terminalPx, needsInitialSnap: false });
-    localStorage.setItem('cc-viewer-terminal-width', terminalPx.toString());
+    this._persistWidth(TERMINAL_WIDTH_STORAGE_KEY, terminalPx);
   }
 
   _renderNavSidebar(showFileExplorerAndGit) {
@@ -3490,11 +3050,11 @@ class ChatView extends React.Component {
     // 计算 SnapLineOverlay 的 currentLeft（侧栏拖拽时用侧栏宽度，终端拖拽时用终端位置）
     let snapCurrentLeft = 0;
     if (this.state.isDragging) {
-      if (this._dragTarget === 'sidebar') {
+      if (this._splitDrag.dragTarget() === 'sidebar') {
         snapCurrentLeft = sidebarWidth;
-      } else if (this._dragTarget === 'terminal') {
+      } else if (this._splitDrag.dragTarget() === 'terminal') {
         const c = this.innerSplitRef.current;
-        if (c) snapCurrentLeft = c.getBoundingClientRect().width - terminalWidth - 5;
+        if (c) snapCurrentLeft = c.getBoundingClientRect().width - terminalWidth - RESIZER_WIDTH_PX;
       }
     }
 

@@ -9,62 +9,26 @@
  * 把 messages-side 的 lastPendingAskId / lastPendingPlanId 清空（cloneElement 同手法）。
  * 同时补全 lrContent 过滤的 ExitPlanMode 去重（之前只有 AskUserQuestion 一向去重）。
  *
- * 内联简化版 ChatView mainAgentSessions.forEach 内的预判 + 剥夺核心逻辑，避免引入 React 渲染依赖。
+ * This file used to pin a hand-copied INLINE CLONE of ChatView's pre-scan; the
+ * logic now lives in src/components/chat/interactionOwnership.js and is
+ * imported directly — the clone (and its drift risk) is gone.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { computeLrOwnership, filterLrContent } from '../src/components/chat/interactionOwnership.js';
 
-// ─── 内联：ChatView 预判 lrWillOwnAsk / lrWillOwnPlan ──────────────────────
-
+// Thin adapter keeping the original test-case call shape.
 function predictLrOwnership({ messages, respContent, mergedAskAnswerMap = {}, localAskAnswers = {}, planApprovalMap = {}, cliMode = true, isLastSession = true }) {
-  const out = { lrWillOwnAsk: false, lrWillOwnPlan: false, lrHistoryAskIds: null, lrHistoryPlanIds: null };
-  if (!isLastSession || !Array.isArray(respContent)) return out;
-  const hasInteractive = respContent.some(b =>
-    b.type === 'tool_use' && (b.name === 'AskUserQuestion' || b.name === 'ExitPlanMode')
-  );
-  const hasSuggestion = respContent.some(b =>
-    b.type === 'text' && typeof b.text === 'string' && b.text.includes('[SUGGESTION MODE:')
-  );
-  const shouldHide = hasSuggestion && !hasInteractive;
-  if (shouldHide || !hasInteractive) return out;
-
-  out.lrHistoryAskIds = new Set();
-  out.lrHistoryPlanIds = new Set();
-  for (const m of messages) {
-    if (m.role === 'assistant' && Array.isArray(m.content)) {
-      for (const b of m.content) {
-        if (b.type === 'tool_use' && b.name === 'AskUserQuestion') out.lrHistoryAskIds.add(b.id);
-        if (b.type === 'tool_use' && b.name === 'ExitPlanMode') out.lrHistoryPlanIds.add(b.id);
-      }
-    }
-  }
-  for (const b of respContent) {
-    if (b.type !== 'tool_use') continue;
-    if (b.name === 'AskUserQuestion') {
-      if (out.lrHistoryAskIds.has(b.id)) continue;
-      const merged = mergedAskAnswerMap[b.id];
-      if (merged && Object.keys(merged).length > 0) continue;
-      const la = localAskAnswers[b.id];
-      if (!la || Object.keys(la).length === 0) out.lrWillOwnAsk = true;
-    }
-    if (b.name === 'ExitPlanMode') {
-      if (!cliMode) continue;
-      if (out.lrHistoryPlanIds.has(b.id)) continue;
-      const approval = planApprovalMap[b.id];
-      if (!approval || approval.status === 'pending') out.lrWillOwnPlan = true;
-    }
-  }
-  return out;
-}
-
-// 内联：lrContent 过滤
-function filterLrContent({ respContent, lrHistoryAskIds, lrHistoryPlanIds }) {
-  const _hAsk = lrHistoryAskIds || new Set();
-  return respContent.filter(b =>
-    b.type !== 'tool_use'
-    || (b.name === 'AskUserQuestion' && !_hAsk.has(b.id))
-    || (b.name === 'ExitPlanMode' && !(lrHistoryPlanIds && lrHistoryPlanIds.has(b.id)))
-  );
+  const lr = computeLrOwnership({
+    isLastSession,
+    respContent,
+    messages,
+    mergedAskAnswerMap,
+    localAskAnswers,
+    sessionPlanApprovalMap: planApprovalMap,
+    cliMode,
+  });
+  return { lrWillOwnAsk: lr.lrWillOwnAsk, lrWillOwnPlan: lr.lrWillOwnPlan, lrHistoryAskIds: lr.historyAskIds, lrHistoryPlanIds: lr.historyPlanIds };
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────
@@ -97,7 +61,7 @@ describe('LR / messages 双卡去重', () => {
     const r = predictLrOwnership({ messages, respContent });
     assert.equal(r.lrWillOwnAsk, false);
     // lrContent 也应过滤掉
-    const filtered = filterLrContent({ respContent, lrHistoryAskIds: r.lrHistoryAskIds, lrHistoryPlanIds: r.lrHistoryPlanIds });
+    const filtered = filterLrContent(respContent, r.lrHistoryAskIds, r.lrHistoryPlanIds);
     assert.equal(filtered.length, 0);
   });
 
@@ -142,7 +106,7 @@ describe('LR / messages 双卡去重', () => {
       { type: 'tool_use', id: 'plan_Y', name: 'ExitPlanMode', input: { plan: 'p' } },
     ];
     const r = predictLrOwnership({ messages, respContent, cliMode: true });
-    const filtered = filterLrContent({ respContent, lrHistoryAskIds: r.lrHistoryAskIds, lrHistoryPlanIds: r.lrHistoryPlanIds });
+    const filtered = filterLrContent(respContent, r.lrHistoryAskIds, r.lrHistoryPlanIds);
     assert.equal(filtered.length, 0);
   });
 
