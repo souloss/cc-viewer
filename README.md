@@ -160,13 +160,9 @@ The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
 * Each request inlines Token usage stats (input/output tokens, cache creation/read, hit rate)
 * Compatible with Claude Code Router (CCR) and other proxy scenarios — falls back to matching requests by API path pattern
 
-<a href="https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
- </picture>
-</a>
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left)](https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left)
 
 ## License
 
