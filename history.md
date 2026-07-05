@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- fix(chat): repaired a crash introduced by the decomposition tranche below — `buildAllItems`'s Last Response `<ChatMessage key="resp-asst">` still referenced `_localAsk`, a variable that was renamed to `_localAskForSession` in that scope during the extraction (`_localAsk` only exists inside `renderSessionMessages`), so any transcript reaching the Last Response block threw `ReferenceError: _localAsk is not defined` on every render pass
 - refactor(chat): ChatView decomposition, first tranche set (4,144 → 3,699 lines, −445) — behavior-preserving extractions following the established host-adapter controller pattern, each shipped with unit tests, sequenced ascending-risk:
   - **merge**: the two byte-identical ~40-prop assistant `<ChatMessage>` blocks in `renderSessionMessages` (array-content vs string-content branches) collapse to one block over a normalized `asstContent`
   - **`SplitDragController`** (`chat/controllers/splitDragController.js`) + pure `utils/splitDragCalc.js`: terminal/sidebar drag-resize lifecycle (document listeners, body cursor, restored on mouseup AND dispose so an unmount mid-drag can't strand `col-resize`) with all snap/clamp geometry unit-tested (`test/split-drag-calc.test.js`, 11 cases) and the drag lifecycle covered with a stubbed document (`test/split-drag-controller.test.js`, 6 cases: listener add/teardown, cursor restore on mouseup AND dispose-mid-drag, both persistence branches, missing-rect no-op); `_snapToInitialPosition` shares the exported `TERMINAL_CHAR_WIDTH`
