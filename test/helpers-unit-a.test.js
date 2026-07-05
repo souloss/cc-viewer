@@ -16,7 +16,7 @@
  * （通过 loader 加载），构造满足 isMainAgent 的最小 request 对象。
  */
 import './_shims/register.mjs';
-import { describe, it, before } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 let H;
@@ -583,5 +583,136 @@ describe('appendCacheLossMap / buildCacheLossMap', () => {
     ];
     const map = H.buildCacheLossMap(reqs);
     assert.deepEqual([...map.keys()], [1]);
+  });
+});
+
+describe('readCalibrationModel', () => {
+  const MODELS = [{ value: 'auto' }, { value: '1m' }, { value: '200k' }];
+  // Save/stub/restore discipline for globalThis.localStorage — same pattern as
+  // branch-utils-projectAlias.test.js / entry-cache.test.js.
+  let savedLocalStorage;
+  let hadLocalStorage;
+  before(() => {
+    hadLocalStorage = 'localStorage' in globalThis;
+    savedLocalStorage = globalThis.localStorage;
+  });
+  after(() => {
+    if (hadLocalStorage) globalThis.localStorage = savedLocalStorage;
+    else delete globalThis.localStorage;
+  });
+  const stub = (value) => { globalThis.localStorage = { getItem: () => value }; };
+
+  it('migrates pre-1.6.243 per-model values to size buckets', () => {
+    stub('opus-4.7-1m');
+    assert.equal(H.readCalibrationModel(MODELS), '1m');
+    stub('sonnet-4.6');
+    assert.equal(H.readCalibrationModel(MODELS), '200k');
+  });
+
+  it('passes through values already in the configured list', () => {
+    stub('200k');
+    assert.equal(H.readCalibrationModel(MODELS), '200k');
+    stub('auto');
+    assert.equal(H.readCalibrationModel(MODELS), 'auto');
+  });
+
+  it('falls back to auto for unknown values and missing keys', () => {
+    stub('some-retired-model');
+    assert.equal(H.readCalibrationModel(MODELS), 'auto');
+    stub(null);
+    assert.equal(H.readCalibrationModel(MODELS), 'auto');
+  });
+
+  it('is safe without localStorage (non-browser env) and with a throwing storage', () => {
+    delete globalThis.localStorage;
+    assert.equal(H.readCalibrationModel(MODELS), 'auto');
+    globalThis.localStorage = { getItem: () => { throw new Error('denied'); } };
+    assert.equal(H.readCalibrationModel(MODELS), 'auto');
+  });
+});
+
+describe('computeContextPercent', () => {
+  // Requests built via mainReq({ body: { model } }) so getEffectiveModel resolves.
+
+  it('honors a pinned 200k / 1m calibration as the denominator', () => {
+    const agent = mainReq({ body: { model: 'claude-fable-5' } });
+    assert.equal(H.computeContextPercent({
+      calibrationModel: '200k', lastMainAgent: agent, contextWindow: null,
+      lastTotalTokens: 100000, lastInputTokens: 90000,
+    }), 50);
+    assert.equal(H.computeContextPercent({
+      calibrationModel: '1m', lastMainAgent: agent, contextWindow: null,
+      lastTotalTokens: 100000, lastInputTokens: 90000,
+    }), 10);
+  });
+
+  it('auto mode classifies the window from the last main-agent model', () => {
+    // sonnet → 200K bucket, fable-5 → 1M bucket (context-rules.classifyContextWindow)
+    assert.equal(H.computeContextPercent({
+      calibrationModel: 'auto',
+      lastMainAgent: mainReq({ body: { model: 'claude-sonnet-4-5' } }),
+      contextWindow: null, lastTotalTokens: 100000, lastInputTokens: 90000,
+    }), 50);
+    assert.equal(H.computeContextPercent({
+      calibrationModel: 'auto',
+      lastMainAgent: mainReq({ body: { model: 'claude-fable-5' } }),
+      contextWindow: null, lastTotalTokens: 100000, lastInputTokens: 90000,
+    }), 10);
+  });
+
+  it('rescales server used_percentage onto the calibrated window when no usage tokens exist', () => {
+    // The mobile-drift repro: mobile used to show round(used_percentage) raw (50);
+    // the shared math rebases 50% of a 200K server window onto the 1M calibration → 10.
+    assert.equal(H.computeContextPercent({
+      calibrationModel: '1m', lastMainAgent: null,
+      contextWindow: { used_percentage: 50, context_window_size: 200000 },
+      lastTotalTokens: 0, lastInputTokens: 0,
+    }), 10);
+  });
+
+  it('prefers direct usage tokens over used_percentage when both exist', () => {
+    assert.equal(H.computeContextPercent({
+      calibrationModel: '1m',
+      lastMainAgent: mainReq({ body: { model: 'claude-fable-5' } }),
+      contextWindow: { used_percentage: 99, context_window_size: 200000 },
+      lastTotalTokens: 500000, lastInputTokens: 400000,
+    }), 50);
+  });
+
+  it('adaptive correction: input beyond 200K upgrades an auto-classified 200K window to 1M', () => {
+    assert.equal(H.computeContextPercent({
+      calibrationModel: 'auto',
+      lastMainAgent: mainReq({ body: { model: 'claude-sonnet-4-5' } }), // 200K bucket
+      contextWindow: null,
+      lastTotalTokens: 300000, lastInputTokens: 250000, // demonstrably >200K of input
+    }), 30);
+  });
+
+  it('adaptive correction falls back to contextWindow.total_input_tokens when no per-request input tokens exist', () => {
+    // Live SSE-only case: no usage on the last main agent yet, but the server
+    // event carries total_input_tokens > 200K → the 200K classification upgrades
+    // to 1M and used_percentage is rebased onto it (50% of a 200K window → 10%).
+    assert.equal(H.computeContextPercent({
+      calibrationModel: 'auto',
+      lastMainAgent: mainReq({ body: { model: 'claude-sonnet-4-5' } }), // 200K bucket
+      contextWindow: { used_percentage: 50, context_window_size: 200000, total_input_tokens: 250000 },
+      lastTotalTokens: 0, lastInputTokens: 0,
+    }), 10);
+  });
+
+  it('pinned 200k skips adaptive correction and clamps at 100', () => {
+    assert.equal(H.computeContextPercent({
+      calibrationModel: '200k',
+      lastMainAgent: mainReq({ body: { model: 'claude-sonnet-4-5' } }),
+      contextWindow: null,
+      lastTotalTokens: 250000, lastInputTokens: 250000,
+    }), 100);
+  });
+
+  it('returns 0 with no usable signal', () => {
+    assert.equal(H.computeContextPercent({
+      calibrationModel: 'auto', lastMainAgent: null, contextWindow: null,
+      lastTotalTokens: 0, lastInputTokens: 0,
+    }), 0);
   });
 });

@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Popover, Select, Button, Alert, Modal, Tooltip, Dropdown, Space, message } from 'antd';
 import { ReloadOutlined, PlusOutlined, FolderOpenOutlined, FileZipOutlined, FileMarkdownOutlined, SettingOutlined } from '@ant-design/icons';
 import { extractCachedContent, parseCachedTools, extractLoadedSkills } from '../../utils/helpers';
+import { contextSeverityColor } from '../../utils/formatters';
 import { BUILTIN_SKILL_NAMES, mergeActiveSkills } from '../../utils/skillsParser';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
@@ -389,7 +390,9 @@ export default function CachePopoverContent({
     );
   })();
 
-  const ctxColor = contextPercent >= 80 ? 'var(--color-error-light)' : contextPercent >= 60 ? 'var(--color-warning-light)' : 'var(--color-success)';
+  // Shared thresholds (75/55) — this chip previously used 80/60 and could
+  // disagree in color with the header bar feeding it the same percentage.
+  const ctxColor = contextSeverityColor(contextPercent);
   const cacheUsageText = contextTokens > 0
     ? `${(contextTokens / 1000).toFixed(1)}K (${contextPercent}%)`
     : `${contextPercent}%`;

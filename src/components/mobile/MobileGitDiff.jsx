@@ -187,10 +187,10 @@ export default function MobileGitDiff({ visible, onClose }) {
           )}
         </div>
         <div className={styles.changesContainer}>
-          {loading && <div className={styles.statusText}>Loading...</div>}
+          {loading && <div className={styles.statusText}>{t('ui.loading')}</div>}
           {error && <div className={styles.errorText}>{error}</div>}
           {!loading && !error && (!repos || repos.length === 0) && (
-            <div className={styles.emptyText}>No changes</div>
+            <div className={styles.emptyText}>{t('ui.gitChanges.noChanges')}</div>
           )}
           {!loading && !error && repos && repos.map(repo => {
             const collapsed = collapsedRepos.has(repo.path);

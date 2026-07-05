@@ -400,7 +400,7 @@ function TreeNode({ item, path, depth, onFileClick, expandedPaths, onToggleExpan
         const inputId = `ccv-newfile-${Date.now()}`;
         Modal.confirm({
           title: t('ui.contextMenu.newFile'),
-          content: <Input id={inputId} autoFocus placeholder="filename.ext" style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
+          content: <Input id={inputId} autoFocus placeholder={t('ui.contextMenu.newFilePlaceholder')} style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
           okText: t('ui.contextMenu.newFile'),
           // 失败 throw → antd Modal.confirm 保住弹窗供重试；message.error 显式提示，避免静默关闭误以为成功（同 #84 模式）。
           onOk: async () => {
@@ -430,7 +430,7 @@ function TreeNode({ item, path, depth, onFileClick, expandedPaths, onToggleExpan
         const inputId = `ccv-newdir-${Date.now()}`;
         Modal.confirm({
           title: t('ui.contextMenu.newDir'),
-          content: <Input id={inputId} autoFocus placeholder="folder-name" style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
+          content: <Input id={inputId} autoFocus placeholder={t('ui.contextMenu.newDirPlaceholder')} style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
           okText: t('ui.contextMenu.newDir'),
           onOk: async () => {
             const input = document.getElementById(inputId);
@@ -605,7 +605,7 @@ export default function FileExplorer({ style, onClose, onFileClick, expandedPath
         const inputId = `ccv-newfile-root-${Date.now()}`;
         Modal.confirm({
           title: t('ui.contextMenu.newFile'),
-          content: <Input id={inputId} autoFocus placeholder="filename.ext" style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
+          content: <Input id={inputId} autoFocus placeholder={t('ui.contextMenu.newFilePlaceholder')} style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
           okText: t('ui.contextMenu.newFile'),
           // 失败 throw → antd Modal.confirm 保住弹窗供重试（同 #84 模式）。
           onOk: async () => {
@@ -635,7 +635,7 @@ export default function FileExplorer({ style, onClose, onFileClick, expandedPath
         const inputId = `ccv-newdir-root-${Date.now()}`;
         Modal.confirm({
           title: t('ui.contextMenu.newDir'),
-          content: <Input id={inputId} autoFocus placeholder="folder-name" style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
+          content: <Input id={inputId} autoFocus placeholder={t('ui.contextMenu.newDirPlaceholder')} style={{ background: 'var(--bg-container)', borderColor: 'var(--border-primary)', color: 'var(--text-secondary)', caretColor: 'var(--text-secondary)' }} onPressEnter={() => { document.querySelector('.ant-modal-confirm-btns .ant-btn-primary')?.click(); }} />,
           okText: t('ui.contextMenu.newDir'),
           onOk: async () => {
             const input = document.getElementById(inputId);
@@ -896,7 +896,7 @@ export default function FileExplorer({ style, onClose, onFileClick, expandedPath
       </div>
       <div className={styles.treeContainer}>
         {error && <div className={styles.error}>{error}</div>}
-        {!items && !error && <div className={styles.loading}>Loading...</div>}
+        {!items && !error && <div className={styles.loading}>{t('ui.loading')}</div>}
         {items && items.map(item => (
           <TreeNode key={item.name} item={item} path="" depth={0} onFileClick={onFileClick} expandedPaths={expandedPaths} onToggleExpand={onToggleExpand} currentFile={currentFile} onFileRenamed={onFileRenamed} refreshTrigger={refreshTrigger} onHtmlPreview={setHtmlPreviewPath} onAttachToChat={onAttachToChat} onInsertPathToChat={onInsertPathToChat} onImportFiles={importFiles} />
         ))}

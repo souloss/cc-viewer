@@ -7,3 +7,4 @@ When adding node_modules dependencies, be sure to distinguish between devDepende
 When submitting code to GitHub or npm, always consult the user. Unless the user explicitly prompts you to submit, you should always ask the user before submitting. Don't auto-commit/push/publish — always ask first
 Do not increment the version number arbitrarily; you should only update it when running `npm publish`.
 Use English for all code comments, commit messages, and inline documentation — avoid mixing languages in the same codebase.
+Swallowed catch blocks with diagnostic value (SSE/WS event parsing, entry ingest, state updates, fetch handling — anything where a throw means lost data or broken UI) must call `reportSwallowed(tag, err)` from `src/utils/errorReport.js` instead of silently swallowing; purely-benign best-effort guards (localStorage, tabBridge IPC, revokeObjectURL, listener cleanup) stay bare `catch {}`.

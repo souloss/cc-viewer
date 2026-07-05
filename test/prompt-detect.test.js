@@ -5,8 +5,9 @@
  *   1. 对抗样本 —— 旧正则灾难性回溯的复现 corpus（/plugins 菜单形态：
  *      问号行 + N 行编号插件含版本号 + 数字开头失配尾行），旧实现 4 行 84ms /
  *      6 行 2.2s / 8 行 >90s（指数），新实现断言任意规模 <50ms 且结果为 null。
- *   2. 新旧等价 —— 在「旧实现能在合理时间内跑完」的样本上，逐字段对比
- *      detectPromptInBuffer 与 detectPromptLegacy 的输出。
+ *   2. Golden-master corpus —— expected outputs baked from the final
+ *      linear-vs-legacy equivalence run (both implementations agreed on all
+ *      samples) right before detectPromptLegacy was deleted.
  *   3. 协同契约 —— detect 输出喂 parseToolInfoFromBuffer（Bash 命令块），
  *      保障 ToolApprovalPanel 路由不受重写影响。
  *
@@ -19,7 +20,6 @@ import {
   stripAnsi,
   splitTrailingAnsiCarry,
   detectPromptInBuffer,
-  detectPromptLegacy,
   isFalsePositiveQuestion,
   getPromptDetectStats,
 } from '../src/utils/promptDetect.js';
@@ -92,9 +92,13 @@ describe('promptDetect adversarial corpus (catastrophic backtracking regression)
   });
 });
 
-describe('promptDetect equivalence with legacy regex (on fast-terminating samples)', () => {
+describe('promptDetect golden-master corpus (baked from the legacy-equivalence run)', () => {
 
-  // 旧实现能秒回的样本：新旧输出必须逐字段一致
+  // Behavioral regression corpus: EXPECTED values were exported from the final
+  // linear-vs-legacy equivalence run (both implementations agreed on every
+  // sample) before detectPromptLegacy was deleted; detectPromptInBuffer's
+  // output is pinned to these goldens from here on.
+  const opt = (number, text, selected) => ({ number, text, selected });
   const EQUIV_SAMPLES = [
     // Pattern 1 编号 + 光标
     'Do you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend · ctrl+e to explain',
@@ -139,15 +143,45 @@ describe('promptDetect equivalence with legacy regex (on fast-terminating sample
     stripAnsi('\x1b[1m\x1b[33mDo you want to make this edit to\x1b[0m \x1b[1msrc/index.js\x1b[0m\x1b[33m?\x1b[0m\n  \x1b[36m❯\x1b[0m \x1b[36mYes\x1b[0m\n    Yes, allow all edits during this session (shift+tab)\n    No\n'),
   ];
 
-  it('detectPromptInBuffer matches detectPromptLegacy field-by-field', () => {
-    for (const sample of EQUIV_SAMPLES) {
-      const legacy = detectPromptLegacy(sample);
+  // Index-aligned with EQUIV_SAMPLES.
+  const EXPECTED = [
+    { question: 'Do you want to proceed?', options: [opt(1, 'Yes', true), opt(2, 'No', false)] },
+    { question: 'Do you want to approve this plan?', options: [opt(1, 'Approve', true), opt(2, 'Approve with edits', false), opt(3, 'Reject', false)] },
+    { question: 'Would you like to proceed?', options: [opt(1, 'Approve', true), opt(2, 'Approve with edits', false), opt(3, 'Reject', false)] },
+    { question: 'Pick one?', options: [opt(1, 'First', true), opt(2, 'Second', false)] },
+    { question: 'Trailing spaces?', options: [opt(1, 'A', true), opt(2, 'B', false)] },
+    { question: 'Do you want to make this edit to src/components/App.jsx?', options: [opt(1, 'Yes', true), opt(2, 'Yes, allow all edits during this session (shift+tab)', false), opt(3, 'No', false)] },
+    { question: 'Tool requires permission', options: [opt(1, 'Allow once', true), opt(2, 'Allow for this session', false), opt(3, 'Deny', false)] },
+    { question: 'Claude wants to execute the following bash command', options: [opt(1, 'Yes', true), opt(2, 'Yes, always allow', false), opt(3, 'No', false)] },
+    { question: 'Do you want to make this edit to app.js?', options: [opt(1, 'Yes', false), opt(2, 'Yes, allow all edits during this session (shift+tab)', true), opt(3, 'No', false)] },
+    { question: 'Do you want to make this edit to foo.js?', options: [opt(1, 'Yes', false), opt(2, 'Yes, allow all edits during this session (shift+tab)', false), opt(3, 'No', true)] },
+    { question: 'Do you want to make this edit to test.js?', options: [opt(1, 'Yes', true), opt(2, 'Yes, allow all edits during this session (shift+tab)', false), opt(3, 'No', false)] },
+    { question: 'Old menu?', options: [opt(1, 'Stale A', true), opt(2, 'Stale B', false)] },
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    { question: 'Do you want to proceed?', options: [opt(1, 'Yes', true), opt(2, 'No', false)] },
+    { question: 'Do you want to approve this plan?', options: [opt(1, 'Approve', true), opt(2, 'Approve with edits', false), opt(3, 'Reject', false)] },
+    { question: 'Do you want to make this edit to app.js?', options: [opt(1, 'Yes', true), opt(2, 'Yes, allow all edits during this session (shift+tab)', false), opt(3, 'No', false)] },
+    { question: 'Tool requires permission', options: [opt(1, 'Allow once', true), opt(2, 'Allow for this session', false), opt(3, 'Deny', false)] },
+    { question: 'Do you want to make this edit to src/组件/App.jsx?', options: [opt(1, 'Yes', true), opt(2, 'Yes, allow all edits during this session', false), opt(3, 'No', false)] },
+    { question: 'Do you want to make this edit to src/index.js?', options: [opt(1, 'Yes', true), opt(2, 'Yes, allow all edits during this session (shift+tab)', false), opt(3, 'No', false)] },
+  ];
+
+  it('detectPromptInBuffer matches the golden-master outputs field-by-field', () => {
+    assert.strictEqual(EQUIV_SAMPLES.length, EXPECTED.length, 'corpus and goldens are index-aligned');
+    EQUIV_SAMPLES.forEach((sample, i) => {
       const linear = detectPromptInBuffer(sample);
       assert.deepStrictEqual(
-        linear, legacy,
-        `Mismatch on sample:\n---\n${sample}\n---\nlegacy=${JSON.stringify(legacy)}\nlinear=${JSON.stringify(linear)}`
+        linear, EXPECTED[i],
+        `Mismatch on sample #${i}:\n---\n${sample}\n---\nexpected=${JSON.stringify(EXPECTED[i])}\nactual=${JSON.stringify(linear)}`
       );
-    }
+    });
   });
 
   it('CRLF samples actually detect (regression guard: not just both-null equivalence)', () => {

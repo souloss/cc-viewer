@@ -7,7 +7,8 @@ import { isMainAgent, classifyUserContent, extractDisplayText } from './utils/co
 import { parseImOrigin } from './utils/imOrigin';
 import { sortSkillsDefault } from './utils/skillsParser';
 import { handleSkillToggle, handleSkillDelete } from './utils/skillModalController';
-import { getModelMaxTokens, getEffectiveModel, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens } from './utils/helpers';
+import { getEffectiveModel, readCalibrationModel, computeContextPercent, sumUsageInputTokens, sumUsageContextTokens } from './utils/helpers';
+import { contextSeverityColor } from './utils/formatters';
 import { PERM_AUTO_APPROVE_OPTIONS, PLAN_AUTO_APPROVE_OPTIONS, autoApproveSelectOptions } from './utils/autoApproveOptions';
 import ChatView from './components/chat/ChatView';
 import TerminalPanel from './components/terminal/TerminalPanel';
@@ -82,7 +83,9 @@ class Mobile extends AppBase {
       proxyModalVisible: false,
       // 与 AppHeader._skillsModal 同结构；toggling 用 Set 跟踪正在切换的 skill key。
       _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
-      calibrationModel: (v => CALIBRATION_MODELS.some(m => m.value === v) ? v : 'auto')(localStorage.getItem('ccv_calibrationModel') || 'auto'),
+      // Shared reader applies the legacy-value migration exactly like AppHeader
+      // (mobile previously skipped migration and silently degraded to 'auto').
+      calibrationModel: readCalibrationModel(CALIBRATION_MODELS),
     });
     this._lastContextPercent = 0;
     this._fsSkillsSeq = 0;
@@ -558,17 +561,18 @@ class Mobile extends AppBase {
           }
         }
       }
-      if (contextWindow?.used_percentage != null) {
-        // 服务端 used_percentage 本就是原始占用比(含 output、已纠偏),直接用
-        mobileContextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage)));
-      } else if (lastMainAgent) {
-        // 自适应纠偏:判成 200K 但真实输入用量已越过整窗 → 升 1M(详见 context-rules.adaptContextWindow)。
-        const maxTokens = adaptContextWindow(
-          contextWindow?.context_window_size || getModelMaxTokens(getEffectiveModel(lastMainAgent) || this.state.settingsModel),
-          mobileInputTokens,
-        );
-        if (maxTokens > 0 && mobileContextTokens > 0) mobileContextPercent = Math.min(100, Math.max(0, Math.round(mobileContextTokens / maxTokens * 100)));
-      }
+      // Calibration + percent math shared with the desktop header via
+      // utils/helpers.computeContextPercent — mobile now honors the user's
+      // calibration choice and rescales the server's used_percentage the same
+      // way AppHeader does (it previously trusted used_percentage raw).
+      mobileContextPercent = computeContextPercent({
+        calibrationModel: this.state.calibrationModel,
+        lastMainAgent,
+        projectModelHint: this.state.claudeProjectModel,
+        contextWindow,
+        lastTotalTokens: mobileContextTokens,
+        lastInputTokens: mobileInputTokens,
+      });
       // /clear 后 contextBarLocked 强制血条 0K (0%)，直到用户发出非 /clear 消息（详见 AppBase）。
       if (this.state.contextBarLocked) {
         this._lastContextPercent = 0;
@@ -625,8 +629,7 @@ class Mobile extends AppBase {
             {!mobileIsLocalLog ? (() => {
               // 移动端（含 iPad）：渲染与 PC 一致的上下文血条。contextPercent 已在 render 顶部计算。
               const contextPercent = mobileContextPercent;
-              // 阈值 75/55:原始占用比口径下保留与 auto-compact 触发点(~83.5%)的体感缓冲
-              const ctxColor = contextPercent >= 75 ? 'var(--color-error-light)' : contextPercent >= 55 ? 'var(--color-warning-light)' : 'var(--color-success)';
+              const ctxColor = contextSeverityColor(contextPercent);
               const ctxLabel = `${t('ui.liveMonitoring')}${this.state.projectName ? `: ${this.state.projectName}` : ''}`;
               // ctxLabel is also used in `title` (PC hover tooltip). Alias is
               // only rendered in the VISIBLE content via MobileCtxLabelText

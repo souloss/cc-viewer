@@ -33,3 +33,5 @@ CC_APPEND_SYSTEM.md
 # Claude Code decompiled artifacts (main JS bundle extracted from official bun --compile binary, reference only, kept out of repo)
 claude-code-*.cli.js
 system_prompt/
+# Working analysis documents (session artifacts, not deliverables)
+code-rot-analysis.md

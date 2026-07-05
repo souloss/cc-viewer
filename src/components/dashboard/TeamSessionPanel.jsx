@@ -520,7 +520,7 @@ function TeamModal({ session, requests, mainAgentSessions, collapseToolResults, 
                   const texts = (msg.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
                   if (!texts.trim()) return null;
                   return <div key={mi} className={`${styles.teamAgentPopMsg} chat-md`} dangerouslySetInnerHTML={{ __html: renderMarkdown(texts.length > 2000 ? texts.slice(0, 2000) + '\n\n...' : texts) }} />;
-                }) : <div className={styles.agentNoMessages}>No messages</div>}
+                }) : <div className={styles.agentNoMessages}>{t('ui.teamSession.noMessages')}</div>}
               </div>
             );
             return (

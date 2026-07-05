@@ -19,7 +19,8 @@ import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../../ut
 import { playEvent as playVoiceEvent } from '../../utils/voicePackPlayer';
 import { buildChunksForAnswer, buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../../utils/ptyChunkBuilder';
 import { isPlanApprovalPrompt, isDangerousOperationPrompt, parseToolInfoFromBuffer, pickPlanApproveOptionNumber } from '../../utils/promptClassifier';
-import { stripAnsi, splitTrailingAnsiCarry, detectPromptInBuffer, detectPromptLegacy, isFalsePositiveQuestion } from '../../utils/promptDetect';
+import { stripAnsi, splitTrailingAnsiCarry, detectPromptInBuffer, isFalsePositiveQuestion } from '../../utils/promptDetect';
+import { reportSwallowed } from '../../utils/errorReport';
 import { isImageFile } from '../../utils/commandValidator';
 import { loadExpandedPaths, saveExpandedPaths } from '../../utils/fileExpandedPathsStorage';
 import { createEmptyToolState, appendToolResultMap, cachedBuildToolResultMap, getToolResultCache, setToolResultCache, buildSubAgentResultMap, createEmptyGlobalIndexState, appendToGlobalToolResultIndex } from '../../utils/toolResultBuilder';
@@ -2470,7 +2471,7 @@ class ChatView extends React.Component {
             });
           }
         }
-    } catch {}
+    } catch (e) { reportSwallowed('ws.terminal-msg', e, { msgType: msg?.type }); }
   };
 
   // ws 状态变更监听:close 时清残留审批面板(原 _inputWs.onclose 行为);Provider 内部已自动 2s 重连。
@@ -2529,11 +2530,8 @@ class ChatView extends React.Component {
   _detectPrompt() {
     const buf = this._ptyBuffer.trimEnd();
 
-    // 线性行式解析器（根治旧多行正则的灾难性回溯卡死，详见 utils/promptDetect.js）；
-    // ccv_legacy_prompt_detect=1 为旧实现逃生开关（漏检兜底，自担卡死风险）
-    let useLegacy = false;
-    try { useLegacy = localStorage.getItem('ccv_legacy_prompt_detect') === '1'; } catch {}
-    const detected = useLegacy ? detectPromptLegacy(buf) : detectPromptInBuffer(buf);
+    // Linear line-scan parser (see utils/promptDetect.js).
+    const detected = detectPromptInBuffer(buf);
     const question = detected ? detected.question : null;
     const options = detected ? detected.options : null;
 

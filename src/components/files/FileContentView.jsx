@@ -166,21 +166,25 @@ const editorTheme = EditorView.theme({
     borderColor: 'var(--color-primary)',
     boxShadow: '0 0 0 2px var(--color-primary-bg-light)',
   },
-  // 覆盖 CodeMirror 基础主题的 .cm-textfield
-  '.cm-textfield': {
+  // Overrides for CodeMirror's base-theme .cm-textfield/.cm-button. The base
+  // theme's light/dark rules compile to the same (0,2,0) specificity as plain
+  // theme selectors, so ties resolve by fragile stylesheet mount order. The
+  // `&.cm-editor ` prefix compiles to `.ͼx.cm-editor …` (0,3,0), beating every
+  // base rule deterministically — no `!important` needed.
+  '&.cm-editor .cm-textfield': {
     height: '26px',
     padding: '2px 11px',
     fontSize: '100%',
-    color: 'var(--text-primary) !important',
-    backgroundColor: 'var(--bg-elevated) !important',
-    border: '1px solid var(--border-light) !important',
+    color: 'var(--text-primary)',
+    backgroundColor: 'var(--bg-elevated)',
+    border: '1px solid var(--border-light)',
     borderRadius: '6px',
     outline: 'none',
     verticalAlign: 'middle',
     boxSizing: 'border-box',
   },
-  '.cm-textfield:focus': {
-    borderColor: 'var(--color-primary) !important',
+  '&.cm-editor .cm-textfield:focus': {
+    borderColor: 'var(--color-primary)',
     boxShadow: '0 0 0 2px var(--color-primary-bg-light)',
   },
   '.cm-panel.cm-search input[type=checkbox]': {
@@ -191,13 +195,15 @@ const editorTheme = EditorView.theme({
     marginRight: '4px',
     cursor: 'pointer',
   },
+  // (0,3,1)/(0,4,1) selectors — already outrank every base-theme .cm-button
+  // rule on specificity alone, no bump needed.
   '.cm-panel.cm-search button': {
     height: '26px',
     padding: '2px 12px',
     fontSize: '100%',
     color: 'var(--text-primary)',
     backgroundColor: 'transparent',
-    backgroundImage: 'none !important',
+    backgroundImage: 'none',
     border: '1px solid var(--border-light)',
     borderRadius: '6px',
     cursor: 'pointer',
@@ -208,31 +214,38 @@ const editorTheme = EditorView.theme({
   '.cm-panel.cm-search button:hover': {
     color: 'var(--text-white)',
     backgroundColor: 'var(--overlay-light-faint)',
-    backgroundImage: 'none !important',
+    backgroundImage: 'none',
     borderColor: 'var(--text-disabled)',
   },
   '.cm-panel.cm-search button:active': {
     backgroundColor: 'var(--overlay-light-medium)',
-    backgroundImage: 'none !important',
+    backgroundImage: 'none',
   },
-  // 覆盖 CodeMirror 基础主题的 .cm-button 渐变
-  '.cm-button': {
+  // Same specificity bump for the base theme's .cm-button gradient.
+  '&.cm-editor .cm-button': {
     height: '26px',
     padding: '2px 12px',
     fontSize: '100%',
-    color: 'var(--text-primary) !important',
-    backgroundColor: 'transparent !important',
-    backgroundImage: 'none !important',
-    border: '1px solid var(--border-light) !important',
+    color: 'var(--text-primary)',
+    backgroundColor: 'transparent',
+    backgroundImage: 'none',
+    border: '1px solid var(--border-light)',
     borderRadius: '6px',
     cursor: 'pointer',
     lineHeight: '1',
   },
-  '.cm-button:hover': {
-    color: 'var(--text-white) !important',
-    backgroundColor: 'var(--overlay-light-faint) !important',
-    backgroundImage: 'none !important',
-    borderColor: 'var(--text-disabled) !important',
+  '&.cm-editor .cm-button:hover': {
+    color: 'var(--text-white)',
+    backgroundColor: 'var(--overlay-light-faint)',
+    backgroundImage: 'none',
+    borderColor: 'var(--text-disabled)',
+  },
+  // The base theme nests `&:active` gradients under its light/dark .cm-button
+  // rules at (0,3,0) — this (0,4,0) rule must exist or the click-flash gradient
+  // would win once `!important` is gone.
+  '&.cm-editor .cm-button:active': {
+    backgroundImage: 'none',
+    backgroundColor: 'var(--overlay-light-medium)',
   },
   '.cm-panel.cm-search button[name=close]': {
     position: 'absolute',

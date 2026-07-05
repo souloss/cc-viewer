@@ -5,7 +5,8 @@ import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
 import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
-import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, resolveCalibrationTokens, adaptContextWindow, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
+import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, readCalibrationModel, computeContextPercent, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
+import { contextSeverityColor } from '../../utils/formatters';
 import { PERM_AUTO_APPROVE_OPTIONS, PLAN_AUTO_APPROVE_OPTIONS, autoApproveSelectOptions } from '../../utils/autoApproveOptions';
 import { classifyUserContent, isMainAgent, extractDisplayText } from '../../utils/contentFilter';
 import { parseImOrigin } from '../../utils/imOrigin';
@@ -41,21 +42,8 @@ import { useProjectAlias } from '../../hooks/useProjectAlias';
 import appConfig from '../../config.json';
 import { OPTIMISTIC_CLEAR_PERCENT } from '../../AppBase';
 const CALIBRATION_MODELS = appConfig.calibrationModels;
-// 1.6.243 之前的旧值（按具体型号校准）→ 新的尺寸维度；让升级用户保留校准语义而不是降级到 'auto'
-// （若 localStorage 残留值在此 map 与 CALIBRATION_MODELS 都没命中，再 fallback 到 'auto'）
-const LEGACY_CALIBRATION_MIGRATION = {
-  'opus-4.7-1m': '1m',
-  'sonnet-4.6': '200k',
-  'glm5': '200k',
-  'kimi-k2.5': '200k',
-  'minimax-2.1': '200k',
-  'Qwen 3.5': '200k',
-};
-function readCalibrationModel() {
-  const raw = localStorage.getItem('ccv_calibrationModel') || 'auto';
-  const migrated = LEGACY_CALIBRATION_MIGRATION[raw] || raw;
-  return CALIBRATION_MODELS.some(m => m.value === migrated) ? migrated : 'auto';
-}
+// Legacy-value migration + validation now live in utils/helpers.readCalibrationModel,
+// shared with Mobile so both shells apply identical migration semantics.
 import styles from './AppHeader.module.css';
 import sharedChrome from '../common/sharedChrome.module.css';
 
@@ -97,7 +85,7 @@ class AppHeader extends React.Component {
 
   constructor(props) {
     super(props);
-    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(), proxyModalVisible: false, systemTextModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, projectPrefsModalOpen: false, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
+    this.state = { countdownText: '', promptModalVisible: false, promptData: [], promptViewMode: 'original', settingsDrawerVisible: false, globalSettingsVisible: false, projectStatsVisible: false, projectStats: null, projectStatsLoading: false, localUrl: '', pluginModalVisible: false, processModalVisible: false, logoDropdownOpen: false, electronMenuOpen: false, electronMenuBar: null, cacheHighlightIdx: null, cacheHighlightFading: false, calibrationModel: readCalibrationModel(CALIBRATION_MODELS), proxyModalVisible: false, systemTextModalVisible: false, messagingModalVisible: false, messagingInitialTool: null, imRecordVisible: false, imRecordPlatform: null, logDirDraft: null, qrPopoverOpen: false, electronQrOpen: false, electronQrAnchor: null, projectPrefsModalOpen: false, _skillsModal: { open: false, loading: false, skills: [], error: null, toggling: new Set() },
       // 文件系统权威的 skill 列表（/api/skills 返回）；live-tail 下作为 popover chip 和管理弹窗的共享数据源。
       // null=未加载 / false=失败 / [] 或 Array=加载结果。workspace 切换由 componentDidUpdate + seq 控制。
       _fsSkills: null,
@@ -974,9 +962,9 @@ class AppHeader extends React.Component {
               <table className={sharedChrome.statsTable}>
                 <tbody>
                   <tr>
-                    <td className={sharedChrome.label}>Token</td>
-                    <td className={sharedChrome.th}>input</td>
-                    <td className={sharedChrome.th}>output</td>
+                    <td className={sharedChrome.label}>{t('ui.stats.token')}</td>
+                    <td className={sharedChrome.th}>{t('ui.stats.input')}</td>
+                    <td className={sharedChrome.th}>{t('ui.stats.output')}</td>
                   </tr>
                   <tr className={sharedChrome.rowBorder}>
                     <td className={sharedChrome.label}></td>
@@ -984,9 +972,9 @@ class AppHeader extends React.Component {
                     <td className={sharedChrome.td}>{formatTokenCount(s.output)}</td>
                   </tr>
                   <tr>
-                    <td className={sharedChrome.label}>Cache</td>
-                    <td className={sharedChrome.th}>create</td>
-                    <td className={sharedChrome.th}>read</td>
+                    <td className={sharedChrome.label}>{t('ui.stats.cache')}</td>
+                    <td className={sharedChrome.th}>{t('ui.stats.create')}</td>
+                    <td className={sharedChrome.th}>{t('ui.stats.read')}</td>
                   </tr>
                   <tr className={sharedChrome.rowBorder}>
                     <td className={sharedChrome.label}></td>
@@ -1014,7 +1002,7 @@ class AppHeader extends React.Component {
           <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
-                <td className={`${sharedChrome.th} ${styles.thLeft}`}>Tool</td>
+                <td className={`${sharedChrome.th} ${styles.thLeft}`}>{t('ui.stats.tool')}</td>
                 <td className={sharedChrome.th}>{t('ui.cacheRebuild.count')}</td>
               </tr>
             </thead>
@@ -1027,7 +1015,7 @@ class AppHeader extends React.Component {
               ))}
               {toolStats.length > 1 && (
                 <tr className={sharedChrome.rebuildTotalRow}>
-                  <td className={sharedChrome.label}>Total</td>
+                  <td className={sharedChrome.label}>{t('ui.stats.total')}</td>
                   <td className={sharedChrome.td}>{toolStats.reduce((s, e) => s + e[1], 0)}</td>
                 </tr>
               )}
@@ -1044,7 +1032,7 @@ class AppHeader extends React.Component {
           <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
-                <td className={`${sharedChrome.th} ${styles.thLeft}`}>Skill</td>
+                <td className={`${sharedChrome.th} ${styles.thLeft}`}>{t('ui.stats.skill')}</td>
                 <td className={sharedChrome.th}>{t('ui.cacheRebuild.count')}</td>
               </tr>
             </thead>
@@ -1057,7 +1045,7 @@ class AppHeader extends React.Component {
               ))}
               {skillStats.length > 1 && (
                 <tr className={sharedChrome.rebuildTotalRow}>
-                  <td className={sharedChrome.label}>Total</td>
+                  <td className={sharedChrome.label}>{t('ui.stats.total')}</td>
                   <td className={sharedChrome.td}>{skillStats.reduce((s, e) => s + e[1], 0)}</td>
                 </tr>
               )}
@@ -1213,7 +1201,7 @@ class AppHeader extends React.Component {
       <div className={styles.toolStatsColumn}>
         {hasCacheStats && (
           <div className={(hasSubAgentStats || hasTeammateStats) ? styles.modelCardSpaced : sharedChrome.modelCard}>
-            <div className={sharedChrome.modelName}>MainAgent<ConceptHelp doc="MainAgent" /> {t('ui.cacheRebuildStats')}<ConceptHelp doc="CacheRebuild" /></div>
+            <div className={sharedChrome.modelName}>{t('ui.stats.mainAgent')}<ConceptHelp doc="MainAgent" /> {t('ui.cacheRebuildStats')}<ConceptHelp doc="CacheRebuild" /></div>
             <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
@@ -1232,7 +1220,7 @@ class AppHeader extends React.Component {
               ))}
               {activeReasons.length > 1 && (
                 <tr className={sharedChrome.rebuildTotalRow}>
-                  <td className={sharedChrome.label}>Total</td>
+                  <td className={sharedChrome.label}>{t('ui.stats.total')}</td>
                   <td className={sharedChrome.td}>{totalCount}</td>
                   <td className={sharedChrome.td}>{formatTokenCount(totalCache)}</td>
                 </tr>
@@ -1247,7 +1235,7 @@ class AppHeader extends React.Component {
             <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
-                <td className={`${sharedChrome.th} ${styles.thLeft}`}>SubAgent</td>
+                <td className={`${sharedChrome.th} ${styles.thLeft}`}>{t('ui.stats.subAgent')}</td>
                 <td className={sharedChrome.th}>{t('ui.cacheRebuild.count')}</td>
               </tr>
             </thead>
@@ -1260,7 +1248,7 @@ class AppHeader extends React.Component {
               ))}
               {subAgentEntries.length > 1 && (
                 <tr className={sharedChrome.rebuildTotalRow}>
-                  <td className={sharedChrome.label}>Total</td>
+                  <td className={sharedChrome.label}>{t('ui.stats.total')}</td>
                   <td className={sharedChrome.td}>{subAgentEntries.reduce((s, e) => s + e[1], 0)}</td>
                 </tr>
               )}
@@ -1270,11 +1258,11 @@ class AppHeader extends React.Component {
         )}
         {hasTeammateStats && (
           <div className={sharedChrome.modelCard}>
-            <div className={sharedChrome.modelName}>Teammate<ConceptHelp doc="Teammate" /></div>
+            <div className={sharedChrome.modelName}>{t('ui.teammateStats.title')}<ConceptHelp doc="Teammate" /></div>
             <table className={sharedChrome.statsTable}>
             <thead>
               <tr>
-                <td className={`${sharedChrome.th} ${styles.thLeft}`}>Name</td>
+                <td className={`${sharedChrome.th} ${styles.thLeft}`}>{t('ui.teammateStats.name')}</td>
                 <td className={sharedChrome.th}>{t('ui.cacheRebuild.count')}</td>
               </tr>
             </thead>
@@ -1287,7 +1275,7 @@ class AppHeader extends React.Component {
               ))}
               {teammateEntries.length > 1 && (
                 <tr className={sharedChrome.rebuildTotalRow}>
-                  <td className={sharedChrome.label}>Total</td>
+                  <td className={sharedChrome.label}>{t('ui.stats.total')}</td>
                   <td className={sharedChrome.td}>{teammateEntries.reduce((s, e) => s + e[1], 0)}</td>
                 </tr>
               )}
@@ -1423,11 +1411,11 @@ class AppHeader extends React.Component {
           </div>
           <div className={styles.projectStatCard}>
             <div className={styles.projectStatValue}>{formatTokenCount(summary?.input_tokens)}</div>
-            <div className={styles.projectStatLabel}>Input Tokens</div>
+            <div className={styles.projectStatLabel}>{t('ui.projectStats.inputTokens')}</div>
           </div>
           <div className={styles.projectStatCard}>
             <div className={styles.projectStatValue}>{formatTokenCount(summary?.output_tokens)}</div>
-            <div className={styles.projectStatLabel}>Output Tokens</div>
+            <div className={styles.projectStatLabel}>{t('ui.projectStats.outputTokens')}</div>
           </div>
         </div>
 
@@ -1446,9 +1434,9 @@ class AppHeader extends React.Component {
                   <table className={sharedChrome.statsTable}>
                     <tbody>
                       <tr>
-                        <td className={sharedChrome.label}>Token</td>
-                        <td className={sharedChrome.th}>input</td>
-                        <td className={sharedChrome.th}>output</td>
+                        <td className={sharedChrome.label}>{t('ui.stats.token')}</td>
+                        <td className={sharedChrome.th}>{t('ui.stats.input')}</td>
+                        <td className={sharedChrome.th}>{t('ui.stats.output')}</td>
                       </tr>
                       <tr className={sharedChrome.rowBorder}>
                         <td className={sharedChrome.label}></td>
@@ -1456,9 +1444,9 @@ class AppHeader extends React.Component {
                         <td className={sharedChrome.td}>{formatTokenCount(data.output)}</td>
                       </tr>
                       <tr>
-                        <td className={sharedChrome.label}>Cache</td>
-                        <td className={sharedChrome.th}>create</td>
-                        <td className={sharedChrome.th}>read</td>
+                        <td className={sharedChrome.label}>{t('ui.stats.cache')}</td>
+                        <td className={sharedChrome.th}>{t('ui.stats.create')}</td>
+                        <td className={sharedChrome.th}>{t('ui.stats.read')}</td>
                       </tr>
                       <tr className={sharedChrome.rowBorder}>
                         <td className={sharedChrome.label}></td>
@@ -1494,7 +1482,6 @@ class AppHeader extends React.Component {
     // 计算上下文使用率:原始占用比(used / 窗口全量),与 Claude Code /context 口径一致。
     // 分子 sumUsageContextTokens = input + cache_creation(嵌套容错) + cache_read + output
     // ——含末轮 output 是因为它已进入下一轮上下文;百分比与 popover 显示的 token 数同源。
-    let contextPercent = 0;
     // 反向找最后一条带 usage 的 MainAgent 一次，contextPercent 与 contextTokens 共用
     // AUTO 校准也依赖它的 model 名，所以必须在 calibrationTokens 求值之前完成
     let lastMainAgent = null;
@@ -1511,31 +1498,16 @@ class AppHeader extends React.Component {
         }
       }
     }
-    // resolveCalibrationTokens 不变量保证返回 1000000 或 200000，永不为 0/null
-    // 第三参数 claudeProjectModel 是 ~/.claude.json projects[cwd].lastModelUsage 推断,
-    // 用作 'auto' 模式启动期回落(避 haiku init ping 让血条错显 200K)。
-    let calibrationTokens = resolveCalibrationTokens(this.state.calibrationModel, lastMainAgent, claudeProjectModel);
-    // 自适应纠偏:仅作用于"自动判定"路径(用户显式选 200k 时尊重其选择,不覆盖)。
-    // 真实输入上下文用量优先取 requests[] 直算的 lastTotalTokens,无则用 SSE 事件携带的
-    // total_input_tokens(同为 input+cache,不含 output);越过 200K 整窗即判误判 → 升 1M。
-    if (this.state.calibrationModel !== '200k') {
-      const usedContextTokens = lastInputTokens > 0 ? lastInputTokens : (contextWindow?.total_input_tokens || 0);
-      calibrationTokens = adaptContextWindow(calibrationTokens, usedContextTokens);
-    }
-    if (!isLocalLog) {
-      if (contextWindow?.used_percentage != null) {
-        if (lastTotalTokens > 0) {
-          contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / calibrationTokens * 100)));
-        } else {
-          // 兜底重标定:used_percentage × origMax = totalTokens 的近似,再除前端校准窗口。
-          // 服务端已纠偏的 origMax(1M)与前端 adapt(经 total_input_tokens)会同步升窗,组合自洽。
-          const origMax = contextWindow.context_window_size || 200000;
-          contextPercent = Math.min(100, Math.max(0, Math.round(contextWindow.used_percentage * origMax / calibrationTokens)));
-        }
-      } else if (lastMainAgent && lastTotalTokens > 0) {
-        contextPercent = Math.min(100, Math.max(0, Math.round(lastTotalTokens / calibrationTokens * 100)));
-      }
-    }
+    // Calibration + percent math lives in utils/helpers.computeContextPercent,
+    // shared verbatim with Mobile so the two shells can never drift again.
+    let contextPercent = isLocalLog ? 0 : computeContextPercent({
+      calibrationModel: this.state.calibrationModel,
+      lastMainAgent,
+      projectModelHint: claudeProjectModel,
+      contextWindow,
+      lastTotalTokens,
+      lastInputTokens,
+    });
     // contextBarLocked：/clear 触发后强制血条 0K (0%)，忽略 SSE 与 requests[] 残留的 pre-clear 数据，
     // 直到用户发出一条非 /clear 消息（AppBase.handleUserMessageSent 解锁）。
     // 锁定期间同步把 _lastContextPercent 记忆清零，避免解锁瞬间通过 memo 弹回旧值。
@@ -1550,8 +1522,7 @@ class AppHeader extends React.Component {
       // /clear 后立即把血条压到乐观水位；下一次 SSE context_window 推送会取消这个覆盖
       if (contextBarOptimistic) contextPercent = OPTIMISTIC_CLEAR_PERCENT;
     }
-    // 阈值 75/55:原始占用比口径下保留与 auto-compact 触发点(~83.5%)的体感缓冲
-    const ctxColor = contextPercent >= 75 ? 'var(--color-error-light)' : contextPercent >= 55 ? 'var(--color-warning-light)' : 'var(--color-success)';
+    const ctxColor = contextSeverityColor(contextPercent);
     const contextTokens = contextBarLocked ? 0 : lastTotalTokens;
 
     return createPortal(

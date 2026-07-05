@@ -21,7 +21,7 @@ export {
   sumUsageInputTokens,
   sumUsageContextTokens,
 } from '../../server/lib/context-rules.js';
-import { classifyContextWindow } from '../../server/lib/context-rules.js';
+import { classifyContextWindow, adaptContextWindow } from '../../server/lib/context-rules.js';
 
 /**
  * Resolve the effective model name for a log request entry, preferring the
@@ -73,6 +73,73 @@ export function resolveCalibrationTokens(calibrationModel, lastMainAgent, projec
   }
   // 回落 2：冷启动 1M
   return 1000000;
+}
+
+// Pre-1.6.243 stored values (calibrated per concrete model) → the new size buckets;
+// keeps upgrading users' calibration semantics instead of degrading them to 'auto'.
+// (If a stale localStorage value misses both this map and calibrationModels, fall back to 'auto'.)
+export const LEGACY_CALIBRATION_MIGRATION = {
+  'opus-4.7-1m': '1m',
+  'sonnet-4.6': '200k',
+  'glm5': '200k',
+  'kimi-k2.5': '200k',
+  'minimax-2.1': '200k',
+  'Qwen 3.5': '200k',
+};
+
+/**
+ * Read the persisted calibration choice ('ccv_calibrationModel'), applying the
+ * legacy-value migration and validating against the configured size options.
+ * Shared by the desktop header and the mobile shell so both apply identical
+ * migration semantics. Safe in non-browser environments (returns 'auto').
+ */
+export function readCalibrationModel(calibrationModels) {
+  let raw = 'auto';
+  try {
+    raw = localStorage.getItem('ccv_calibrationModel') || 'auto';
+  } catch {}
+  const migrated = LEGACY_CALIBRATION_MIGRATION[raw] || raw;
+  return calibrationModels.some(m => m.value === migrated) ? migrated : 'auto';
+}
+
+/**
+ * Single source of truth for the context-bar percentage. Extracted from the
+ * desktop header math so mobile cannot drift (mobile previously ignored the
+ * user's calibration choice and trusted the server's used_percentage raw).
+ *
+ * Inputs:
+ *  - calibrationModel: '1m' | '200k' | 'auto' (user's popover choice)
+ *  - lastMainAgent / lastTotalTokens / lastInputTokens: the caller's reverse
+ *    scan for the latest main-agent usage (tokens via sumUsageContextTokens /
+ *    sumUsageInputTokens)
+ *  - projectModelHint: claudeProjectModel from app state (see resolveCalibrationTokens)
+ *  - contextWindow: server-pushed { used_percentage, context_window_size, total_input_tokens }
+ *
+ * Callers keep local-log gating, contextBarLocked/Optimistic handling and the
+ * _lastContextPercent memo outside this function.
+ */
+export function computeContextPercent({ calibrationModel, lastMainAgent, projectModelHint = null, contextWindow, lastTotalTokens = 0, lastInputTokens = 0 }) {
+  let calibrationTokens = resolveCalibrationTokens(calibrationModel, lastMainAgent, projectModelHint);
+  // Adaptive correction: a window classified as 200K that has demonstrably held
+  // more than 200K of input must actually be 1M. Skipped when the user pinned '200k'.
+  if (calibrationModel !== '200k') {
+    const usedContextTokens = lastInputTokens > 0 ? lastInputTokens : (contextWindow?.total_input_tokens || 0);
+    calibrationTokens = adaptContextWindow(calibrationTokens, usedContextTokens);
+  }
+  let percent = 0;
+  if (contextWindow?.used_percentage != null) {
+    if (lastTotalTokens > 0) {
+      percent = Math.round(lastTotalTokens / calibrationTokens * 100);
+    } else {
+      // No usable usage on the last main agent: rebase the server percentage
+      // from its original window onto the calibrated one.
+      const origMax = contextWindow.context_window_size || 200000;
+      percent = Math.round(contextWindow.used_percentage * origMax / calibrationTokens);
+    }
+  } else if (lastMainAgent && lastTotalTokens > 0) {
+    percent = Math.round(lastTotalTokens / calibrationTokens * 100);
+  }
+  return Math.min(100, Math.max(0, percent));
 }
 
 /**

@@ -2,7 +2,7 @@
 // so we import the real module directly.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatPromptNavTime, formatHms, formatMonthDayTime } from '../src/utils/formatters.js';
+import { formatPromptNavTime, formatHms, formatMonthDayTime, contextSeverityColor } from '../src/utils/formatters.js';
 
 describe('formatPromptNavTime', () => {
   it('formats a timestamp as "MM-DD HH:MM:SS" in local time', () => {
@@ -54,5 +54,21 @@ describe('formatHms / formatMonthDayTime (shared clock primitives)', () => {
     // (ChatMessage.formatTime full-mode also calls it), so this equality guarantees they can't diverge.
     const d = new Date(2026, 4, 1, 8, 7, 6);
     assert.equal(formatPromptNavTime(d.toISOString()), formatMonthDayTime(d));
+  });
+});
+
+describe('contextSeverityColor', () => {
+  it('maps percent to the shared severity CSS vars with 75/55 thresholds', () => {
+    assert.equal(contextSeverityColor(0), 'var(--color-success)');
+    assert.equal(contextSeverityColor(54), 'var(--color-success)');
+    assert.equal(contextSeverityColor(55), 'var(--color-warning-light)');
+    assert.equal(contextSeverityColor(74), 'var(--color-warning-light)');
+    assert.equal(contextSeverityColor(75), 'var(--color-error-light)');
+    assert.equal(contextSeverityColor(100), 'var(--color-error-light)');
+  });
+
+  it('pins the exact boundary semantics (>= not >) so header bar, mobile tag and popover agree', () => {
+    // 77% was the drift repro: header bar (75/55) showed error while the popover (80/60) showed warning.
+    assert.equal(contextSeverityColor(77), 'var(--color-error-light)');
   });
 });

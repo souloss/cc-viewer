@@ -22,10 +22,10 @@
  *     与旧实现一致，结构首次匹配后验证失败即整体放弃（不向后重试）；
  *   - 输出形状 {question, options:[{number,text,selected}]} 与旧实现逐字段一致。
  *
- * detectPromptLegacy 保留旧正则实现原样，作为线上漏检时的逃生开关
- * （localStorage.ccv_legacy_prompt_detect = '1'，自担卡死风险）。
- * 删除锚点：本重写自 1.6.308 首发，稳定一个发布周期后（≥1.6.309，且
- * Windows 实机回报无漏检）删除本函数与 ChatView 的逃生开关分支。
+ * The original regex implementation (detectPromptLegacy) and its
+ * ccv_legacy_prompt_detect escape hatch were removed after the linear rewrite
+ * (first shipped in 1.6.308) proved stable in the field; its behavior is
+ * pinned by the golden-master corpus in test/prompt-detect.test.js.
  *
  * 纯 JS、无浏览器全局依赖（node:test 可直接 import）。
  */
@@ -193,52 +193,4 @@ export function detectPromptInBuffer(buf) {
     try { console.warn(`[cc-viewer] promptDetect overrun: ${ms.toFixed(1)}ms (buf ${trimmed.length}B)`); } catch {}
   }
   return result;
-}
-
-/**
- * 旧正则实现（原样保留）。已知缺陷：失配时灾难性回溯可永久占死主线程，
- * 仅作 ccv_legacy_prompt_detect 逃生开关使用。
- * TODO: 自 1.6.308（线性实现首发）起稳定一个发布周期后（≥1.6.309，且
- * Windows 实机回报无漏检）删除本函数与 ChatView 的逃生开关分支。
- */
-export function detectPromptLegacy(rawBuf) {
-  const buf = (rawBuf || '').trimEnd();
-  let question = null;
-  let options = null;
-
-  // Pattern 1: Numbered options — "Question?\n  ❯ 1. Option A\n    2. Option B"
-  const match1 = buf.match(/([^\n]*\?)\s*\n((?:\s*[❯>]?\s*\d+\.\s+[^\n]+\n?){2,})(?:\n[^\d❯>\n][^\n]*|\n)*$/);
-  if (match1) {
-    question = match1[1].trim();
-    const optionLines = match1[2].match(/\s*([❯>])?\s*(\d+)\.\s+([^\n]+)/g);
-    if (optionLines) {
-      options = optionLines.map(line => {
-        const m = line.match(/\s*([❯>])?\s*(\d+)\.\s+(.+)/);
-        return { number: parseInt(m[2], 10), text: m[3].trim(), selected: !!m[1] };
-      });
-    }
-  }
-
-  // Pattern 2: Non-numbered cursor-based options (Ink Select)
-  if (!options) {
-    const match2 = buf.match(/([^\n]+)\n((?:\s+[❯>]?\s+[^\n]+\n?){2,})(?:\n[^\s❯>\n][^\n]*|\n)*$/);
-    if (match2) {
-      const candidateQ = match2[1].trim();
-      const block = match2[2];
-      const lines = block.split('\n').filter(l => l.trim());
-      const parsed = [];
-      for (const line of lines) {
-        const m = line.match(/^\s*([❯>])?\s+(.+)/);
-        if (m && m[2].trim()) {
-          parsed.push({ number: parsed.length + 1, text: m[2].trim(), selected: !!m[1] });
-        }
-      }
-      if (parsed.length >= 2 && parsed.some(p => p.selected)) {
-        question = candidateQ;
-        options = parsed;
-      }
-    }
-  }
-
-  return (question && options) ? { question, options } : null;
 }

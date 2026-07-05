@@ -515,7 +515,7 @@ class DetailPanel extends React.Component {
                       <Select
                         size="small"
                         className={styles.reminderSelect}
-                        placeholder="filter"
+                        placeholder={t('ui.detail.filterPlaceholder')}
                         value={this.state.reminderFilters || undefined}
                         onChange={val => this.setState({ reminderFilters: val || null })}
                         options={[
@@ -797,14 +797,14 @@ class DetailPanel extends React.Component {
               <div className={styles.tokenGrid}>
                 <div className={styles.tokenRows}>
                   <div className={styles.tokenRow}>
-                    <span className={styles.tokenLabel}>Token</span>
-                    <span className={styles.tokenTd}>input: {formatTokenCount(tokenStats.input)}</span>
-                    <span className={styles.tokenTd}>output: {formatTokenCount(tokenStats.output)}</span>
+                    <span className={styles.tokenLabel}>{t('ui.stats.token')}</span>
+                    <span className={styles.tokenTd}>{t('ui.stats.input')}: {formatTokenCount(tokenStats.input)}</span>
+                    <span className={styles.tokenTd}>{t('ui.stats.output')}: {formatTokenCount(tokenStats.output)}</span>
                   </div>
                   <div className={`${styles.tokenRow} ${styles.tokenRowBorder}`}>
-                    <span className={styles.tokenLabel}>Cache</span>
-                    <span className={styles.tokenTd}>create: {formatTokenCount(tokenStats.cacheCreate)}</span>
-                    <span className={styles.tokenTd}>read: {formatTokenCount(tokenStats.cacheRead)}</span>
+                    <span className={styles.tokenLabel}>{t('ui.stats.cache')}</span>
+                    <span className={styles.tokenTd}>{t('ui.stats.create')}: {formatTokenCount(tokenStats.cacheCreate)}</span>
+                    <span className={styles.tokenTd}>{t('ui.stats.read')}: {formatTokenCount(tokenStats.cacheRead)}</span>
                   </div>
                 </div>
                 <div className={styles.tokenHitRate}>

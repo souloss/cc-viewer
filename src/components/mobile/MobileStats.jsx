@@ -73,7 +73,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                 <table className={headerStyles.statsTable}>
                   <thead>
                     <tr>
-                      <td className={`${headerStyles.th} ${styles.thLeft}`}>Skill</td>
+                      <td className={`${headerStyles.th} ${styles.thLeft}`}>{t('ui.stats.skill')}</td>
                       <td className={headerStyles.th}>{t('ui.cacheRebuild.count')}</td>
                     </tr>
                   </thead>
@@ -86,7 +86,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                     ))}
                     {skillStats.length > 1 && (
                       <tr className={headerStyles.rebuildTotalRow}>
-                        <td className={headerStyles.label}>Total</td>
+                        <td className={headerStyles.label}>{t('ui.stats.total')}</td>
                         <td className={headerStyles.td}>{skillStats.reduce((s, e) => s + e[1], 0)}</td>
                       </tr>
                     )}
@@ -102,7 +102,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                 <table className={headerStyles.statsTable}>
                   <thead>
                     <tr>
-                      <td className={`${headerStyles.th} ${styles.thLeft}`}>SubAgent</td>
+                      <td className={`${headerStyles.th} ${styles.thLeft}`}>{t('ui.stats.subAgent')}</td>
                       <td className={headerStyles.th}>{t('ui.cacheRebuild.count')}</td>
                     </tr>
                   </thead>
@@ -115,7 +115,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                     ))}
                     {subAgentEntries.length > 1 && (
                       <tr className={headerStyles.rebuildTotalRow}>
-                        <td className={headerStyles.label}>Total</td>
+                        <td className={headerStyles.label}>{t('ui.stats.total')}</td>
                         <td className={headerStyles.td}>{subAgentEntries.reduce((s, e) => s + e[1], 0)}</td>
                       </tr>
                     )}
@@ -127,11 +127,11 @@ export default function MobileStats({ requests = [], visible, onClose }) {
             {/* 2.5 Teammate Stats */}
             {hasTeammateStats && (
               <div className={headerStyles.modelCard}>
-                <div className={headerStyles.modelName}>Teammate</div>
+                <div className={headerStyles.modelName}>{t('ui.teammateStats.title')}</div>
                 <table className={headerStyles.statsTable}>
                   <thead>
                     <tr>
-                      <td className={`${headerStyles.th} ${styles.thLeft}`}>Name</td>
+                      <td className={`${headerStyles.th} ${styles.thLeft}`}>{t('ui.teammateStats.name')}</td>
                       <td className={headerStyles.th}>{t('ui.cacheRebuild.count')}</td>
                     </tr>
                   </thead>
@@ -144,7 +144,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                     ))}
                     {teammateEntries.length > 1 && (
                       <tr className={headerStyles.rebuildTotalRow}>
-                        <td className={headerStyles.label}>Total</td>
+                        <td className={headerStyles.label}>{t('ui.stats.total')}</td>
                         <td className={headerStyles.td}>{teammateEntries.reduce((s, e) => s + e[1], 0)}</td>
                       </tr>
                     )}
@@ -160,7 +160,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                 <table className={headerStyles.statsTable}>
                   <thead>
                     <tr>
-                      <td className={`${headerStyles.th} ${styles.thLeft}`}>Tool</td>
+                      <td className={`${headerStyles.th} ${styles.thLeft}`}>{t('ui.stats.tool')}</td>
                       <td className={headerStyles.th}>{t('ui.cacheRebuild.count')}</td>
                     </tr>
                   </thead>
@@ -173,7 +173,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                     ))}
                     {toolStats.length > 1 && (
                       <tr className={headerStyles.rebuildTotalRow}>
-                        <td className={headerStyles.label}>Total</td>
+                        <td className={headerStyles.label}>{t('ui.stats.total')}</td>
                         <td className={headerStyles.td}>{toolStats.reduce((s, e) => s + e[1], 0)}</td>
                       </tr>
                     )}
@@ -185,7 +185,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
             {/* 4. MainAgent Cache Rebuild Stats */}
             {hasCacheStats && (
               <div className={headerStyles.modelCard}>
-                <div className={headerStyles.modelName}>MainAgent<ConceptHelp doc="MainAgent" /> {t('ui.cacheRebuildStats')}<ConceptHelp doc="CacheRebuild" /></div>
+                <div className={headerStyles.modelName}>{t('ui.stats.mainAgent')}<ConceptHelp doc="MainAgent" /> {t('ui.cacheRebuildStats')}<ConceptHelp doc="CacheRebuild" /></div>
                 <table className={`${headerStyles.statsTable} ${styles.fixedTable}`}>
                   <colgroup>
                     <col className={styles.colWide} />
@@ -209,7 +209,7 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                     ))}
                     {activeReasons.length > 1 && (
                       <tr className={headerStyles.rebuildTotalRow}>
-                        <td className={headerStyles.label}>Total</td>
+                        <td className={headerStyles.label}>{t('ui.stats.total')}</td>
                         <td className={headerStyles.td}>{totalCount}</td>
                         <td className={headerStyles.td}>{formatTokenCount(totalCache)}</td>
                       </tr>
@@ -230,9 +230,9 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                   <table className={headerStyles.statsTable}>
                     <tbody>
                       <tr>
-                        <td className={headerStyles.label}>Token</td>
-                        <td className={headerStyles.th}>input</td>
-                        <td className={headerStyles.th}>output</td>
+                        <td className={headerStyles.label}>{t('ui.stats.token')}</td>
+                        <td className={headerStyles.th}>{t('ui.stats.input')}</td>
+                        <td className={headerStyles.th}>{t('ui.stats.output')}</td>
                       </tr>
                       <tr className={headerStyles.rowBorder}>
                         <td className={headerStyles.label}></td>
@@ -240,9 +240,9 @@ export default function MobileStats({ requests = [], visible, onClose }) {
                         <td className={headerStyles.td}>{formatTokenCount(s.output)}</td>
                       </tr>
                       <tr>
-                        <td className={headerStyles.label}>Cache</td>
-                        <td className={headerStyles.th}>create</td>
-                        <td className={headerStyles.th}>read</td>
+                        <td className={headerStyles.label}>{t('ui.stats.cache')}</td>
+                        <td className={headerStyles.th}>{t('ui.stats.create')}</td>
+                        <td className={headerStyles.th}>{t('ui.stats.read')}</td>
                       </tr>
                       <tr className={headerStyles.rowBorder}>
                         <td className={headerStyles.label}></td>

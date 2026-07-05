@@ -323,10 +323,10 @@ export default function GitChanges({ style, onClose, onFileClick, onOpenFile, re
         </button>
       </div>
       <div className={styles.changesContainer}>
-        {loading && <div className={styles.loading}>Loading...</div>}
+        {loading && <div className={styles.loading}>{t('ui.loading')}</div>}
         {error && <div className={styles.error}>{error}</div>}
         {!loading && !error && (!repos || repos.length === 0) && (
-          <div className={styles.empty}>No changes</div>
+          <div className={styles.empty}>{t('ui.gitChanges.noChanges')}</div>
         )}
         {!loading && !error && repos && repos.map(repo => {
           const collapsed = collapsedRepos.has(repo.path);

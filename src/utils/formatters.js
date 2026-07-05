@@ -37,3 +37,12 @@ export function formatPromptNavTime(ts) {
     return formatMonthDayTime(d);
   } catch { return ''; }
 }
+
+// Single source of truth for the context-fullness severity color, shared by the
+// desktop header bar, the mobile header tag, and the cache popover so all three
+// surfaces always agree for the same percentage.
+// Thresholds 75/55: keeps a felt buffer before the auto-compact trigger (~83.5%)
+// under the raw-occupancy interpretation of the percentage.
+export function contextSeverityColor(percent) {
+  return percent >= 75 ? 'var(--color-error-light)' : percent >= 55 ? 'var(--color-warning-light)' : 'var(--color-success)';
+}

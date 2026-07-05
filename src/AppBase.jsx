@@ -14,6 +14,7 @@ import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
 import { isMainAgent, isSessionBoundary, setTeammateNameSeeds, clearTeammateNameSeeds } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
 import { publish as publishWorkflowUpdate } from './utils/workflowStore';
+import { reportSwallowed } from './utils/errorReport';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
@@ -1345,7 +1346,7 @@ class AppBase extends React.Component {
               this.setState({ streamingLatest: pending });
             });
           });
-        } catch { }
+        } catch (e) { reportSwallowed('sse.stream-progress', e); }
       });
       this.eventSource.addEventListener('resume_prompt', (event) => {
         this._resetSSETimeout();
@@ -1367,7 +1368,7 @@ class AppBase extends React.Component {
               this.setState({ resumeModalVisible: true, resumeFileName: data.recentFileName || '' });
             }
           });
-        } catch { }
+        } catch (e) { reportSwallowed('sse.resume_prompt', e); }
       });
       this.eventSource.addEventListener('resume_resolved', () => {
         this._resetSSETimeout();
@@ -1381,7 +1382,7 @@ class AppBase extends React.Component {
         try {
           const data = JSON.parse(event.data);
           this.setState({ updateInfo: { type: 'major', version: data.version } });
-        } catch { }
+        } catch (e) { reportSwallowed('sse.update_major_available', e); }
       });
       this.eventSource.addEventListener('load_start', (event) => {
         this._resetSSETimeout();
@@ -1396,7 +1397,7 @@ class AppBase extends React.Component {
           if (!this._isIncremental) {
             this.setState({ fileLoading: true, fileLoadingCount: 0 });
           }
-        } catch { }
+        } catch (e) { reportSwallowed('sse.load_start', e); }
       });
       this.eventSource.addEventListener('load_chunk', (event) => {
         this._resetSSETimeout();
@@ -1412,7 +1413,7 @@ class AppBase extends React.Component {
               });
             }
           }
-        } catch { }
+        } catch (e) { reportSwallowed('sse.load_chunk', e, { dataLen: event.data?.length }); }
       });
       this.eventSource.addEventListener('load_end', () => {
         this._resetSSETimeout();
@@ -1506,7 +1507,9 @@ class AppBase extends React.Component {
           } else {
             this.setState({ fileLoading: false, fileLoadingCount: 0 });
           }
-        } catch {
+        } catch (e) {
+          // A silently failed full reload discards the server's baseline — report, then recover.
+          reportSwallowed('sse.full_reload', e);
           this.setState({ fileLoading: false, fileLoadingCount: 0 });
         }
       });
@@ -1557,7 +1560,7 @@ class AppBase extends React.Component {
             claudeProjectModel: (typeof data.claudeProjectModel === 'string' && data.claudeProjectModel) ? data.claudeProjectModel : null,
           });
           if (isMobile) clearEntries();
-        } catch {}
+        } catch (e) { reportSwallowed('sse.workspace_started', e); }
       });
       this.eventSource.addEventListener('workspace_stopped', () => {
         this._resetSSETimeout();
@@ -1586,7 +1589,7 @@ class AppBase extends React.Component {
           //「会话已推进」的最强信号，避免 lock 永久卡 0%。
           this.setState({ contextWindow: data, contextBarOptimistic: false, contextBarLocked: false });
           if (this._clearOptimisticTimer) { clearTimeout(this._clearOptimisticTimer); this._clearOptimisticTimer = null; }
-        } catch { }
+        } catch (e) { reportSwallowed('sse.context_window', e); }
       });
       this.eventSource.addEventListener('kv_cache_content', (event) => {
         this._resetSSETimeout();
@@ -1604,7 +1607,7 @@ class AppBase extends React.Component {
         this._resetSSETimeout();
         try {
           publishWorkflowUpdate(JSON.parse(event.data));
-        } catch { }
+        } catch (e) { reportSwallowed('sse.workflow_update', e); }
       });
       this.eventSource.addEventListener('proxy_profile', (event) => {
         this._resetSSETimeout();
@@ -1617,7 +1620,7 @@ class AppBase extends React.Component {
               if (d.profiles) this.setState({ proxyProfiles: d.profiles, activeProxyId: d.active || 'max' });
             }).catch(() => { });
           }
-        } catch { }
+        } catch (e) { reportSwallowed('sse.proxy_profile', e); }
       });
       this.eventSource.addEventListener('ping', () => { this._resetSSETimeout(); });
       // server_config: server 启动时一次性推 turnEnd debounce ms（CCV_TURN_END_DEBOUNCE_MS
@@ -1744,7 +1747,7 @@ class AppBase extends React.Component {
         this._hasMoreHistory = !!data.hasMore;
         this._oldestTs = data.oldestTs || null;
         this.setState({ fileLoadingCount: 0 });
-      } catch { }
+      } catch (e) { reportSwallowed('sse.local-log.load_start', e); }
     });
 
     es.addEventListener('load_chunk', (event) => {
@@ -1756,7 +1759,7 @@ class AppBase extends React.Component {
           }
           this.setState({ fileLoadingCount: entries.length });
         }
-      } catch { }
+      } catch (e) { reportSwallowed('sse.local-log.load_chunk', e, { dataLen: event.data?.length }); }
     });
 
     es.addEventListener('load_end', () => {
