@@ -162,13 +162,7 @@ The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left" />
- </picture>
-</a>
+[![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=bottom-right)](https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=bottom-right)
 
 ## License
 
