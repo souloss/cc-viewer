@@ -300,10 +300,18 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // IM 人格依赖默认 sentinel CC_APPEND_SYSTEM.md 注入，全局模型条目不得静默取代它。
   const spawnDir = cwd || process.cwd();
   const insideLogDir = spawnDir === LOG_DIR || spawnDir.startsWith(LOG_DIR + sep);
+  const resolvedModelId = insideLogDir ? null : _spawnModelReader(spawnDir);
   let sysPrompt = buildSystemPromptFileArgs(spawnDir, finalExtraArgs, process.env, {
-    modelId: insideLogDir ? null : _spawnModelReader(spawnDir),
+    modelId: resolvedModelId,
     globalModelDir: join(LOG_DIR, MODEL_PROMPT_DIR),
   });
+  if (sysPrompt.model) {
+    console.warn(`[CC Viewer] model-specific prompt: injected "${sysPrompt.model}" (scope: ${sysPrompt.loaded.join(', ')}) for modelId="${resolvedModelId}"`);
+  } else if (resolvedModelId) {
+    console.warn(`[CC Viewer] model-specific prompt: modelId="${resolvedModelId}" resolved but no matching entry found`);
+  } else {
+    console.warn('[CC Viewer] model-specific prompt: no modelId resolved, model matching entirely skipped');
+  }
   if (_systemPromptFileRejectedPaths.has(claudePath)) sysPrompt = { args: [], loaded: [], model: null };
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 

@@ -204,8 +204,8 @@
 /* 悬停浮现的删除「×」(参照 ultraplanEditPencil;触屏端常显)。 */
 .tabDelete {
   position: absolute;
-  top: -2px;
-  inset-inline-end: -4px;
+  top: 2px;
+  inset-inline-end: 4px;
   width: 14px;
   height: 14px;
   border-radius: 50%;

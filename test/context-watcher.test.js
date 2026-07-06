@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, mkdtempSync, symlinkSync, rmdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -256,6 +256,47 @@ describe('context-watcher: readClaudeProjectModel', () => {
     withTmpClaudeJson('{not-valid-json', (tmpFile) => {
       assert.equal(readClaudeProjectModel('/my/cwd', tmpFile), null);
     });
+  });
+
+  it('matches with trailing slash — "/my/cwd/" finds key "/my/cwd"', () => {
+    withTmpClaudeJson({
+      projects: { '/my/cwd': { lastModelUsage: { 'claude-opus-4-7': { costUSD: 50 } } } },
+    }, (tmpFile) => {
+      assert.equal(readClaudeProjectModel('/my/cwd/', tmpFile), 'claude-opus-4-7');
+    });
+  });
+
+  it('matches via realpath when cwd is accessed through a symlink', () => {
+    const realDir = mkdtempSync(join(tmpdir(), 'ccv-test-real-'));
+    const linkDir = join(tmpdir(), `ccv-test-link-${Date.now()}`);
+    // Use realpathSync on both sides: the JSON key and the lookup path must
+    // resolve to the same canonical path (macOS /var→/private/var symlinks).
+    const canonicalDir = realpathSync(realDir);
+    try {
+      symlinkSync(realDir, linkDir);
+      withTmpClaudeJson({
+        projects: { [canonicalDir]: { lastModelUsage: { 'claude-opus-4-7': { costUSD: 50 } } } },
+      }, (tmpFile) => {
+        assert.equal(readClaudeProjectModel(linkDir, tmpFile), 'claude-opus-4-7');
+      });
+    } finally {
+      try { unlinkSync(linkDir); } catch {}
+      try { rmdirSync(realDir); } catch {}
+    }
+  });
+
+  it('case-insensitive fallback on darwin/win32 — "/My/Proj" finds key "/my/proj"', { skip: process.platform !== 'darwin' && process.platform !== 'win32' }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'CCV-TEST-'));
+    try {
+      const canonicalDir = realpathSync(dir);
+      withTmpClaudeJson({
+        projects: { [canonicalDir.toLowerCase()]: { lastModelUsage: { 'claude-opus-4-7': { costUSD: 50 } } } },
+      }, (tmpFile) => {
+        assert.equal(readClaudeProjectModel(dir, tmpFile), 'claude-opus-4-7');
+      });
+    } finally {
+      try { rmdirSync(dir); } catch {}
+    }
   });
 });
 

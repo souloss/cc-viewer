@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getClaudeConfigDir } from '../../findcc.js';
@@ -77,20 +77,51 @@ export function getContextSizeForModel(apiModelName) {
  * @param {string} [filePath] - 可选注入文件路径，默认 CLAUDE_USER_CONFIG_FILE；单测用
  * @returns {string|null} model id（含 [1m] 后缀，例 "claude-opus-4-7[1m]"）或 null
  */
+function pickBestModel(entries) {
+  const withOneM = entries.find(([k]) => /\[1m\]/i.test(k));
+  if (withOneM) return withOneM[0];
+  entries.sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0));
+  return entries[0][0];
+}
+
 export function readClaudeProjectModel(cwd, filePath = CLAUDE_USER_CONFIG_FILE) {
   try {
     if (!cwd || typeof cwd !== 'string') return null;
     if (!existsSync(filePath)) return null;
     const raw = readFileSync(filePath, 'utf-8');
     const data = JSON.parse(raw);
-    const lmu = data?.projects?.[cwd]?.lastModelUsage;
-    if (!lmu || typeof lmu !== 'object') return null;
-    const entries = Object.entries(lmu).filter(([k]) => typeof k === 'string' && !/haiku/i.test(k));
-    if (!entries.length) return null;
-    const withOneM = entries.find(([k]) => /\[1m\]/i.test(k));
-    if (withOneM) return withOneM[0];
-    entries.sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0));
-    return entries[0][0];
+    const projects = data?.projects;
+    if (!projects || typeof projects !== 'object') return null;
+
+    // Normalize cwd: resolve symlinks, strip trailing slash, then try exact match.
+    // Claude Code writes the project key as the real path; the cwd we receive from
+    // spawnClaude may differ (macOS /tmp→/private/tmp symlinks, trailing slashes,
+    // or case on case-insensitive filesystems).
+    let normalized = cwd;
+    try { normalized = realpathSync(cwd); } catch { /* path doesn't exist → use cwd as-is */ }
+    normalized = normalized.replace(/\/+$/, '');
+
+    // Strategy 1: exact match with normalized cwd
+    let lmu = projects[normalized]?.lastModelUsage;
+    if (lmu && typeof lmu === 'object') {
+      const entries = Object.entries(lmu).filter(([k]) => typeof k === 'string' && !/haiku/i.test(k));
+      if (entries.length) return pickBestModel(entries);
+    }
+
+    // Strategy 2: case-insensitive fallback (macOS/Windows)
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const lower = normalized.toLowerCase();
+      const matchKey = Object.keys(projects).find((k) => k.replace(/\/+$/, '').toLowerCase() === lower);
+      if (matchKey) {
+        lmu = projects[matchKey]?.lastModelUsage;
+        if (lmu && typeof lmu === 'object') {
+          const entries = Object.entries(lmu).filter(([k]) => typeof k === 'string' && !/haiku/i.test(k));
+          if (entries.length) return pickBestModel(entries);
+        }
+      }
+    }
+
+    return null;
   } catch {
     return null;
   }
