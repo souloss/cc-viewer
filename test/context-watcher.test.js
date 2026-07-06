@@ -298,6 +298,37 @@ describe('context-watcher: readClaudeProjectModel', () => {
       try { rmdirSync(dir); } catch {}
     }
   });
+
+  it('haiku-only exact match returns null — never bleeds into a case-variant sibling key', () => {
+    // The sibling is inserted FIRST so a naive case-insensitive scan would find
+    // it before the exact key; an exact usage record must decide alone.
+    withTmpClaudeJson({
+      projects: {
+        '/MY/PROJ': { lastModelUsage: { 'claude-opus-4-7': { costUSD: 99 } } },
+        '/my/proj': { lastModelUsage: { 'claude-haiku-4-5': { costUSD: 1 } } },
+      },
+    }, (tmpFile) => {
+      assert.equal(readClaudeProjectModel('/my/proj', tmpFile), null);
+    });
+  });
+
+  it('matches a raw symlink-path key even when realpath diverges from it', () => {
+    // Key stored as the symlink path itself (non-canonical): the raw cwd must be
+    // tried before the realpath'd form, or a previously-working lookup regresses.
+    const realDir = mkdtempSync(join(tmpdir(), 'ccv-test-rawkey-'));
+    const linkDir = join(tmpdir(), `ccv-test-rawlink-${Date.now()}`);
+    try {
+      symlinkSync(realDir, linkDir);
+      withTmpClaudeJson({
+        projects: { [linkDir]: { lastModelUsage: { 'claude-opus-4-7': { costUSD: 50 } } } },
+      }, (tmpFile) => {
+        assert.equal(readClaudeProjectModel(linkDir, tmpFile), 'claude-opus-4-7');
+      });
+    } finally {
+      try { unlinkSync(linkDir); } catch {}
+      try { rmdirSync(realDir); } catch {}
+    }
+  });
 });
 
 describe('context-watcher: buildContextWindowEvent', () => {

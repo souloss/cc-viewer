@@ -67,9 +67,10 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       deps.setWorkspaceLaunched(true);
 
       // 通知所有 SSE 客户端
+      const startedPayload = `event: workspace_started\ndata: ${JSON.stringify({ projectName: result.projectName, path: wsPath, claudeProjectModel: readClaudeProjectModel(wsPath) })}\n\n`;
       deps.clients.forEach(client => {
         try {
-          client.write(`event: workspace_started\ndata: ${JSON.stringify({ projectName: result.projectName, path: wsPath, claudeProjectModel: readClaudeProjectModel(wsPath) })}\n\n`);
+          client.write(startedPayload);
         } catch {}
       });
 

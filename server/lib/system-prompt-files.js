@@ -76,11 +76,8 @@ export function buildSystemPromptFileArgs(projectDir, existingArgs = [], env = p
       }
       return out; // 命中即返回：默认 sentinel 不再参与(含手动 flag 抑制注入的情况)。
     }
-    // modelId resolved but no matching entry found in either scope
-    console.warn(`[CC Viewer] model-specific prompt: modelId="${opts.modelId}" resolved but no matching entry found in workspace or global scopes`);
-  } else if (opts?.globalModelDir) {
-    // modelId is null — model matching entirely skipped; global entries cannot be checked
-    console.warn('[CC Viewer] model-specific prompt: no modelId resolved, model matching skipped (global scope prompts not checked)');
+    // No matching entry: fall through to the default sentinels. Diagnostics for
+    // this case live in the caller (pty-manager) — this stays a pure function.
   }
 
   // 整段替换：CC_SYSTEM.md → --system-prompt-file (用户已传 --system-prompt[-file] 则跳过)
