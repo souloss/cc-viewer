@@ -1,11 +1,5 @@
 <img height="200" width="1500" alt="CC-Viewer" src="https://github.com/user-attachments/assets/abec0513-1d56-4244-b7ed-9382b6c09049" />
 
-As the author's account has been disabled by Claude Code, updates to the repository are paused for a few weeks.
-
-The author is taking this opportunity to work on a multimodal project.
-
-If there are any critical bugs requiring fixes, please submit them via the issues section; they can still be addressed.
-
 # CC-Viewer
 
 Based on Claude Code, a Vibe Coding tool that distills and accumulates real development experience:
