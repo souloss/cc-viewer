@@ -250,49 +250,114 @@
   height: 14px;
 }
 
-/* UltraPlan 工具栏按钮文字：hover / 打开态 Claude Code 同款彩虹流光 + 加粗 */
+/* Rainbow shimmer (UltraPlan icon+label as one continuous ribbon, Quick Settings
+   sparkle standalone). The gradient is declared ONCE as --ultra-rainbow on
+   .toolbarBtn; --ultra-hi is the highlight stop (white on dark theme, black on
+   light). Both custom properties MUST live on the same element: var() inside a
+   custom property is substituted where the property is USED (the glyph/label),
+   resolving --ultra-hi from inheritance — declaring both on .toolbarBtn keeps that
+   resolution unambiguous (nothing below ever overrides --ultra-hi). */
 @keyframes ultraToggleShimmer {
   to { background-position: 200% center; }
 }
+.toolbarBtn {
+  --ultra-rainbow: linear-gradient(90deg, #ff6b6b, #ffa94d, var(--ultra-hi, #fff), #51cf66, #4dabf7, #b197fc, #ff6b6b);
+}
+:global([data-theme="light"]) .toolbarBtn {
+  --ultra-hi: #000;
+}
 
-/* 预留加粗后的宽度，避免 normal↔bold 切换时按钮宽度跳动：
-   inline-flex 列向，让隐藏的粗体 ::after 撑出该标签所需的最大宽度 */
+/* Always bold: keeps the label width stable, which the fixed-px continuity
+   keyframes below depend on (replaces the old hidden bold-clone ::after hack). */
 .ultraToggleLabel {
-  display: inline-flex;
-  flex-direction: column;
-}
-.ultraToggleLabel::after {
-  content: 'UltraPlan';
-  height: 0;
-  overflow: hidden;
-  visibility: hidden;
   font-weight: 700;
+  /* Optical centering: the label's line-box sits ~1px high against the icon glyph's
+     visual center, so nudge the text down to read as vertically aligned. Transform
+     (not margin/top) keeps layout — and the fixed-px shimmer continuity — unchanged. */
+  transform: translateY(1px);
 }
 
-.toolbarBtn:hover .ultraToggleLabel,
+/* Icon glyphs = mask-shaped spans painted by background color/gradient.
+   mask-image arrives via inline style (data-URIs exported from quickMenuIcons.jsx,
+   single source of truth with the SVG components); only mask LONGHANDS here — a
+   `mask:` shorthand would reset the other mask longhands in this rule. */
+.maskGlyph {
+  flex: none;
+  background: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+}
+.ultraToggleIcon {
+  composes: maskGlyph;
+  width: 14px;
+  height: 14px;
+}
+.quickSettingsGlyph {
+  composes: maskGlyph;
+  /* 14px, not the SVG's 15 attr: `.toolbarBtn svg` clamped the old sparkle to 14 */
+  width: 14px;
+  height: 14px;
+}
+
+/* Shimmer triggers: hover (never on the disabled variant, which stays fully
+   inert) or the corresponding open/active state.
+   Continuity contract: icon and label share one 160px-period gradient; the label
+   samples it 18px further along (14px icon + 4px flex gap, no other box
+   contributions), i.e. label phase ≡ icon phase − 18px at every frame — including
+   the static reduced-motion state via the background-position-x bases below. */
+.toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleLabel,
 .ultraToggleActive .ultraToggleLabel {
-  font-weight: 700;
-  /* --ultra-hi = 高光档：黑色模式用白、白色模式改黑（见下方 [data-theme=light] 覆盖） */
-  background: linear-gradient(90deg, #ff6b6b, #ffa94d, var(--ultra-hi, #fff), #51cf66, #4dabf7, #b197fc, #ff6b6b);
-  background-size: 200% auto;
+  background: var(--ultra-rainbow);
+  background-size: 160px 100%;
+  background-position-x: -18px;
+  /* clip longhands stay AFTER the background shorthand (it resets clip) */
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
+  animation: ultraLabelShimmer 2.4s linear infinite;
+}
+.toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleIcon,
+.ultraToggleActive .ultraToggleIcon {
+  background: var(--ultra-rainbow);
+  background-size: 160px 100%;
+  background-position-x: 0;
+  animation: ultraIconShimmer 2.4s linear infinite;
+}
+.toolbarBtn:not(.toolbarBtnDisabled):hover .quickSettingsGlyph,
+.quickSettingsBtnOpen .quickSettingsGlyph {
+  background: var(--ultra-rainbow);
+  background-size: 200% auto;
   animation: ultraToggleShimmer 2.4s linear infinite;
 }
 
-/* 浅色（白色）主题：黑色模式里那个白色高光在白底上几乎看不见，
-   仅把高光档由白改黑（其余彩虹色不变，size/clip/动画沿用上面规则） */
-:global([data-theme="light"]) .toolbarBtn:hover .ultraToggleLabel,
-:global([data-theme="light"]) .ultraToggleActive .ultraToggleLabel {
-  --ultra-hi: #000;
+/* Leftward flow (matches ultraToggleShimmer's direction, co-visible on the
+   sparkle). Both tracks advance one full 160px period per cycle and the
+   gradient's first/last stops are identical, so the loop wraps seamlessly;
+   the constant −18px offset is the icon→label continuity phase. */
+@keyframes ultraIconShimmer {
+  from { background-position-x: 0; }
+  to { background-position-x: -160px; }
+}
+@keyframes ultraLabelShimmer {
+  from { background-position-x: -18px; }
+  to { background-position-x: -178px; }
 }
 
-/* 尊重系统「减少动态效果」：保留彩虹与加粗，停掉流动动画 */
+/* Respect "reduce motion": keep the rainbow + bold, stop the flow. Same
+   specificity as the shimmer rules above — this block must stay AFTER them
+   in source order (no !important allowed). */
 @media (prefers-reduced-motion: reduce) {
-  .toolbarBtn:hover .ultraToggleLabel,
-  .ultraToggleActive .ultraToggleLabel { animation: none; }
+  .toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleLabel,
+  .ultraToggleActive .ultraToggleLabel,
+  .toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleIcon,
+  .ultraToggleActive .ultraToggleIcon,
+  .toolbarBtn:not(.toolbarBtnDisabled):hover .quickSettingsGlyph,
+  .quickSettingsBtnOpen .quickSettingsGlyph { animation: none; }
 }
 
 .virtualKeybar {

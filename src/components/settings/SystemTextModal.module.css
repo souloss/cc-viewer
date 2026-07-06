@@ -92,7 +92,7 @@
   align-items: center;
   gap: 5px;
   padding: 9px 14px;
-  font-size: 15px;
+  font-size: 12px;
   line-height: 1.6;
   border: 1px solid transparent;
   border-radius: 14px;
@@ -170,7 +170,7 @@
   border-radius: 8px;
   box-shadow: none;
   padding: 12px 14px;
-  font-size: 16px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--text-primary);
 }
@@ -241,7 +241,7 @@
   align-self: center;
   gap: 5px;
   padding: 6px 14px;
-  font-size: 15px;
+  font-size: 12px;
   line-height: 1.6;
   margin-left: 4px;
   margin-bottom: 2px;

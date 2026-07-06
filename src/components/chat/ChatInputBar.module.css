@@ -102,6 +102,50 @@
   border-color: var(--text-muted);
 }
 
+/* Rainbow shimmer for the input bar's round glyph buttons (desktop sparkle
+   quick-settings + desktop UltraPlan) — same recipe as the terminal toolbar
+   (TerminalPanel.module.css): mask-shaped span (mask-image arrives inline from
+   quickMenuIcons.jsx) painted currentColor at rest, animated gradient on hover /
+   open. Mobile branches keep their plain SVGs (different glyph + media-query
+   sizing) and are untouched. --ultra-hi highlight stop: white on dark theme,
+   black on light; both custom properties live on .plusBtn so the nested var()
+   resolves purely from inheritance. */
+@keyframes plusGlyphShimmer {
+  to { background-position: 200% center; }
+}
+.plusBtn {
+  --ultra-rainbow: linear-gradient(90deg, #ff6b6b, #ffa94d, var(--ultra-hi, #fff), #51cf66, #4dabf7, #b197fc, #ff6b6b);
+}
+:global([data-theme="light"]) .plusBtn {
+  --ultra-hi: #000;
+}
+.plusGlyph {
+  width: 16px; /* matches the old `.plusBtn svg` 16px clamp (desktop-only glyph) */
+  height: 16px;
+  flex: none;
+  background: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+}
+.plusBtn:hover .plusGlyph,
+.plusBtnOpen .plusGlyph,
+.plusBtnUltraOpen .plusGlyph {
+  background: var(--ultra-rainbow);
+  background-size: 200% auto;
+  animation: plusGlyphShimmer 2.4s linear infinite;
+}
+/* Respect "reduce motion": keep the rainbow, stop the flow. Same specificity as
+   the shimmer rule above — must stay AFTER it in source order (no !important). */
+@media (prefers-reduced-motion: reduce) {
+  .plusBtn:hover .plusGlyph,
+  .plusBtnOpen .plusGlyph,
+  .plusBtnUltraOpen .plusGlyph { animation: none; }
+}
+
 .micBtnRecording,
 .micBtnRecording:hover {
   background: var(--color-error);

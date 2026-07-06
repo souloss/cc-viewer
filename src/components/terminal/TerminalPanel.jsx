@@ -35,7 +35,7 @@ import ScratchTerminal from './ScratchTerminal';
 import { darkTerminalTheme, lightTerminalTheme, terminalFontFamily } from './terminalThemes';
 import { resizeImageIfNeeded } from '../../utils/imageResize';
 import UltraplanPanel, { readUltraplanPopoverSize, ultraplanOverlayInnerStyle } from './UltraplanPanel';
-import { SparkleIcon, AgentTeamIcon, UltraplanIcon, UploadIcon, TrashIcon } from '../common/quickMenuIcons';
+import { AgentTeamIcon, UploadIcon, TrashIcon, SPARKLE_MASK_STYLE, ULTRAPLAN_MASK_STYLE } from '../common/quickMenuIcons';
 import QuickAutoApproveRows from '../common/QuickAutoApproveRows';
 import { createQuickMenuHoverIntent } from '../../utils/quickMenuHoverIntent';
 import chrome from '../common/sharedChrome.module.css';
@@ -1777,7 +1777,7 @@ class TerminalPanel extends React.Component {
                 className={`${styles.toolbarBtn} ${styles.quickSettingsBtn} ${this.state.quickSettingsOpen ? styles.quickSettingsBtnOpen : ''}`}
                 title={t('ui.terminal.quickSettings')}
               >
-                <span className={styles.quickSettingsIcon}><SparkleIcon /></span>
+                <span className={styles.quickSettingsIcon}><span className={styles.quickSettingsGlyph} style={SPARKLE_MASK_STYLE} aria-hidden="true" /></span>
               </button>
             </Popover>
             {this.state.agentTeamEnabled ? (
@@ -1822,7 +1822,7 @@ class TerminalPanel extends React.Component {
                 }
               >
                 <button className={`${styles.toolbarBtn} ${this.state.ultraplanOpen ? styles.ultraToggleActive : ''}`} onClick={() => this.setState({ ultraplanOpen: true })} title={t('ui.ultraplan')}>
-                  <UltraplanIcon />
+                  <span className={styles.ultraToggleIcon} style={ULTRAPLAN_MASK_STYLE} aria-hidden="true" />
                   <span className={styles.ultraToggleLabel}>UltraPlan</span>
                 </button>
               </Popover>
@@ -1839,8 +1839,8 @@ class TerminalPanel extends React.Component {
                 }
               >
                 <button className={`${styles.toolbarBtn} ${styles.toolbarBtnDisabled}`} title={t('ui.ultraplan')}>
-                  <UltraplanIcon />
-                  <span>UltraPlan</span>
+                  <span className={styles.ultraToggleIcon} style={ULTRAPLAN_MASK_STYLE} aria-hidden="true" />
+                  <span className={styles.ultraToggleLabel}>UltraPlan</span>
                 </button>
               </Popover>
             )}

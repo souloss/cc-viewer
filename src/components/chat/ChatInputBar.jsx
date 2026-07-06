@@ -8,7 +8,7 @@ import ImageLightbox from '../common/ImageLightbox';
 import ConfirmRemoveButton from '../common/ConfirmRemoveButton';
 import styles from './ChatInputBar.module.css';
 import chrome from '../common/sharedChrome.module.css';
-import { SparkleIcon, AgentTeamIcon, UltraplanIcon, UploadIcon, TrashIcon } from '../common/quickMenuIcons';
+import { AgentTeamIcon, UltraplanIcon, UploadIcon, TrashIcon, SPARKLE_MASK_STYLE, ULTRAPLAN_MASK_STYLE } from '../common/quickMenuIcons';
 import QuickAutoApproveRows from '../common/QuickAutoApproveRows';
 import { createQuickMenuHoverIntent } from '../../utils/quickMenuHoverIntent';
 
@@ -357,7 +357,7 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
           <div className={styles.chatInputBottomLeft}>
           <div className={styles.plusArea}>
             <button className={`${styles.plusBtn}${plusOpen ? ` ${styles.plusBtnOpen}` : ''}`} onClick={() => (plusOpen ? closePlusMenu() : setPlusOpen(true))} title={!isMobile ? t('ui.terminal.quickSettings') : t('ui.chatInput.more')}>
-              {!isMobile ? <SparkleIcon /> : (
+              {!isMobile ? <span className={styles.plusGlyph} style={SPARKLE_MASK_STYLE} aria-hidden="true" /> : (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
@@ -476,8 +476,8 @@ function ChatInputBar({ inputRef, inputEmpty, inputSuggestion, terminalVisible, 
               overlayInnerStyle={ultraplanPopover.overlayInnerStyle}
               content={ultraplanPopover.content}
             >
-              <button className={styles.plusBtn} title="UltraPlan" onClick={onOpenUltraPlan}>
-                <UltraplanIcon />
+              <button className={`${styles.plusBtn}${ultraplanPopover.open ? ` ${styles.plusBtnUltraOpen}` : ''}`} title="UltraPlan" onClick={onOpenUltraPlan}>
+                <span className={styles.plusGlyph} style={ULTRAPLAN_MASK_STYLE} aria-hidden="true" />
               </button>
             </Popover>
           ) : (
