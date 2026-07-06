@@ -1,7 +1,7 @@
 import { resolveNativePath, LOG_DIR } from '../findcc.js';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, sep } from 'node:path';
-import { chmodSync, statSync } from 'node:fs';
+import { chmodSync, statSync, existsSync } from 'node:fs';
 import { platform, arch, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn, applyClaudeAltScreenPref } from './lib/terminal-env.js';
@@ -300,11 +300,21 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // IM 人格依赖默认 sentinel CC_APPEND_SYSTEM.md 注入，全局模型条目不得静默取代它。
   const spawnDir = cwd || process.cwd();
   const insideLogDir = spawnDir === LOG_DIR || spawnDir.startsWith(LOG_DIR + sep);
+  const resolvedModelId = insideLogDir ? null : _spawnModelReader(spawnDir);
   let sysPrompt = buildSystemPromptFileArgs(spawnDir, finalExtraArgs, process.env, {
-    modelId: insideLogDir ? null : _spawnModelReader(spawnDir),
+    modelId: resolvedModelId,
     globalModelDir: join(LOG_DIR, MODEL_PROMPT_DIR),
   });
-  if (_systemPromptFileRejectedPaths.has(claudePath)) sysPrompt = { args: [], loaded: [], model: null };
+  if (_systemPromptFileRejectedPaths.has(claudePath)) {
+    sysPrompt = { args: [], loaded: [], model: null };
+  } else if (resolvedModelId && !sysPrompt.model
+    && (existsSync(join(spawnDir, MODEL_PROMPT_DIR)) || existsSync(join(LOG_DIR, MODEL_PROMPT_DIR)))) {
+    // The one diagnostic case worth a warning: a system_prompt dir is configured
+    // but the resolved model matched no entry (likely a misnamed file). The
+    // successful-injection notice is emitted below via emitSpawnNotice (with
+    // internal-restart suppression); no-modelId spawns are the normal quiet path.
+    console.warn(`[CC Viewer] model-specific prompt: modelId="${resolvedModelId}" resolved but no matching entry found in workspace or global ${MODEL_PROMPT_DIR}/`);
+  }
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
   let command = claudePath;

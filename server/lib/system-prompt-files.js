@@ -76,6 +76,8 @@ export function buildSystemPromptFileArgs(projectDir, existingArgs = [], env = p
       }
       return out; // 命中即返回：默认 sentinel 不再参与(含手动 flag 抑制注入的情况)。
     }
+    // No matching entry: fall through to the default sentinels. Diagnostics for
+    // this case live in the caller (pty-manager) — this stays a pure function.
   }
 
   // 整段替换：CC_SYSTEM.md → --system-prompt-file (用户已传 --system-prompt[-file] 则跳过)

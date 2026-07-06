@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getClaudeConfigDir } from '../../findcc.js';
@@ -60,6 +60,26 @@ export function getContextSizeForModel(apiModelName) {
   return getModelMaxTokens(apiModelName);
 }
 
+function pickBestModel(entries) {
+  const withOneM = entries.find(([k]) => /\[1m\]/i.test(k));
+  if (withOneM) return withOneM[0];
+  entries.sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0));
+  return entries[0][0];
+}
+
+// Pick a model from one lastModelUsage record: drop aux (haiku) entries, then
+// pickBestModel. Shared by both lookup strategies so the selection heuristic
+// cannot silently diverge between them.
+function modelFromUsage(lmu) {
+  if (!lmu || typeof lmu !== 'object') return null;
+  const entries = Object.entries(lmu).filter(([k]) => typeof k === 'string' && !/haiku/i.test(k));
+  return entries.length ? pickBestModel(entries) : null;
+}
+
+// Single definition of key canonicalization used on BOTH sides of every
+// comparison below (cwd and projects key), so the two can never drift apart.
+const stripTrailingSlash = (p) => p.replace(/\/+$/, '');
+
 /**
  * 读 ~/.claude.json 里 projects[cwd].lastModelUsage，挑出 cwd 下"用得最多/最显式"的模型。
  * 给 cc-viewer UI 血条 calibration 在启动期(lastMainAgent 仅有 haiku init ping 时)
@@ -73,7 +93,7 @@ export function getContextSizeForModel(apiModelName) {
  *
  * 任何 IO / 解析异常返回 null；调用方应当作"没找到偏好"处理（auto 走冷启动 1M）。
  *
- * @param {string} cwd - 绝对路径，必须与 claude 写入 ~/.claude.json projects key 完全一致
+ * @param {string} cwd - 绝对路径；尾部斜杠 / symlink / 大小写差异会被归一化后匹配
  * @param {string} [filePath] - 可选注入文件路径，默认 CLAUDE_USER_CONFIG_FILE；单测用
  * @returns {string|null} model id（含 [1m] 后缀，例 "claude-opus-4-7[1m]"）或 null
  */
@@ -83,14 +103,43 @@ export function readClaudeProjectModel(cwd, filePath = CLAUDE_USER_CONFIG_FILE) 
     if (!existsSync(filePath)) return null;
     const raw = readFileSync(filePath, 'utf-8');
     const data = JSON.parse(raw);
-    const lmu = data?.projects?.[cwd]?.lastModelUsage;
-    if (!lmu || typeof lmu !== 'object') return null;
-    const entries = Object.entries(lmu).filter(([k]) => typeof k === 'string' && !/haiku/i.test(k));
-    if (!entries.length) return null;
-    const withOneM = entries.find(([k]) => /\[1m\]/i.test(k));
-    if (withOneM) return withOneM[0];
-    entries.sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0));
-    return entries[0][0];
+    const projects = data?.projects;
+    if (!projects || typeof projects !== 'object') return null;
+
+    // Claude Code keys projects by its own getcwd() (canonical), but the cwd we
+    // receive from spawnClaude may differ (macOS /tmp→/private/tmp symlinks,
+    // trailing slashes, or case on case-insensitive filesystems).
+    let normalized = cwd;
+    try { normalized = realpathSync(cwd); } catch { /* path doesn't exist → use cwd as-is */ }
+
+    // Strategy 1: exact key match — raw cwd first (any key that matched before
+    // normalization existed keeps matching), then the realpath'd form. When a
+    // usage record exists for this exact path, decide from it alone: haiku-only
+    // means "no preference here", not "go search other projects' keys".
+    let exactHit = false;
+    for (const key of new Set([stripTrailingSlash(cwd), stripTrailingSlash(normalized)])) {
+      const lmu = projects[key]?.lastModelUsage;
+      if (!lmu || typeof lmu !== 'object') continue;
+      exactHit = true;
+      const model = modelFromUsage(lmu);
+      if (model) return model;
+    }
+    if (exactHit) return null;
+
+    // Strategy 2: case-insensitive fallback. Default macOS/Windows filesystems
+    // are case-insensitive, so a stale-cased key (e.g. after a directory rename)
+    // still refers to the same directory. Only reached when no exact key had a
+    // usage record, so it can never override an exact match. Note this folds
+    // case on darwin unlike norm/normDir elsewhere in the repo (which are
+    // win32-only): those guard file access, this only rescues a display hint,
+    // so a false positive on a case-sensitive APFS volume is low-stakes.
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      const lower = stripTrailingSlash(normalized).toLowerCase();
+      const matchKey = Object.keys(projects).find((k) => stripTrailingSlash(k).toLowerCase() === lower);
+      if (matchKey) return modelFromUsage(projects[matchKey]?.lastModelUsage);
+    }
+
+    return null;
   } catch {
     return null;
   }
