@@ -164,7 +164,7 @@ The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=bottom-right&sealed_token=6501QLvep7S2E1FXSPdKqmxh3dHo98i-JOT_a7CzMRSTZ4PzYPtdbM6wt34aBdwffmlf)](https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=bottom-right)
+[![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=top-left&sealed_token=j2X2_c0TE1YPvV14JRmosH_FQhqDbWyTVlXO7A-LrTISexkOoasVDprqJ6Pp0fsRHbAZlwMNMHkoqEk1uD_3vTYaT9lJW3bFbO17293VsptQjoDRtsdjCQ)](https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=top-left)
 
 ## License
 
