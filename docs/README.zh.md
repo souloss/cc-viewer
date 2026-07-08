@@ -1,5 +1,8 @@
 # CC-Viewer
 
+🌐 **官网与功能一览: [weiesky.github.io/cc-viewer](https://weiesky.github.io/cc-viewer/)** — 支持 18 种语言。
+
+
 基于 Claude Code，蒸馏自身开发经验， 沉淀的 Vibe Coding 工具：
 
 1. 提升能力上限，可本地化运行/ultraPlan、/ultraReview，同时避免把项目代码完全暴露给Claude云端；

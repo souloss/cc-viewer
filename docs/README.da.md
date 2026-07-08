@@ -1,5 +1,8 @@
 # CC-Viewer
 
+🌐 **Websted og funktionsrundvisning: [weiesky.github.io/cc-viewer](https://weiesky.github.io/cc-viewer/)** — tilgængelig på 18 sprog.
+
+
 Et Vibe Coding-værktøjssæt destilleret fra egen udviklingserfaring og bygget på Claude Code:
 
 1. Hæv evneloftet: Kør /ultraPlan og /ultraReview lokalt, så din projektkode aldrig er fuldt eksponeret for Claudes cloud;

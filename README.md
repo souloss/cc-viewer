@@ -2,6 +2,8 @@
 
 # CC-Viewer
 
+🌐 **Website & feature tour: [weiesky.github.io/cc-viewer](https://weiesky.github.io/cc-viewer/)** — available in 18 languages (e.g. [简体中文](https://weiesky.github.io/cc-viewer/?lang=zh), [日本語](https://weiesky.github.io/cc-viewer/?lang=ja)).
+
 Based on Claude Code, a Vibe Coding tool that distills and accumulates real development experience:
 
 <img width="860" alt="cc-viewer — deploy once, share with every device" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/cc-viewer-share.svg" />

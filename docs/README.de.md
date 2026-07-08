@@ -1,5 +1,8 @@
 # CC-Viewer
 
+🌐 **Website & Feature-Tour: [weiesky.github.io/cc-viewer](https://weiesky.github.io/cc-viewer/)** — in 18 Sprachen verfügbar.
+
+
 Ein Vibe-Coding-Toolkit, das aus eigener Entwicklungserfahrung destilliert und auf Claude Code aufgebaut wurde:
 
 1. Fähigkeitsobergrenze erhöhen: Führen Sie /ultraPlan und /ultraReview lokal aus, damit Ihr Projektcode nie vollständig der Cloud von Claude ausgesetzt werden muss;
