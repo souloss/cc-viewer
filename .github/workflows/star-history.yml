@@ -1,0 +1,53 @@
+name: Star History
+
+# Self-hosted star-history chart. GitHub now restricts the star *timeline* (starred_at)
+# to authenticated tokens with access to the repo, so star-history.com can't render it for
+# third parties. The repo's own GITHUB_TOKEN can read its own stargazers with dates, so we
+# generate a static SVG and commit it; the README points at that file (no per-visitor token).
+#
+# If GITHUB_TOKEN ever lacks star-timeline access, create a fine-grained PAT (Metadata:
+# Read) as secret STAR_HISTORY_TOKEN and swap it in below.
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'   # weekly, Monday 03:17 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/gen-star-history.mjs'
+      - '.github/workflows/star-history.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: star-history
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Generate chart
+        run: node scripts/gen-star-history.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.STAR_HISTORY_TOKEN || secrets.GITHUB_TOKEN }}
+          STAR_REPO: ${{ github.repository }}
+          OUT: docs/star-history.svg
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- docs/star-history.svg; then
+            echo "No change."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/star-history.svg
+          git commit -m "chore(star-history): refresh chart [skip ci]"
+          git push

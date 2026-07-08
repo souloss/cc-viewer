@@ -164,7 +164,11 @@ The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=weiesky/cc-viewer&type=date&legend=bottom-right)](https://www.star-history.com/?repos=weiesky%2Fcc-viewer&type=date&legend=bottom-right)
+<a href="https://star-history.com/#weiesky/cc-viewer&Date">
+  <img alt="Star History Chart" src="https://raw.githubusercontent.com/weiesky/cc-viewer/main/docs/star-history.svg" width="720" />
+</a>
+
+<sub>Self-hosted chart, refreshed weekly by [`.github/workflows/star-history.yml`](./.github/workflows/star-history.yml) — GitHub now restricts live star-timeline data to repo tokens, so star-history.com can no longer render it for visitors.</sub>
 
 ## License
 
