@@ -265,10 +265,3 @@
   color: var(--color-primary);
   font-weight: 500;
 }
-
-/* AgentTeam 未启用时子菜单内的启用引导（提示文案需换行 + 按钮） */
-.quickMenuSubTipBox {
-  padding: 8px 12px;
-  width: 300px;
-  white-space: normal;
-}

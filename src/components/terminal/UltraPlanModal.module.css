@@ -126,13 +126,6 @@
   .editPencil { opacity: 1; }
 }
 
-.disabledTip {
-  padding: 16px;
-  font-size: 13px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
 /* padding 0 20px:tabs 自然位置距 modal 左右各 20px,视觉上是"行进入"的呼吸区。
    active tab 的 sticky 钉边位置是 left/right: 0,即贴 modal 内沿。两者不同 ——
    只有当滚动开始、active tab 行进到达 left/right: 0 时才会"撞墙"钉住;不滚动时

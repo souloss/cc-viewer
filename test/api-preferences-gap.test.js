@@ -228,6 +228,22 @@ describe('GET /api/claude-settings', () => {
     }
   });
 
+  it('does not override an explicit settings.json opt-out with the process env default', async () => {
+    // Launch injects CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1, but an explicit
+    // settings.json value must win (file env has precedence over process env).
+    const deps = { claudeSettings: { env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0' } } };
+    const prev = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+    process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
+    try {
+      const res = await callGet(claudeSettingsGet, deps);
+      const data = JSON.parse(res.body);
+      assert.equal(data.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, '0', 'explicit opt-out preserved over process env');
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+      else process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = prev;
+    }
+  });
+
   it('defaults model to null and flags to false when settings are empty', async () => {
     const res = await callGet(claudeSettingsGet, { claudeSettings: {} });
     const data = JSON.parse(res.body);

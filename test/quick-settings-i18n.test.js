@@ -34,12 +34,9 @@ const KEYS = [
   'ui.terminal.customShortcuts',        // 复用:AgentTeam 子菜单「自定义快捷方式」入口
   'ui.terminal.upload',                 // 复用:聊天输入栏快捷菜单「上传文件」行
   'ui.chatInput.clearContext',          // 复用:聊天输入栏快捷菜单「清空上下文」行
-  'ui.terminal.agentTeamEnable',        // 复用:终端菜单 AgentTeam 未启用时的启用按钮
-  'ui.terminal.agentTeamEnabling',      // 复用:终端菜单 AgentTeam 启用中状态
   'ui.chatInput.clearContextConfirm',   // 复用:清空上下文 Popconfirm 文案
   'ui.chatInput.more',                  // 复用:聊天输入栏 [+] 按钮 tooltip
   'ui.common.confirmCancel',            // 复用:Popconfirm 取消按钮
-  'ui.chatInput.agentTeamEnableHint',   // 新增:输入栏菜单 AgentTeam 未启用引导
   // 项目独立配置（偏好抽屉 + 移动端设置 + 本机管理弹窗）新增 key
   'ui.projectScopedPrefs.group',
   'ui.projectScopedPrefs',

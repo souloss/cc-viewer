@@ -11,13 +11,18 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { t } from './server/i18n.js';
-import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath, resolveNpmClaudePath, buildShellCandidates, setLogDir, LOG_DIR, hasClaude2xWrapper, getGlobalNodeModulesDir, PACKAGES, getClaudeConfigDir, isBrowserOpenSuppressed } from './findcc.js';
+import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath, resolveNpmClaudePath, buildShellCandidates, setLogDir, LOG_DIR, hasClaude2xWrapper, getGlobalNodeModulesDir, PACKAGES, getClaudeConfigDir, isBrowserOpenSuppressed, applyAgentTeamsDefault } from './findcc.js';
 import { ensureHooks, removeAllManagedHooks } from './server/lib/ensure-hooks.js';
 import { injectCliJsAt, removeCliJsInjectionAt, INJECT_START as _INJECT_START, INJECT_END as _INJECT_END, buildInjectBlock as _buildInjectBlock } from './server/lib/cli-inject.js';
 import { normalizeBasePath } from './server/lib/base-path.js';
 import { createHardenedCleanup, installWinKeypressFallback } from './server/lib/term-signals.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+// Default agent-teams (UltraPlan / AgentTeam) on unless the user explicitly
+// configured the flag (shell env or settings.json). Runs before any mode dispatch,
+// so the value is inherited by the spawned claude and reported by /api/claude-settings.
+applyAgentTeamsDefault();
 
 // Injection marker constants are defined in server/lib/cli-inject.js (for testability);
 // This file only re-exports them for use by helpers and hooks, preserving existing behavior.

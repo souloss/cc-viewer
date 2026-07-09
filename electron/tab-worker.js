@@ -9,6 +9,7 @@
  */
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { applyAgentTeamsDefault } from '../findcc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,6 +26,8 @@ process.env.CCV_CLI_MODE = '1';
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_START_PORT = process.env.CCV_START_PORT || '7048';
 process.env.CCV_MAX_PORT = process.env.CCV_MAX_PORT || '7099';
+// Default agent-teams (UltraPlan / AgentTeam) on unless explicitly configured (shell env or settings.json).
+applyAgentTeamsDefault();
 
 // 等首条 claude PTY 数据落入 outputBuffer 的兜底超时——超过仍 send ready 让前端开始加载。
 // claude TUI 启动通常 200-400ms 出首帧；600ms 留足空间又不至于让用户感受到明显延迟。

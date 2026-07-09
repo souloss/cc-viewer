@@ -21,6 +21,7 @@ import {
   getGlobalNodeModulesDir,
   pickSpawnableLookupResult,
   resolveNativePath,
+  applyAgentTeamsDefault,
 } from '../findcc.js';
 
 // ─── 环境快照：所有改写 process.env 的用例跑完后必须还原 ───
@@ -278,5 +279,77 @@ describe('findcc: resolveNativePath win32 候选 .exe 变体', () => {
       restoreEnv();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ═══════════ applyAgentTeamsDefault：启动期默认开启 agent-teams，尊重显式配置 ═══════════
+// 默认把 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS 置 '1'，但当用户已通过 shell env（任意值，
+// 含 '0'）或 settings.json 的 env 块显式配置时，一律不覆盖——让 settings.json 对 UI 与
+// 真正的 claude 进程都保持权威，避免 UI 显示关闭而进程仍强开的分歧。
+describe('findcc: applyAgentTeamsDefault', () => {
+  const KEY = 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS';
+  let root;
+  function setup() {
+    root = mkdtempSync(join(tmpdir(), 'agentteams-default-'));
+    process.env.CLAUDE_CONFIG_DIR = root;
+    delete process.env[KEY];
+  }
+  function teardown() {
+    restoreEnv();
+    delete process.env[KEY];
+    if (root) rmSync(root, { recursive: true, force: true });
+  }
+
+  it('unset + 无 settings.json → 默认置 "1"', () => {
+    setup();
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], '1');
+    } finally { teardown(); }
+  });
+
+  it('shell env 显式 "0" → 保留（不覆盖）', () => {
+    setup();
+    process.env[KEY] = '0';
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], '0');
+    } finally { teardown(); }
+  });
+
+  it('shell env 显式 "1" → 保留', () => {
+    setup();
+    process.env[KEY] = '1';
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], '1');
+    } finally { teardown(); }
+  });
+
+  it('settings.json env 显式配置该键（"0"）→ 不注入默认（保持 undefined，交给 settings.json 权威）', () => {
+    setup();
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({ env: { [KEY]: '0' } }));
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], undefined);
+    } finally { teardown(); }
+  });
+
+  it('settings.json 存在但无该键 → 仍置默认 "1"', () => {
+    setup();
+    writeFileSync(join(root, 'settings.json'), JSON.stringify({ env: { FOO: 'bar' } }));
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], '1');
+    } finally { teardown(); }
+  });
+
+  it('settings.json 非法 JSON → 吞掉错误并落默认 "1"', () => {
+    setup();
+    writeFileSync(join(root, 'settings.json'), '{ not valid json');
+    try {
+      applyAgentTeamsDefault();
+      assert.equal(process.env[KEY], '1');
+    } finally { teardown(); }
   });
 });

@@ -268,7 +268,10 @@ class ChatView extends React.Component {
       pendingImages: [], // [{ path, source }] — images uploaded/pasted, shown as previews in chat input
       uploadingItems: [], // [{ id, name, previewUrl }] — 上传在途的占位项(路径还没 resolve);预览条只从 pendingImages 渲染缩略图,故占位需独立 state
       sendDeferred: false, // 仅渲染用:有上传在途时按了发送 → 缓发态(发送按钮 spinner)。权威双发标志是实例字段 _sendDeferred
-      agentTeamEnabled: false,
+      // Optimistic: agent-teams is on by default at launch, so assume enabled until
+      // /api/claude-settings resolves — avoids a first-paint layout shift on the common
+      // path. Flips to false on mount/update only for the rare explicit opt-out.
+      agentTeamEnabled: true,
       ultraplanModalOpen: false, // 移动端专用（桌面走 ultraplanPopoverOpen 的终端同款弹层）
       ultraplanVariant: 'codeExpert',
       ultraplanPrompt: '',
@@ -486,9 +489,11 @@ class ChatView extends React.Component {
       }).catch(() => this.setState({ hasGit: false, gitChangesOpen: false }));
     });
     // Agent Team 启用状态从 props.claudeSettings 派生(由 SettingsContext 集中 fetch);
-    // mount 时若 settings 已 ready 立即同步,否则等 componentDidUpdate 接力。
-    if (this.props.claudeSettings?.env?.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1') {
-      this.setState({ agentTeamEnabled: true });
+    // mount 时若 settings 已 ready 立即同步(启用/关闭都要覆盖乐观默认),否则等
+    // componentDidUpdate 接力。claudeSettings 未 ready(null)时保留乐观默认 true。
+    if (this.props.claudeSettings) {
+      const enabled = this.props.claudeSettings?.env?.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+      if (enabled !== this.state.agentTeamEnabled) this.setState({ agentTeamEnabled: enabled });
     }
     // 桌面模式：containerRef 在 first render 后就绪，cdU 第一帧调 controller.bind
     // virtuoso 模式：scrollerRef 回调里 controller.bind
@@ -3678,7 +3683,6 @@ class ChatView extends React.Component {
               variant={this.state.ultraplanVariant}
               prompt={this.state.ultraplanPrompt}
               files={this.state.ultraplanFiles}
-              agentTeamEnabled={this.state.agentTeamEnabled}
               customExperts={this.state.customUltraplanExperts}
               expertOrder={this.state.ultraplanExpertOrder}
               expertHidden={this.state.ultraplanExpertHidden}

@@ -1,6 +1,6 @@
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir, arch } from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
 import { threadId } from 'node:worker_threads';
@@ -42,6 +42,22 @@ export function getClaudeConfigDir() {
   }
   // ████████████████████████████████████████████████████████████████████████████
   return join(homedir(), '.claude');
+}
+
+// Default the experimental agent-teams flag (UltraPlan / AgentTeam) ON at launch,
+// unless the user has explicitly configured it — via a shell env var (any value,
+// including "0") or the Claude settings.json `env` block. Deferring to settings.json
+// keeps it authoritative for BOTH the UI gate and the spawned claude process, so an
+// explicit opt-out there can't be silently overridden by the injected default.
+export function applyAgentTeamsDefault() {
+  if (process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== undefined) return;
+  try {
+    const settings = JSON.parse(readFileSync(join(getClaudeConfigDir(), 'settings.json'), 'utf8'));
+    if (settings?.env && Object.prototype.hasOwnProperty.call(settings.env, 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')) return;
+  } catch {
+    // No/unreadable/invalid settings.json → fall through to the default. Benign best-effort read.
+  }
+  process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
 }
 
 function resolveLogDir() {

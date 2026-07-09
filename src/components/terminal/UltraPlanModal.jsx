@@ -44,7 +44,7 @@ function _expertIcon(d) {
 }
 
 export default function UltraPlanModal({
-  open, variant, prompt, files, agentTeamEnabled, customExperts, expertOrder, expertHidden,
+  open, variant, prompt, files, customExperts, expertOrder, expertHidden,
   onClose, onVariantChange, onPromptChange, onSend, onUpload, onPaste, onRemoveFile, onOpenCustomEditor, onOpenManager,
   modalSize, onModalSizeChange,
 }) {
@@ -192,11 +192,7 @@ export default function UltraPlanModal({
           </div>
         </div>
 
-        {!agentTeamEnabled ? (
-          <div className={styles.disabledTip}>{t('ui.ultraplan.agentTeamRequired')}</div>
-        ) : (
-          <>
-            <div className={styles.variantRow}>
+        <div className={styles.variantRow}>
               {buildExpertList(customExperts, expertOrder, expertHidden)
                 .filter(d => !d.hidden)
                 .map(d => {
@@ -315,8 +311,6 @@ export default function UltraPlanModal({
                 {t('ui.ultraplan.upload')}
               </button>
             </div>
-          </>
-        )}
         </div>
       </div>
       {lightbox && (

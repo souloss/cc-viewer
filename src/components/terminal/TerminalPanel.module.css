@@ -235,16 +235,6 @@
   border-color: var(--text-disabled);
 }
 
-.toolbarBtnDisabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.toolbarBtnDisabled:hover {
-  background: var(--bg-elevated);
-  color: var(--text-light);
-  border-color: var(--border-secondary);
-}
-
 .toolbarBtn svg {
   width: 14px;
   height: 14px;
@@ -303,13 +293,12 @@
   height: 14px;
 }
 
-/* Shimmer triggers: hover (never on the disabled variant, which stays fully
-   inert) or the corresponding open/active state.
+/* Shimmer triggers: hover or the corresponding open/active state.
    Continuity contract: icon and label share one 160px-period gradient; the label
    samples it 18px further along (14px icon + 4px flex gap, no other box
    contributions), i.e. label phase ≡ icon phase − 18px at every frame — including
    the static reduced-motion state via the background-position-x bases below. */
-.toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleLabel,
+.toolbarBtn:hover .ultraToggleLabel,
 .ultraToggleActive .ultraToggleLabel {
   background: var(--ultra-rainbow);
   background-size: 160px 100%;
@@ -321,14 +310,14 @@
   color: transparent;
   animation: ultraLabelShimmer 2.4s linear infinite;
 }
-.toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleIcon,
+.toolbarBtn:hover .ultraToggleIcon,
 .ultraToggleActive .ultraToggleIcon {
   background: var(--ultra-rainbow);
   background-size: 160px 100%;
   background-position-x: 0;
   animation: ultraIconShimmer 2.4s linear infinite;
 }
-.toolbarBtn:not(.toolbarBtnDisabled):hover .quickSettingsGlyph,
+.toolbarBtn:hover .quickSettingsGlyph,
 .quickSettingsBtnOpen .quickSettingsGlyph {
   background: var(--ultra-rainbow);
   background-size: 200% auto;
@@ -352,11 +341,11 @@
    specificity as the shimmer rules above — this block must stay AFTER them
    in source order (no !important allowed). */
 @media (prefers-reduced-motion: reduce) {
-  .toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleLabel,
+  .toolbarBtn:hover .ultraToggleLabel,
   .ultraToggleActive .ultraToggleLabel,
-  .toolbarBtn:not(.toolbarBtnDisabled):hover .ultraToggleIcon,
+  .toolbarBtn:hover .ultraToggleIcon,
   .ultraToggleActive .ultraToggleIcon,
-  .toolbarBtn:not(.toolbarBtnDisabled):hover .quickSettingsGlyph,
+  .toolbarBtn:hover .quickSettingsGlyph,
   .quickSettingsBtnOpen .quickSettingsGlyph { animation: none; }
 }
 
@@ -430,12 +419,6 @@
 /* 团队预设按钮 */
 .vkTeamPreset {
   border-color: var(--color-green-border);
-}
-
-/* 禁用态操作按钮 */
-.vkDisabled {
-  opacity: 0.5;
-  border-style: dashed;
 }
 
 /* 预置快捷方式列表 */
@@ -620,12 +603,6 @@
   font-size: 13px;
   padding: 8px 12px;
   text-align: center;
-}
-
-.agentTeamDisabledTip {
-  color: var(--text-secondary);
-  font-size: 13px;
-  margin-bottom: 10px;
 }
 
 /* 终端工具栏 3 段式：

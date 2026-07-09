@@ -12,7 +12,6 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import { t } from '../../i18n';
-import { tc, getClaudeConfigDir } from '../../utils/tClaude';
 import { TerminalWsContext } from './TerminalWsContext';
 import { apiUrl } from '../../utils/apiUrl';
 import { isMobile, isIOS, isAndroid, isPad, isWindows, isMac } from '../../env';
@@ -231,8 +230,10 @@ class TerminalPanel extends React.Component {
     this.resizeObserver = null;
     this.state = {
       terminalFocused: false,
-      agentTeamEnabled: false,
-      agentTeamEnabling: false, // AgentTeam 启用请求在途（快捷菜单 loading + hover-intent holdOpen 依赖）
+      // Optimistic: agent-teams is on by default at launch, so assume enabled until
+      // /api/claude-settings resolves — avoids a first-paint layout shift on the common
+      // path. Flips to false on mount/update only for the rare explicit opt-out.
+      agentTeamEnabled: true,
       quickSettingsOpen: false,
       quickSettingsExpanded: null, // null | 'agentteam' | 'perm' | 'plan' —— 同时只展开一个子菜单
 
@@ -1531,13 +1532,11 @@ class TerminalPanel extends React.Component {
   };
 
   // 级联子菜单 hover-intent 共享实现见 utils/quickMenuHoverIntent。
-  // iPad 无 hover 不参与（tap 的 synthetic mouseEnter 会与 click 切换互抵），由点击行切换兜底；
-  // AgentTeam 启用请求进行中不收起，保住子菜单内 loading 按钮的进度反馈。
+  // iPad 无 hover 不参与（tap 的 synthetic mouseEnter 会与 click 切换互抵），由点击行切换兜底。
   _qmHover = createQuickMenuHoverIntent({
     getExpanded: () => this.state.quickSettingsExpanded,
     setExpanded: (k) => this.setState({ quickSettingsExpanded: k }),
     skip: () => isPad,
-    holdOpen: (key) => key === 'agentteam' && this.state.agentTeamEnabling,
   });
 
   handlePresetSend = (description) => {
@@ -1621,19 +1620,6 @@ class TerminalPanel extends React.Component {
   handleUltraplanPaste = (...a) => this._ultraplan.handlePaste(...a);
 
   handleUltraplanRemoveFile = (...a) => this._ultraplan.handleRemoveFile(...a);
-
-  handleEnableAgentTeam = () => {
-    if (this.state.agentTeamEnabling) return;
-    this.setState({ agentTeamEnabling: true });
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // 用当前真实的配置目录拼 prompt，避免 CLAUDE_CONFIG_DIR 用户让 Claude 去改错文件
-      const settingsPath = `${getClaudeConfigDir()}/settings.json`;
-      const prompt = `Add "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" to the env object in ${settingsPath}. If the env key does not exist, create it. Preserve all existing content. Only modify this one field. If ${settingsPath} does not exist, instead add the line: export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 to the user's shell profile (~/.zshrc or ~/.bashrc).`;
-      this.ws.send(JSON.stringify({ type: 'input', data: prompt + '\r' }));
-      message.success('需要重启 Claude Code 才能生效');
-    }
-    if ((!isMobile || isPad) && this.terminal) this.terminal.focus();
-  };
 
   render() {
     const { pendingImages, onRemovePendingImage } = this.props;
@@ -1722,54 +1708,46 @@ class TerminalPanel extends React.Component {
                     onHoverEnter={this._qmHover.enter}
                     onHoverLeave={this._qmHover.leave}
                   />
-                  {/* AgentTeam 快捷指令（自工具栏独立按钮迁入，置于菜单底部）：已启用展示
-                      指令列表，未启用展示启用引导；启用成功后子菜单原地刷新为列表。
-                      启用引导是终端版独有（依赖 this.ws / this.terminal），ChatInputBar
-                      的同款菜单有意不做该分支 */}
-                  <div
-                    className={`${chrome.quickMenuGroup} ${this.state.quickSettingsExpanded === 'agentteam' ? chrome.quickMenuGroupOpen : ''}`}
-                    onMouseEnter={() => this._qmHover.enter('agentteam')}
-                    onMouseLeave={() => this._qmHover.leave('agentteam')}
-                  >
-                    <button
-                      className={chrome.quickMenuRow}
-                      onClick={() => this.setState(s => ({ quickSettingsExpanded: s.quickSettingsExpanded === 'agentteam' ? null : 'agentteam' }))}
+                  {/* AgentTeam 快捷指令（自工具栏独立按钮迁入，置于菜单底部）：AgentTeam 启动时
+                      默认开启，展示自定义快捷方式 + 预设列表；仅当用户显式关闭
+                      （export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0）时整组隐藏 */}
+                  {this.state.agentTeamEnabled && (
+                    <div
+                      className={`${chrome.quickMenuGroup} ${this.state.quickSettingsExpanded === 'agentteam' ? chrome.quickMenuGroupOpen : ''}`}
+                      onMouseEnter={() => this._qmHover.enter('agentteam')}
+                      onMouseLeave={() => this._qmHover.leave('agentteam')}
                     >
-                      <span className={chrome.quickMenuRowIcon}><AgentTeamIcon /></span>
-                      <span className={chrome.quickMenuLabel}>{t('ui.terminal.agentTeam')}</span>
-                      <span className={chrome.quickMenuCaret}>▸</span>
-                    </button>
-                    <div className={chrome.quickMenuSubWrap}>
-                      <div className={chrome.quickMenuSub}>
-                        {this.state.agentTeamEnabled ? (
-                          <>
-                            <button className={`${styles.presetMenuItem} ${styles.presetMenuItemMuted}`} onClick={() => this.setState({ quickSettingsOpen: false, quickSettingsExpanded: null, presetModalVisible: true })}>
-                              {t('ui.terminal.customShortcuts')}
-                            </button>
-                            {this.state.presetItems.length === 0 ? (
-                              <div className={styles.popoverEmptyHint}>—</div>
-                            ) : (
-                              this.state.presetItems.map(item => {
-                                const isBuiltinRaw = item.builtinId && !item.modified;
-                                const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
-                                const desc = isBuiltinRaw ? t(item.description) : item.description;
-                                return (
-                                  <button key={item.id} className={styles.presetMenuItem} onClick={() => this.handlePresetSend(desc)} title={desc}>
-                                    {name || desc}
-                                  </button>
-                                );
-                              })
-                            )}
-                          </>
-                        ) : (
-                          <div className={chrome.quickMenuSubTipBox}>
-                            <div className={styles.agentTeamDisabledTip}>{tc('ui.terminal.agentTeamDisabledTip')}</div>
-                            <Button type="primary" size="small" loading={this.state.agentTeamEnabling} disabled={this.state.agentTeamEnabling} onClick={this.handleEnableAgentTeam}>{this.state.agentTeamEnabling ? t('ui.terminal.agentTeamEnabling') : t('ui.terminal.agentTeamEnable')}</Button>
-                          </div>
-                        )}
+                      <button
+                        className={chrome.quickMenuRow}
+                        onClick={() => this.setState(s => ({ quickSettingsExpanded: s.quickSettingsExpanded === 'agentteam' ? null : 'agentteam' }))}
+                      >
+                        <span className={chrome.quickMenuRowIcon}><AgentTeamIcon /></span>
+                        <span className={chrome.quickMenuLabel}>{t('ui.terminal.agentTeam')}</span>
+                        <span className={chrome.quickMenuCaret}>▸</span>
+                      </button>
+                      <div className={chrome.quickMenuSubWrap}>
+                        <div className={chrome.quickMenuSub}>
+                          <button className={`${styles.presetMenuItem} ${styles.presetMenuItemMuted}`} onClick={() => this.setState({ quickSettingsOpen: false, quickSettingsExpanded: null, presetModalVisible: true })}>
+                            {t('ui.terminal.customShortcuts')}
+                          </button>
+                          {this.state.presetItems.length === 0 ? (
+                            <div className={styles.popoverEmptyHint}>—</div>
+                          ) : (
+                            this.state.presetItems.map(item => {
+                              const isBuiltinRaw = item.builtinId && !item.modified;
+                              const name = isBuiltinRaw ? t(item.teamName) : item.teamName;
+                              const desc = isBuiltinRaw ? t(item.description) : item.description;
+                              return (
+                                <button key={item.id} className={styles.presetMenuItem} onClick={() => this.handlePresetSend(desc)} title={desc}>
+                                  {name || desc}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               }
             >
@@ -1826,24 +1804,7 @@ class TerminalPanel extends React.Component {
                   <span className={styles.ultraToggleLabel}>UltraPlan</span>
                 </button>
               </Popover>
-            ) : (
-              <Popover
-                trigger="click"
-                placement="top"
-                overlayInnerStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-hover)', borderRadius: 8, padding: '12px 16px', maxWidth: 360 }}
-                content={
-                  <div>
-                    <div className={styles.agentTeamDisabledTip}>{t('ui.ultraplan.agentTeamRequired')}</div>
-                    <Button type="primary" size="small" loading={this.state.agentTeamEnabling} disabled={this.state.agentTeamEnabling} onClick={this.handleEnableAgentTeam}>{this.state.agentTeamEnabling ? t('ui.terminal.agentTeamEnabling') : t('ui.terminal.agentTeamEnable')}</Button>
-                  </div>
-                }
-              >
-                <button className={`${styles.toolbarBtn} ${styles.toolbarBtnDisabled}`} title={t('ui.ultraplan')}>
-                  <span className={styles.ultraToggleIcon} style={ULTRAPLAN_MASK_STYLE} aria-hidden="true" />
-                  <span className={styles.ultraToggleLabel}>UltraPlan</span>
-                </button>
-              </Popover>
-            )}
+            ) : null}
             <button className={styles.toolbarBtn} onClick={() => this.fileInputRef.current?.click()} title={t('ui.terminal.upload')}>
               <UploadIcon />
             </button>
@@ -2016,19 +1977,7 @@ class TerminalPanel extends React.Component {
                   );
                 })}
               </>
-            ) : (
-              <>
-                <span className={styles.vkSeparator} />
-                <button
-                  className={`${styles.virtualKey} ${styles.vkAction} ${styles.vkDisabled}`}
-                  onTouchStart={this._vkTouchStart}
-                  onTouchMove={this._vkTouchMove}
-                  onTouchEnd={(e) => this._vkTouchEnd(() => this.handleEnableAgentTeam(), e)}
-                >
-                  <AgentTeamIcon /><span className={styles.vkTeamLabel}>{t('ui.terminal.agentTeam')}</span>
-                </button>
-              </>
-            )}
+            ) : null}
           </div>
         )}
         {/* 预置快捷方式弹窗 */}
