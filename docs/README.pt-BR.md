@@ -136,7 +136,7 @@ Realize sua imaginação sobre programação móvel. Também há um mecanismo de
 
 ### Prompts de sistema por modelo
 
-O modal **Editar prompt do sistema** (Preferências → Configurações avançadas) é organizado em abas:
+O modal **Editar prompt do sistema** (menu de hambúrguer → Editar prompt do sistema) é organizado em abas:
 
 * A aba **Padrão** mantém o comportamento clássico: grava `CC_SYSTEM.md` (sobrescrever) ou `CC_APPEND_SYSTEM.md` (acrescentar) no espaço de trabalho atual, injetado como `--system-prompt-file` / `--append-system-prompt-file` na próxima inicialização do ccv.
 * **Abas de modelo**: clique em **+ Adicionar modelo**, digite um nome como `opus` ou `Gemini3` e escolha um escopo — **Global** (`~/.claude/cc-viewer/system_prompt/`, aplica-se a todos os espaços de trabalho) ou **Espaço de trabalho** (`<project>/system_prompt/`). Cada aba tem seu próprio interruptor Acrescentar/Sobrescrever e sua própria pré-visualização de Markdown.

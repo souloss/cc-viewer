@@ -1,14 +1,14 @@
 /**
- * Guards for the blurred-overlay mask of the six hamburger-menu feature modals.
+ * Guards for the blurred-overlay mask of the seven hamburger-menu feature modals.
  *
  * Two invariants:
  *  1. BLUR_MASK_STYLE mirrors the AskUserQuestion / plan approval overlay
  *     (`.backdrop` in src/components/approval/ApprovalModal.module.css). If
  *     either side changes without the other, this suite fails (readFileSync
  *     source-guard, same pattern as test/expert-i18n.test.js).
- *  2. EXACTLY six modal files consume BLUR_MASK_STYLE. The user requirement is
- *     "blur these six pop-ups and no others" — this walk catches both a target
- *     dropping out AND a seventh modal silently adopting the blur.
+ *  2. EXACTLY the seven hamburger-menu feature modals consume BLUR_MASK_STYLE.
+ *     This walk catches both a target dropping out AND another modal silently
+ *     adopting the blur.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +20,7 @@ import { BLUR_MASK_STYLE } from '../src/utils/modalMask.js';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const APPROVAL_CSS = readFileSync(join(ROOT, 'src/components/approval/ApprovalModal.module.css'), 'utf8');
 
-// The six top-level feature modals (plus the constant's own module).
+// The seven top-level hamburger-menu feature modals (plus the constant's own module).
 const EXPECTED_CONSUMERS = [
   'src/utils/modalMask.js',
   'src/App.jsx',                                    // Log Management
@@ -29,6 +29,7 @@ const EXPECTED_CONSUMERS = [
   'src/components/settings/ProcessModal.jsx',       // CCV Process Manager
   'src/components/settings/MessagingModal.jsx',     // Messaging Integration
   'src/components/settings/ProxyModal.jsx',         // Hot-Switch Proxy
+  'src/components/settings/SystemTextModal.jsx',    // Edit System Prompt
 ].sort();
 
 describe('BLUR_MASK_STYLE — sync with the approval-overlay reference', () => {
@@ -58,7 +59,7 @@ describe('BLUR_MASK_STYLE — sync with the approval-overlay reference', () => {
 });
 
 describe('BLUR_MASK_STYLE — exact consumer set (no other pop-up may adopt it)', () => {
-  it('exactly the six feature modals (plus the constant module) reference it', () => {
+  it('exactly the seven feature modals (plus the constant module) reference it', () => {
     const entries = readdirSync(join(ROOT, 'src'), { recursive: true, withFileTypes: true });
     const consumers = [];
     for (const ent of entries) {
@@ -73,7 +74,7 @@ describe('BLUR_MASK_STYLE — exact consumer set (no other pop-up may adopt it)'
       'must be a deliberate decision: update EXPECTED_CONSUMERS with it');
   });
 
-  it('each of the six modal files wires it into a styles mask entry', () => {
+  it('each of the seven modal files wires it into a styles mask entry', () => {
     for (const file of EXPECTED_CONSUMERS) {
       if (file === 'src/utils/modalMask.js') continue;
       const text = readFileSync(join(ROOT, file), 'utf8');

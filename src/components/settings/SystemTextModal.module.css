@@ -194,10 +194,9 @@
   flex-shrink: 0;
 }
 
+/* Show the full model name (no truncation); the tab row scrolls horizontally
+   (.tabRow overflow-x:auto) when names are long. */
 .tabTitle {
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -317,15 +316,48 @@
   color: var(--color-primary);
   border-color: var(--color-primary);
 }
+/* The title "?" opens the parameter-docs modal on click (the inline field "?"s
+   keep the default hover-tooltip affordance). */
+.helpBtnClickable {
+  cursor: pointer;
+}
 
-/* 「+ 添加模型」Popover 内容。 */
-.addPopover {
+/* Parameter-docs modal body: scrollable rendered-markdown container. */
+.docBox {
+  max-height: 65vh;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Add-model modal: one labelled row per field (label + inline "?"), then the control. */
+.addModalBody {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: 240px;
+  gap: 14px;
+  margin-top: 4px;
 }
+.addModalField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fieldLabelRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary, #888);
+}
+
 .addError {
   font-size: 12px;
   color: var(--color-error, #d4380d);
+}
+.presetSelect {
+  width: 100%;
+}
+.presetMatched {
+  font-size: 11px;
+  color: var(--color-text-secondary, #888);
 }

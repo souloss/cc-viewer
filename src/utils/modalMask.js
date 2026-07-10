@@ -1,6 +1,6 @@
-// Blurred-overlay mask for the six hamburger-menu feature modals (Log
+// Blurred-overlay mask for the seven hamburger-menu feature modals (Log
 // Management, Export user prompts, Plugin Management, CCV Process Manager,
-// Messaging Integration, Hot-Switch Proxy).
+// Messaging Integration, Hot-Switch Proxy, Edit System Prompt).
 //
 // Values mirror the AskUserQuestion / plan approval overlay (`.backdrop` in
 // src/components/approval/ApprovalModal.module.css) — KEEP IN SYNC, guarded by

@@ -136,7 +136,7 @@ Réalisez votre imagination de la programmation mobile. Il existe également un 
 
 ### Prompts système par modèle
 
-La fenêtre modale **Modifier le prompt système** (Préférences → Paramètres experts) est organisée en onglets :
+La fenêtre modale **Modifier le prompt système** (menu hamburger → Modifier le prompt système) est organisée en onglets :
 
 * L'onglet **Défaut** conserve le comportement classique : il écrit `CC_SYSTEM.md` (remplacer) ou `CC_APPEND_SYSTEM.md` (ajouter) dans l'espace de travail courant, injecté via `--system-prompt-file` / `--append-system-prompt-file` au prochain lancement de ccv.
 * **Onglets de modèle** : cliquez sur **+ Ajouter un modèle**, saisissez un nom comme `opus` ou `Gemini3`, puis choisissez une portée — **Global** (`~/.claude/cc-viewer/system_prompt/`, s'applique à tous les espaces de travail) ou **Espace de travail** (`<project>/system_prompt/`). Chaque onglet possède son propre commutateur Ajouter/Remplacer et son aperçu Markdown.

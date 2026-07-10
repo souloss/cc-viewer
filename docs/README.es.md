@@ -136,7 +136,7 @@ Cumpla su imaginación sobre la programación móvil. También hay un mecanismo 
 
 ### Prompts del sistema por modelo
 
-El modal **Editar prompt del sistema** (Preferencias → Configuración avanzada) está organizado en pestañas:
+El modal **Editar prompt del sistema** (menú de hamburguesa → Editar prompt del sistema) está organizado en pestañas:
 
 * La pestaña **Predeterminado** conserva el comportamiento clásico: escribe `CC_SYSTEM.md` (sustituir) o `CC_APPEND_SYSTEM.md` (añadir) en el espacio de trabajo actual, inyectado como `--system-prompt-file` / `--append-system-prompt-file` en el siguiente arranque de ccv.
 * **Pestañas de modelo**: haga clic en **+ Añadir modelo**, escriba un nombre como `opus` o `Gemini3` y elija un ámbito — **Global** (`~/.claude/cc-viewer/system_prompt/`, se aplica a todos los espacios de trabajo) o **Espacio de trabajo** (`<project>/system_prompt/`). Cada pestaña tiene su propio interruptor Añadir/Sustituir y su vista previa de Markdown.

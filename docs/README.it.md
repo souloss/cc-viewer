@@ -136,7 +136,7 @@ Realizza la tua immaginazione della programmazione mobile. C'è anche un meccani
 
 ### Prompt di sistema per modello
 
-La finestra modale **Modifica prompt di sistema** (Preferenze → Impostazioni avanzate) è organizzata in schede:
+La finestra modale **Modifica prompt di sistema** (menu hamburger → Modifica prompt di sistema) è organizzata in schede:
 
 * La scheda **Predefinito** mantiene il comportamento classico: scrive `CC_SYSTEM.md` (sovrascrivi) o `CC_APPEND_SYSTEM.md` (aggiungi) nell'area di lavoro corrente, iniettato come `--system-prompt-file` / `--append-system-prompt-file` al successivo avvio di ccv.
 * **Schede modello**: fai clic su **+ Aggiungi modello**, digita un nome come `opus` o `Gemini3` e scegli un ambito — **Globale** (`~/.claude/cc-viewer/system_prompt/`, si applica a ogni area di lavoro) o **Area di lavoro** (`<project>/system_prompt/`). Ogni scheda ha il proprio interruttore Aggiungi/Sovrascrivi e la propria anteprima Markdown.

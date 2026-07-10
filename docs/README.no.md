@@ -136,7 +136,7 @@ Oppfyll din forestilling om mobil programmering. Det finnes også en plugin-meka
 
 ### Modellspesifikke systemprompter
 
-Modalen **Rediger systemprompt** (Innstillinger → Ekspertinnstillinger) er delt inn i faner:
+Modalen **Rediger systemprompt** (hamburgermeny → Rediger systemprompt) er delt inn i faner:
 
 * Fanen **Standard** beholder den klassiske oppførselen: den skriver `CC_SYSTEM.md` (overskriv) eller `CC_APPEND_SYSTEM.md` (legg til) i det gjeldende arbeidsområdet, injisert som `--system-prompt-file` / `--append-system-prompt-file` ved neste ccv-oppstart.
 * **Modellfaner**: klikk på **+ Legg til modell**, skriv inn et navn som `opus` eller `Gemini3`, og velg et omfang — **Global** (`~/.claude/cc-viewer/system_prompt/`, gjelder for alle arbeidsområder) eller **Arbeidsområde** (`<project>/system_prompt/`). Hver fane har sin egen Legg til/Overskriv-bryter og Markdown-forhåndsvisning.

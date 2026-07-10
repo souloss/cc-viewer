@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Modal, Input, Switch, Spin, Tooltip, message } from 'antd';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { renderMarkdown } from '../../utils/markdown';
+import { reportSwallowed } from '../../utils/errorReport';
+import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import ModelPromptTabs from './ModelPromptTabs';
 import styles from './SystemTextModal.module.css';
 
@@ -32,6 +34,9 @@ export default function SystemTextModal({ open, onClose }) {
   const [drafts, setDrafts] = useState({});        // { key: {text, mode} } 编辑草稿
   const [persisted, setPersisted] = useState({});  // { key: true } 服务端已存在(区分新建未保存页签)
   const [activeKey, setActiveKey] = useState('default');
+  const [presets, setPresets] = useState([]);      // 内置系统提示词预设 [{id,title,description,match,defaultMode,text}]
+  const [variablesDoc, setVariablesDoc] = useState(''); // ${...} 变量参数文档(markdown)
+  const [docOpen, setDocOpen] = useState(false);   // 参数文档二级弹窗开关
   const textareaRef = useRef(null);
 
   useEffect(() => {
@@ -39,12 +44,16 @@ export default function SystemTextModal({ open, onClose }) {
     let cancelled = false; // 关闭/卸载后丢弃在途响应，避免对已卸载组件 setState
     setPreview(false); // 每次打开默认回到编辑态
     setActiveKey('default');
+    setVariablesDoc(''); // 清空上次的文档，避免本次拉取失败时残留旧内容
+    setDocOpen(false);
     setLoading(true);
-    // 两个 GET 各自失败互不拖累(allSettled)：任一失败提示 loadError，另一半照常填充。
+    // 三个 GET 各自失败互不拖累(allSettled)：system-text/model-prompts 任一失败提示 loadError；
+    // presets 失败为非致命(下拉降级为隐藏/仅空白)，不弹 loadError。
     Promise.allSettled([
       fetch(apiUrl('/api/expert/system-text')).then((r) => r.json()),
       fetch(apiUrl('/api/expert/model-prompts')).then((r) => r.json()),
-    ]).then(([sysR, mpR]) => {
+      fetch(apiUrl('/api/expert/system-prompt-presets')).then((r) => r.json()),
+    ]).then(([sysR, mpR, presetR]) => {
       if (cancelled) return;
       const snaps = {};
       const pers = {};
@@ -76,6 +85,15 @@ export default function SystemTextModal({ open, onClose }) {
       } else {
         setGlobalDir(null);
         message.error(t('ui.expert.systemText.loadError'));
+      }
+      // 预设为非致命：失败/异常只记录(reportSwallowed，因丢失预设会降级 UI)，不打断加载。
+      if (presetR.status === 'fulfilled' && presetR.value && !presetR.value.error && Array.isArray(presetR.value.presets)) {
+        setPresets(presetR.value.presets);
+        setVariablesDoc(typeof presetR.value.variablesDoc === 'string' ? presetR.value.variablesDoc : '');
+      } else {
+        setPresets([]);
+        setVariablesDoc('');
+        reportSwallowed('systemPromptPresets.fetch', presetR.reason || new Error(presetR.value?.error || 'presets_unavailable'));
       }
       setEntries(list);
       setSnapshots(snaps);
@@ -114,7 +132,9 @@ export default function SystemTextModal({ open, onClose }) {
   };
 
   // 「+ 添加模型」：校验(与服务端规则一致)后本地建页签；返回错误文案或 null。
-  const handleAdd = (name, scope) => {
+  // presetId 命中内置预设时，用其原始模板文本(占位符保持字面量)预填草稿；快照仍为空，
+  // 故新页签读作 dirty、可被 handleSave 保存。
+  const handleAdd = (name, scope, presetId) => {
     if (!MODEL_NAME_RE.test(name) || /_APPEND$/i.test(name)) return t('ui.expert.systemText.invalidName');
     if (name.toLowerCase() === 'default') return t('ui.expert.systemText.reservedName');
     const canonical = name.toUpperCase();
@@ -122,10 +142,14 @@ export default function SystemTextModal({ open, onClose }) {
       return t('ui.expert.systemText.duplicateName');
     }
     if (scope === 'workspace' && !active) return t('ui.expert.systemText.noWorkspace');
+    const preset = presetId ? presets.find((p) => p.id === presetId) : null;
+    const seeded = preset
+      ? { text: preset.text || '', mode: preset.defaultMode === 'override' ? 'override' : 'append' }
+      : { ...EMPTY_DRAFT };
     const key = tabKeyOf(scope, canonical);
     setEntries((prev) => [...prev, { name: canonical, scope }]);
-    setSnapshots((prev) => ({ ...prev, [key]: { ...EMPTY_DRAFT } }));
-    setDrafts((prev) => ({ ...prev, [key]: { ...EMPTY_DRAFT } }));
+    setSnapshots((prev) => ({ ...prev, [key]: { ...EMPTY_DRAFT } })); // 快照留空 → 有预填即为 dirty
+    setDrafts((prev) => ({ ...prev, [key]: seeded }));
     setActiveKey(key);
     setPreview(false);
     setTimeout(() => textareaRef.current?.focus?.(), 0); // 新页签即刻可输入(添加后的编辑入口)
@@ -222,14 +246,29 @@ export default function SystemTextModal({ open, onClose }) {
 
   const curEditable = editable(activeKey);
   const isGlobalTab = activeKey.startsWith('global:');
+  // 参数文档只在其内容变化时重渲染 markdown(避免主编辑器每次按键都重解析 ~6KB)。
+  const docHtml = useMemo(() => (variablesDoc ? renderMarkdown(variablesDoc) : ''), [variablesDoc]);
 
   return (
+    <>
     <Modal
       title={(
         <span className={styles.titleRow}>
           {t('ui.expert.systemText')}
-          <Tooltip title={t('ui.expert.systemText.modelHelp')} trigger={['hover', 'click']} placement="bottomLeft">
-            <span className={styles.helpBtn} aria-label={t('ui.expert.systemText.modelHelp')}>?</span>
+          {/* 标题「?」：hover 显示功能说明(原「专家设置」的 about);有变量文档时点击打开 ${...} 参数参考弹窗。 */}
+          <Tooltip title={t('ui.expert.help')} placement="bottomLeft">
+            {variablesDoc ? (
+              <span
+                className={`${styles.helpBtn} ${styles.helpBtnClickable}`}
+                role="button"
+                tabIndex={0}
+                aria-label={t('ui.expert.systemText.paramDocTitle')}
+                onClick={() => setDocOpen(true)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDocOpen(true); } }}
+              >?</span>
+            ) : (
+              <span className={styles.helpBtn} aria-label={t('ui.expert.help')}>?</span>
+            )}
           </Tooltip>
         </span>
       )}
@@ -241,6 +280,7 @@ export default function SystemTextModal({ open, onClose }) {
       okButtonProps={{ loading: saving, disabled: loading || saveableDirty.length === 0 }}
       width="min(900px, 92vw)"
       zIndex={1100}
+      styles={{ mask: BLUR_MASK_STYLE }}
     >
       <Spin spinning={loading}>
         <ModelPromptTabs
@@ -249,6 +289,7 @@ export default function SystemTextModal({ open, onClose }) {
           dirtyKeys={dirtyKeys}
           workspaceEnabled={active}
           disabled={loading || saving}
+          presets={presets}
           onSelect={selectTab}
           onAdd={handleAdd}
           onDelete={handleDelete}
@@ -308,5 +349,21 @@ export default function SystemTextModal({ open, onClose }) {
         )}
       </Spin>
     </Modal>
+
+    {/* 参数文档二级弹窗：渲染 ${...} 变量参考(只读)。 */}
+    <Modal
+      open={docOpen}
+      title={t('ui.expert.systemText.paramDocTitle')}
+      onCancel={() => setDocOpen(false)}
+      footer={null}
+      width="min(760px, 92vw)"
+      zIndex={1300}
+    >
+      <div
+        className={`${styles.docBox} chat-md`}
+        dangerouslySetInnerHTML={{ __html: docHtml }}
+      />
+    </Modal>
+    </>
   );
 }

@@ -12,6 +12,7 @@ import {
   MODEL_PROMPT_DIR, normalizeModelName, listModelPrompts,
   writeModelPrompt, deleteModelPrompt,
 } from '../lib/model-system-prompts.js';
+import { listSystemPromptPresets, groupPresetsByCategory, getSystemPromptVariablesDoc } from '../lib/system-prompt-presets.js';
 import { LOG_DIR } from '../../findcc.js';
 
 // 当前工作区目录全部由服务端解析（绝不接收客户端路径 → 无遍历面）：
@@ -148,9 +149,26 @@ function postModelPrompts(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// 内置系统提示词预设（server/system-prompt-templates/presets/*）：只读，返回可直接回填编辑器的原始模板文本
+// （占位符保持字面量，不做变量替换），供「+ 添加模型」时按名称匹配/下拉选择预填。
+function getSystemPromptPresets(req, res, parsedUrl, isLocal, deps) {
+  try {
+    const presets = listSystemPromptPresets();
+    sendJson(res, 200, {
+      presets,
+      categories: groupPresetsByCategory(presets),
+      variablesDoc: getSystemPromptVariablesDoc(),
+    });
+  } catch (e) {
+    console.error('[CC Viewer] expert system-prompt-presets GET failed:', e.message);
+    sendJson(res, 500, { error: 'read_failed' });
+  }
+}
+
 export const expertRoutes = [
   { method: 'GET', match: 'exact', path: '/api/expert/system-text', handler: getSystemText },
   { method: 'POST', match: 'exact', path: '/api/expert/system-text', handler: postSystemText },
   { method: 'GET', match: 'exact', path: '/api/expert/model-prompts', handler: getModelPrompts },
   { method: 'POST', match: 'exact', path: '/api/expert/model-prompts', handler: postModelPrompts },
+  { method: 'GET', match: 'exact', path: '/api/expert/system-prompt-presets', handler: getSystemPromptPresets },
 ];

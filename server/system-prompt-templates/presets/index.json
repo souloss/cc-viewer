@@ -1,0 +1,39 @@
+{
+  "$comment": "Hand-editable manifest of built-in system-prompt presets. Each preset file (presets/<id>.md) is a self-contained template (its own boundary + OS-only Environment + verbatim Memory; no Git). `match` is a case-insensitive model-id substring used to auto-select a preset when adding a model in the Edit System Prompt modal. `defaultMode` seeds the tab's override/append toggle.",
+  "categories": {
+    "Global": [
+      {
+        "id": "deepseek-v4-pro",
+        "title": "DeepSeek V4 Pro",
+        "file": "deepseek-v4-pro.md",
+        "description": "Thorough coding agent tuned for DeepSeek V4 Pro: careful reasoning, tracked multi-step work, verify-before-done.",
+        "match": "deepseek-v4-pro",
+        "defaultMode": "override"
+      },
+      {
+        "id": "deepseek-v4-flash",
+        "title": "DeepSeek V4 Flash",
+        "file": "deepseek-v4-flash.md",
+        "description": "Terse, action-biased prompt tuned for the fast DeepSeek V4 Flash model.",
+        "match": "deepseek-v4-flash",
+        "defaultMode": "override"
+      },
+      {
+        "id": "GLM-5.2",
+        "title": "GLM-5.2",
+        "file": "GLM-5.2.md",
+        "description": "Balanced software-engineering agent prompt tuned for GLM-5.2.",
+        "match": "glm-5.2",
+        "defaultMode": "override"
+      },
+      {
+        "id": "Qwen-3.7-Max",
+        "title": "Qwen 3.7 Max",
+        "file": "Qwen-3.7-Max.md",
+        "description": "Thorough coding agent prompt tuned for Qwen 3.7 Max.",
+        "match": "qwen-3.7-max",
+        "defaultMode": "override"
+      }
+    ]
+  }
+}

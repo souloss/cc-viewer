@@ -136,7 +136,7 @@ ccv -h
 
 ### 按模型定制系統提示詞
 
-**編輯系統提示詞**模態框（偏好設定 → 專家設定）採用分頁設計：
+**編輯系統提示詞**模態框（漢堡選單 → 編輯系統提示詞）採用分頁設計：
 
 * **預設**分頁保留經典行為：它會將 `CC_SYSTEM.md`（覆蓋）或 `CC_APPEND_SYSTEM.md`（追加）寫入目前工作區，並在下次 ccv 啟動時以 `--system-prompt-file` / `--append-system-prompt-file` 注入。
 * **模型分頁**：點擊 **+ 新增模型**，輸入名稱（例如 `opus` 或 `Gemini3`），並選擇作用範圍——**全域**（`~/.claude/cc-viewer/system_prompt/`，套用於所有工作區）或**工作區**（`<project>/system_prompt/`）。每個分頁都有自己的追加/覆蓋開關和 Markdown 預覽。

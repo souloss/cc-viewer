@@ -145,7 +145,7 @@ By default, remote (LAN) access requires the `?token=` query that ccv prints at 
 
 ### Model-specific system prompts
 
-The **Edit System Prompt** modal (Preferences → Expert Settings) is tabbed:
+The **Edit System Prompt** modal (hamburger menu → Edit System Prompt) is tabbed:
 
 * The **Default** tab keeps the classic behavior: it writes `CC_SYSTEM.md` (override) or `CC_APPEND_SYSTEM.md` (append) into the current workspace, injected as `--system-prompt-file` / `--append-system-prompt-file` on the next ccv launch.
 * **Model tabs**: click **+ Add model**, type a name such as `opus` or `Gemini3`, and pick a scope — **Global** (`~/.claude/cc-viewer/system_prompt/`, applies to every workspace) or **Workspace** (`<project>/system_prompt/`). Each tab has its own Append/Override switch and Markdown preview.

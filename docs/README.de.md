@@ -136,7 +136,7 @@ Erfüllen Sie Ihre Vorstellung vom mobilen Programmieren. Es gibt auch einen Plu
 
 ### Modellspezifische System-Prompts
 
-Das Modal **System-Prompt bearbeiten** (Einstellungen → Experteneinstellungen) ist in Tabs gegliedert:
+Das Modal **System-Prompt bearbeiten** (Hamburger-Menü → System-Prompt bearbeiten) ist in Tabs gegliedert:
 
 * Der Tab **Standard** behält das klassische Verhalten bei: Er schreibt `CC_SYSTEM.md` (Überschreiben) oder `CC_APPEND_SYSTEM.md` (Anhängen) in den aktuellen Arbeitsbereich, injiziert als `--system-prompt-file` / `--append-system-prompt-file` beim nächsten ccv-Start.
 * **Modell-Tabs**: Klicken Sie auf **+ Modell hinzufügen**, geben Sie einen Namen wie `opus` oder `Gemini3` ein und wählen Sie einen Geltungsbereich — **Global** (`~/.claude/cc-viewer/system_prompt/`, gilt für jeden Arbeitsbereich) oder **Arbeitsbereich** (`<project>/system_prompt/`). Jeder Tab hat einen eigenen Anhängen/Überschreiben-Schalter und eine Markdown-Vorschau.

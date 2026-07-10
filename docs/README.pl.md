@@ -136,7 +136,7 @@ Spełnij swoje wyobrażenie o programowaniu mobilnym. Istnieje również mechani
 
 ### Prompty systemowe dla poszczególnych modeli
 
-Okno modalne **Edytuj prompt systemowy** (Preferencje → Ustawienia eksperckie) jest podzielone na karty:
+Okno modalne **Edytuj prompt systemowy** (menu hamburger → Edytuj prompt systemowy) jest podzielone na karty:
 
 * Karta **Domyślny** zachowuje klasyczne działanie: zapisuje `CC_SYSTEM.md` (nadpisanie) lub `CC_APPEND_SYSTEM.md` (dołączenie) w bieżącym obszarze roboczym, wstrzykiwane jako `--system-prompt-file` / `--append-system-prompt-file` przy następnym uruchomieniu ccv.
 * **Karty modeli**: kliknij **+ Dodaj model**, wpisz nazwę taką jak `opus` lub `Gemini3` i wybierz zakres — **Globalny** (`~/.claude/cc-viewer/system_prompt/`, obowiązuje w każdym obszarze roboczym) lub **Obszar roboczy** (`<project>/system_prompt/`). Każda karta ma własny przełącznik Dołącz/Nadpisz i podgląd Markdown.
