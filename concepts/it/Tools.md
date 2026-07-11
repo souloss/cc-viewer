@@ -16,6 +16,16 @@ Di seguito l'indice categorizzato di tutti gli strumenti.
 | [TaskUpdate](Tool-TaskUpdate.md) | Aggiorna lo stato, le dipendenze, ecc. di un task |
 | [TaskList](Tool-TaskList.md) | Elenca tutti i task |
 
+## Team & Orchestrazione
+
+| Strumento | Scopo |
+|------|------|
+| [TeamCreate](Tool-TeamCreate.md) | Crea un team di agent per il lavoro collaborativo |
+| [TeamDelete](Tool-TeamDelete.md) | Sciogli un team di agent |
+| [SendMessage](Tool-SendMessage.md) | Invia un messaggio a un altro agent |
+| [Workflow](Tool-Workflow.md) | Esegui uno script di orchestrazione multi-agent deterministico |
+| [Monitor](Tool-Monitor.md) | Trasmetti eventi da uno script a lunga esecuzione come notifiche |
+
 ## Operazioni sui file
 
 | Strumento | Scopo |
@@ -31,6 +41,7 @@ Di seguito l'indice categorizzato di tutti gli strumenti.
 |------|------|
 | [Glob](Tool-Glob.md) | Cerca file per pattern di nome file |
 | [Grep](Tool-Grep.md) | Ricerca nel contenuto dei file basata su ripgrep |
+| [ToolSearch](Tool-ToolSearch.md) | Cerca e carica strumenti differiti/MCP su richiesta |
 
 ## Terminale
 
@@ -44,6 +55,8 @@ Di seguito l'indice categorizzato di tutti gli strumenti.
 |------|------|
 | [WebFetch](Tool-WebFetch.md) | Recupera contenuto web ed elaboralo con AI |
 | [WebSearch](Tool-WebSearch.md) | Query su motore di ricerca |
+| [Artifact](Tool-Artifact.md) | Pubblica un file HTML/Markdown come pagina web ospitata su claude.ai |
+| [DesignSync](Tool-DesignSync.md) | Sincronizza una libreria di componenti locale con un progetto di design system di claude.ai |
 
 ## Pianificazione e interazione
 
@@ -52,6 +65,25 @@ Di seguito l'indice categorizzato di tutti gli strumenti.
 | [EnterPlanMode](Tool-EnterPlanMode.md) | Entra in modalità pianificazione per progettare un piano di implementazione |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | Esci dalla modalità pianificazione e invia il piano per l'approvazione dell'utente |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | Poni domande all'utente per ottenere chiarimenti o decisioni |
+| [ReportFindings](Tool-ReportFindings.md) | Segnala i risultati della revisione del codice come lista tipata per l'UI host |
+
+## Worktrees
+
+| Strumento | Scopo |
+|------|------|
+| [EnterWorktree](Tool-EnterWorktree.md) | Crea o accedi a un worktree git isolato per la sessione |
+| [ExitWorktree](Tool-ExitWorktree.md) | Esci dalla sessione worktree, mantenendola o rimuovendola |
+
+## Pianificazione e Notifiche
+
+| Strumento | Scopo |
+|------|------|
+| [CronCreate](Tool-CronCreate.md) | Pianifica una richiesta su un'espressione cron (ricorrente o una volta) |
+| [CronDelete](Tool-CronDelete.md) | Annulla un job cron pianificato |
+| [CronList](Tool-CronList.md) | Elenca i job cron pianificati |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | Auto-ritmo le iterazioni /loop pianificando il prossimo risveglio |
+| [PushNotification](Tool-PushNotification.md) | Invia una notifica desktop/mobile all'utente |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | Gestisci le routine di remote-trigger di claude.ai |
 
 ## Estensioni
 
@@ -65,3 +97,4 @@ Di seguito l'indice categorizzato di tutti gli strumenti.
 |------|------|
 | [getDiagnostics](Tool-getDiagnostics.md) | Ottieni informazioni diagnostiche del linguaggio da VS Code |
 | [executeCode](Tool-executeCode.md) | Esegui codice nel kernel Jupyter |
+| [LSP](Tool-LSP.md) | Query del language server (definizioni, riferimenti, simboli) |

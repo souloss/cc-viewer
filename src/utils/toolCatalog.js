@@ -18,12 +18,12 @@ export const TOOL_CATALOG = [
   { key: 'file',     tools: ['Read', 'Edit', 'Write', 'NotebookEdit'] },
   { key: 'search',   tools: ['Glob', 'Grep', 'ToolSearch'] },
   { key: 'terminal', tools: ['Bash'] },
-  { key: 'web',      tools: ['WebFetch', 'WebSearch'] },
-  { key: 'planning', tools: ['EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'Skill'] },
+  { key: 'web',      tools: ['WebFetch', 'WebSearch', 'Artifact', 'DesignSync'] },
+  { key: 'planning', tools: ['EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'Skill', 'ReportFindings'] },
   { key: 'worktree', tools: ['EnterWorktree', 'ExitWorktree'] },
   { key: 'schedule', tools: ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'PushNotification', 'RemoteTrigger'] },
   { key: 'ide',      tools: ['getDiagnostics', 'executeCode', 'LSP'] },
 ];
 
-// Flat list of all tool names (37) — order follows TOOL_CATALOG.
+// Flat list of all tool names (40) — order follows TOOL_CATALOG.
 export const ALL_TOOL_NAMES = TOOL_CATALOG.flatMap((c) => c.tools);

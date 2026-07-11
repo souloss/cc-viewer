@@ -16,6 +16,16 @@
 | [TaskUpdate](Tool-TaskUpdate.md) | تحديث حالة المهمة والتبعيات وغيرها |
 | [TaskList](Tool-TaskList.md) | عرض جميع المهام |
 
+## الفريق والتنسيق
+
+| الأداة | الغرض |
+|--------|--------|
+| [TeamCreate](Tool-TeamCreate.md) | إنشاء فريق وكلاء للعمل التعاوني |
+| [TeamDelete](Tool-TeamDelete.md) | حل فريق الوكلاء |
+| [SendMessage](Tool-SendMessage.md) | إرسال رسالة إلى وكيل آخر |
+| [Workflow](Tool-Workflow.md) | تشغيل نص الأتمتة الحتمي متعدد الوكيل |
+| [Monitor](Tool-Monitor.md) | دفق الأحداث من برنامج نصي طويل الأجل كإخطارات |
+
 ## عمليات الملفات
 
 | الأداة | الغرض |
@@ -31,6 +41,7 @@
 |--------|--------|
 | [Glob](Tool-Glob.md) | البحث عن الملفات بمطابقة أنماط أسماء الملفات |
 | [Grep](Tool-Grep.md) | البحث في محتوى الملفات باستخدام ripgrep |
+| [ToolSearch](Tool-ToolSearch.md) | البحث وتحميل الأدوات المؤجلة/MCP عند الطلب |
 
 ## الطرفية
 
@@ -44,6 +55,8 @@
 |--------|--------|
 | [WebFetch](Tool-WebFetch.md) | جلب محتوى صفحات الويب ومعالجته بالذكاء الاصطناعي |
 | [WebSearch](Tool-WebSearch.md) | استعلامات محرك البحث |
+| [Artifact](Tool-Artifact.md) | نشر ملف HTML/Markdown كصفحة ويب مستضافة على claude.ai |
+| [DesignSync](Tool-DesignSync.md) | مزامنة مكتبة المكونات المحلية مع مشروع claude.ai design-system |
 
 ## التخطيط والتفاعل
 
@@ -52,6 +65,25 @@
 | [EnterPlanMode](Tool-EnterPlanMode.md) | الدخول في وضع التخطيط لتصميم خطة التنفيذ |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | الخروج من وضع التخطيط وتقديم الخطة لموافقة المستخدم |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | طرح أسئلة على المستخدم للتوضيح أو اتخاذ القرارات |
+| [ReportFindings](Tool-ReportFindings.md) | تقرير نتائج فحص الكود كقائمة مكتوبة لواجهة المستخدم |
+
+## أشجار العمل
+
+| الأداة | الغرض |
+|--------|--------|
+| [EnterWorktree](Tool-EnterWorktree.md) | إنشاء أو إدخال شجرة عمل git معزولة للجلسة |
+| [ExitWorktree](Tool-ExitWorktree.md) | الخروج من جلسة شجرة العمل والاحتفاظ بها أو حذفها |
+
+## الجدولة والإشعارات
+
+| الأداة | الغرض |
+|--------|--------|
+| [CronCreate](Tool-CronCreate.md) | جدولة طلب على تعبير cron (متكرر أو لمرة واحدة) |
+| [CronDelete](Tool-CronDelete.md) | إلغاء مهمة cron المجدولة |
+| [CronList](Tool-CronList.md) | قائمة مهام cron المجدولة |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | تحديد وتيرة التكرارات /loop بجدولة الاستيقاظ التالي |
+| [PushNotification](Tool-PushNotification.md) | إرسال إشعار سطح المكتب/الهاتف المحمول للمستخدم |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | إدارة روتين remote-trigger على claude.ai |
 
 ## الإضافات
 
@@ -65,3 +97,4 @@
 |--------|--------|
 | [getDiagnostics](Tool-getDiagnostics.md) | الحصول على معلومات التشخيص اللغوي من VS Code |
 | [executeCode](Tool-executeCode.md) | تنفيذ الكود في Jupyter kernel |
+| [LSP](Tool-LSP.md) | استعلامات خادم اللغة (التعريفات والمراجع والرموز) |

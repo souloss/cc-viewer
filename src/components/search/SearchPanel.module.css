@@ -287,9 +287,11 @@
   white-space: pre;
 }
 .matchHighlight {
-  background-color: rgba(255, 213, 79, 0.25);
-  outline: 1px solid rgba(255, 213, 79, 0.4);
-  color: inherit;
+  /* Markdown inline-code scheme: a translucent tint of the per-theme code color
+     (opaque --code-inline-bg would vanish against the panel background). */
+  background-color: color-mix(in srgb, var(--code-inline-color) 18%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--code-inline-color) 45%, transparent);
+  color: var(--code-inline-color);
   border-radius: 2px;
 }
 

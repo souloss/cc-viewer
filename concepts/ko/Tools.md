@@ -25,12 +25,23 @@ Claude Code는 Anthropic API의 tool_use 메커니즘을 통해 모델에 일련
 | [Write](Tool-Write.md) | 파일 쓰기 또는 덮어쓰기 |
 | [NotebookEdit](Tool-NotebookEdit.md) | Jupyter notebook 셀 편집 |
 
+## 팀 및 협력
+
+| 도구 | 용도 |
+|------|------|
+| [TeamCreate](Tool-TeamCreate.md) | 협력 작업용 agent 팀 생성 |
+| [TeamDelete](Tool-TeamDelete.md) | agent 팀 해산 |
+| [SendMessage](Tool-SendMessage.md) | 다른 agent에게 메시지 전송 |
+| [Workflow](Tool-Workflow.md) | 결정론적 다중 agent 오케스트레이션 스크립트 실행 |
+| [Monitor](Tool-Monitor.md) | 장시간 실행 스크립트의 이벤트를 알림으로 스트리밍 |
+
 ## 검색
 
 | 도구 | 용도 |
 |------|------|
 | [Glob](Tool-Glob.md) | 파일명 패턴 매칭으로 파일 검색 |
 | [Grep](Tool-Grep.md) | ripgrep 기반 파일 내용 검색 |
+| [ToolSearch](Tool-ToolSearch.md) | 요청 시 지연/MCP 도구 검색 및 로드 |
 
 ## 터미널
 
@@ -44,6 +55,8 @@ Claude Code는 Anthropic API의 tool_use 메커니즘을 통해 모델에 일련
 |------|------|
 | [WebFetch](Tool-WebFetch.md) | 웹페이지 내용을 가져와 AI로 처리 |
 | [WebSearch](Tool-WebSearch.md) | 검색 엔진 쿼리 |
+| [Artifact](Tool-Artifact.md) | HTML/Markdown 파일을 호스팅된 claude.ai 웹페이지로 발행 |
+| [DesignSync](Tool-DesignSync.md) | 로컬 컴포넌트 라이브러리를 claude.ai 설계 시스템 프로젝트와 동기화 |
 
 ## 계획 및 상호작용
 
@@ -52,6 +65,25 @@ Claude Code는 Anthropic API의 tool_use 메커니즘을 통해 모델에 일련
 | [EnterPlanMode](Tool-EnterPlanMode.md) | 계획 모드 진입, 구현 방안 설계 |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | 계획 모드 종료 및 방안을 사용자 승인에 제출 |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | 사용자에게 질문하여 확인 또는 결정 획득 |
+| [ReportFindings](Tool-ReportFindings.md) | 코드 리뷰 발견사항을 호스트 UI의 타입화된 목록으로 보고 |
+
+## 작업 트리
+
+| 도구 | 용도 |
+|------|------|
+| [EnterWorktree](Tool-EnterWorktree.md) | 세션용 격리된 git worktree 생성 또는 진입 |
+| [ExitWorktree](Tool-ExitWorktree.md) | worktree 세션 종료, 유지 또는 제거 |
+
+## 스케줄링 및 알림
+
+| 도구 | 용도 |
+|------|------|
+| [CronCreate](Tool-CronCreate.md) | cron 표현식에서 프롬프트 스케줄 (반복 또는 일회성) |
+| [CronDelete](Tool-CronDelete.md) | 스케줄된 cron 작업 취소 |
+| [CronList](Tool-CronList.md) | 스케줄된 cron 작업 목록 표시 |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | 다음 웨이크업을 스케줄하여 /loop 반복 자동 조정 |
+| [PushNotification](Tool-PushNotification.md) | 사용자에게 데스크톱/모바일 알림 전송 |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | claude.ai 원격 트리거 루틴 관리 |
 
 ## 확장
 
@@ -65,3 +97,4 @@ Claude Code는 Anthropic API의 tool_use 메커니즘을 통해 모델에 일련
 |------|------|
 | [getDiagnostics](Tool-getDiagnostics.md) | VS Code 언어 진단 정보 가져오기 |
 | [executeCode](Tool-executeCode.md) | Jupyter kernel에서 코드 실행 |
+| [LSP](Tool-LSP.md) | 언어 서버 쿼리 (정의, 참조, 기호) |

@@ -16,6 +16,16 @@ Below is a categorized index of all tools.
 | [TaskUpdate](Tool-TaskUpdate.md) | Update task status, dependencies, etc. |
 | [TaskList](Tool-TaskList.md) | List all tasks |
 
+## Team & Orchestration
+
+| Tool | Purpose |
+|------|---------|
+| [TeamCreate](Tool-TeamCreate.md) | Create an agent team for collaborative work |
+| [TeamDelete](Tool-TeamDelete.md) | Disband an agent team |
+| [SendMessage](Tool-SendMessage.md) | Send a message to another agent |
+| [Workflow](Tool-Workflow.md) | Run a deterministic multi-agent orchestration script |
+| [Monitor](Tool-Monitor.md) | Stream events from a long-running script as notifications |
+
 ## File Operations
 
 | Tool | Purpose |
@@ -31,6 +41,7 @@ Below is a categorized index of all tools.
 |------|---------|
 | [Glob](Tool-Glob.md) | Search files by filename pattern matching |
 | [Grep](Tool-Grep.md) | Search file contents based on ripgrep |
+| [ToolSearch](Tool-ToolSearch.md) | Search and load deferred/MCP tools on demand |
 
 ## Terminal
 
@@ -44,6 +55,8 @@ Below is a categorized index of all tools.
 |------|---------|
 | [WebFetch](Tool-WebFetch.md) | Fetch web page content and process it with AI |
 | [WebSearch](Tool-WebSearch.md) | Search engine queries |
+| [Artifact](Tool-Artifact.md) | Publish an HTML/Markdown file as a hosted claude.ai web page |
+| [DesignSync](Tool-DesignSync.md) | Sync a local component library with a claude.ai design-system project |
 
 ## Planning & Interaction
 
@@ -52,6 +65,25 @@ Below is a categorized index of all tools.
 | [EnterPlanMode](Tool-EnterPlanMode.md) | Enter plan mode to design an implementation plan |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | Exit plan mode and submit the plan for user approval |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | Ask the user a question for clarification or decisions |
+| [ReportFindings](Tool-ReportFindings.md) | Report code-review findings as a typed list for the host UI |
+
+## Worktrees
+
+| Tool | Purpose |
+|------|---------|
+| [EnterWorktree](Tool-EnterWorktree.md) | Create or enter an isolated git worktree for the session |
+| [ExitWorktree](Tool-ExitWorktree.md) | Leave the worktree session, keeping or removing it |
+
+## Scheduling & Notifications
+
+| Tool | Purpose |
+|------|---------|
+| [CronCreate](Tool-CronCreate.md) | Schedule a prompt on a cron expression (recurring or one-shot) |
+| [CronDelete](Tool-CronDelete.md) | Cancel a scheduled cron job |
+| [CronList](Tool-CronList.md) | List scheduled cron jobs |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | Self-pace /loop iterations by scheduling the next wakeup |
+| [PushNotification](Tool-PushNotification.md) | Send a desktop/mobile notification to the user |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | Manage claude.ai remote-trigger routines |
 
 ## Extensions
 
@@ -65,3 +97,4 @@ Below is a categorized index of all tools.
 |------|---------|
 | [getDiagnostics](Tool-getDiagnostics.md) | Get VS Code language diagnostics |
 | [executeCode](Tool-executeCode.md) | Execute code in a Jupyter kernel |
+| [LSP](Tool-LSP.md) | Language-server queries (definitions, references, symbols) |

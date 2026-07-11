@@ -16,6 +16,16 @@ Nedenfor er det kategoriserede indeks over alle værktøjer.
 | [TaskUpdate](Tool-TaskUpdate.md) | Opdater opgavestatus, afhængigheder osv. |
 | [TaskList](Tool-TaskList.md) | List alle opgaver |
 
+## Team og orkestrering
+
+| Værktøj | Formål |
+|------|------|
+| [TeamCreate](Tool-TeamCreate.md) | Opret et agentur for samarbejdende arbejde |
+| [TeamDelete](Tool-TeamDelete.md) | Opløs et agentur |
+| [SendMessage](Tool-SendMessage.md) | Send en besked til en anden agent |
+| [Workflow](Tool-Workflow.md) | Kør et deterministisk multi-agent orkestreringsscript |
+| [Monitor](Tool-Monitor.md) | Stream hændelser fra et langvarigt script som notifikationer |
+
 ## Filoperationer
 
 | Værktøj | Formål |
@@ -31,6 +41,7 @@ Nedenfor er det kategoriserede indeks over alle værktøjer.
 |------|------|
 | [Glob](Tool-Glob.md) | Søg filer efter filnavnsmønster |
 | [Grep](Tool-Grep.md) | Søg i filindhold baseret på ripgrep |
+| [ToolSearch](Tool-ToolSearch.md) | Søg og indlæs udskudte/MCP-værktøjer på anmodning |
 
 ## Terminal
 
@@ -44,6 +55,8 @@ Nedenfor er det kategoriserede indeks over alle værktøjer.
 |------|------|
 | [WebFetch](Tool-WebFetch.md) | Hent webindhold og behandl det med AI |
 | [WebSearch](Tool-WebSearch.md) | Søgemaskineforespørgsel |
+| [Artifact](Tool-Artifact.md) | Publicer en HTML/Markdown-fil som en hostnet claude.ai-webside |
+| [DesignSync](Tool-DesignSync.md) | Synkronisér et lokalt komponentbibliotek med et claude.ai design-system projekt |
 
 ## Planlægning og interaktion
 
@@ -52,6 +65,25 @@ Nedenfor er det kategoriserede indeks over alle værktøjer.
 | [EnterPlanMode](Tool-EnterPlanMode.md) | Gå ind i planlægningstilstand for at designe en implementeringsplan |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | Forlad planlægningstilstand og indsend planen til brugerens godkendelse |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | Stil spørgsmål til brugeren for at få afklaring eller beslutninger |
+| [ReportFindings](Tool-ReportFindings.md) | Rapportér kodegennnemsynsfund som en typet liste til værts-brugerfladen |
+
+## Worktrees
+
+| Værktøj | Formål |
+|------|------|
+| [EnterWorktree](Tool-EnterWorktree.md) | Opret eller gå ind i en isoleret git worktree til sessionens varighed |
+| [ExitWorktree](Tool-ExitWorktree.md) | Forlad worktree-sessionen, bevar eller fjern den |
+
+## Tidplanering og notifikationer
+
+| Værktøj | Formål |
+|------|------|
+| [CronCreate](Tool-CronCreate.md) | Planæg en prompt på et cron-udtryk (tilbagekommen eller engangsburger) |
+| [CronDelete](Tool-CronDelete.md) | Annuller et planlagt cron-job |
+| [CronList](Tool-CronList.md) | List planlagte cron-jobs |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | Selvstændigt tidspunkt /loop iterationer ved at planlægge næste vågning |
+| [PushNotification](Tool-PushNotification.md) | Send en desktop/mobil-notifikation til brugeren |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | Administrer claude.ai remote-trigger rutiner |
 
 ## Udvidelser
 
@@ -65,3 +97,4 @@ Nedenfor er det kategoriserede indeks over alle værktøjer.
 |------|------|
 | [getDiagnostics](Tool-getDiagnostics.md) | Hent sprogdiagnostik fra VS Code |
 | [executeCode](Tool-executeCode.md) | Udfør kode i Jupyter-kernen |
+| [LSP](Tool-LSP.md) | Sprogsserver-forespørgsler (definitioner, referencer, symboler) |

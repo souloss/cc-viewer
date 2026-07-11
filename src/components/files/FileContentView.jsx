@@ -279,13 +279,15 @@ const editorTheme = EditorView.theme({
   '.cm-panel.cm-search [name=close]': {
     fontSize: '16px',
   },
-  // 搜索高亮匹配色
+  // Search match highlight colors (markdown inline-code scheme). Background/outline
+  // only — no text color, so syntax highlighting inside matches stays intact.
   '.cm-searchMatch': {
-    backgroundColor: 'rgba(255, 213, 79, 0.25)',
-    outline: '1px solid rgba(255, 213, 79, 0.4)',
+    backgroundColor: 'color-mix(in srgb, var(--code-inline-color) 18%, transparent)',
+    outline: '1px solid color-mix(in srgb, var(--code-inline-color) 45%, transparent)',
   },
   '.cm-searchMatch-selected': {
-    backgroundColor: 'rgba(255, 152, 0, 0.35)',
+    backgroundColor: 'color-mix(in srgb, var(--code-inline-color) 40%, transparent)',
+    outline: '2px solid var(--code-inline-color)',
   },
 }, { dark: typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') !== 'light' : true });
 

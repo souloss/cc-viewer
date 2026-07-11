@@ -16,6 +16,16 @@ A continuación se presenta el índice clasificado de todas las herramientas.
 | [TaskUpdate](Tool-TaskUpdate.md) | Actualizar el estado, dependencias, etc. de una tarea |
 | [TaskList](Tool-TaskList.md) | Listar todas las tareas |
 
+## Team & Orquestación
+
+| Herramienta | Propósito |
+|-------------|-----------|
+| [TeamCreate](Tool-TeamCreate.md) | Crear un equipo de agents para trabajo colaborativo |
+| [TeamDelete](Tool-TeamDelete.md) | Disolver un equipo de agents |
+| [SendMessage](Tool-SendMessage.md) | Enviar un mensaje a otro agent |
+| [Workflow](Tool-Workflow.md) | Ejecutar un script de orquestación multi-agent determinista |
+| [Monitor](Tool-Monitor.md) | Transmitir eventos de un script de larga ejecución como notificaciones |
+
 ## Operaciones de archivos
 
 | Herramienta | Propósito |
@@ -31,6 +41,7 @@ A continuación se presenta el índice clasificado de todas las herramientas.
 |-------------|-----------|
 | [Glob](Tool-Glob.md) | Buscar archivos por coincidencia de patrones de nombre |
 | [Grep](Tool-Grep.md) | Búsqueda de contenido de archivos basada en ripgrep |
+| [ToolSearch](Tool-ToolSearch.md) | Buscar y cargar herramientas diferidas/MCP bajo demanda |
 
 ## Terminal
 
@@ -44,6 +55,8 @@ A continuación se presenta el índice clasificado de todas las herramientas.
 |-------------|-----------|
 | [WebFetch](Tool-WebFetch.md) | Obtener contenido web y procesarlo con IA |
 | [WebSearch](Tool-WebSearch.md) | Consultas en motores de búsqueda |
+| [Artifact](Tool-Artifact.md) | Publicar un archivo HTML/Markdown como página web alojada en claude.ai |
+| [DesignSync](Tool-DesignSync.md) | Sincronizar una biblioteca de componentes local con un proyecto de design system de claude.ai |
 
 ## Planificación e interacción
 
@@ -52,6 +65,25 @@ A continuación se presenta el índice clasificado de todas las herramientas.
 | [EnterPlanMode](Tool-EnterPlanMode.md) | Entrar en modo de planificación para diseñar un plan de implementación |
 | [ExitPlanMode](Tool-ExitPlanMode.md) | Salir del modo de planificación y enviar el plan para aprobación del usuario |
 | [AskUserQuestion](Tool-AskUserQuestion.md) | Hacer preguntas al usuario para obtener aclaraciones o decisiones |
+| [ReportFindings](Tool-ReportFindings.md) | Reportar hallazgos de revisión de código como lista tipada para la UI anfitriona |
+
+## Worktrees
+
+| Herramienta | Propósito |
+|-------------|-----------|
+| [EnterWorktree](Tool-EnterWorktree.md) | Crear o entrar en un worktree git aislado para la sesión |
+| [ExitWorktree](Tool-ExitWorktree.md) | Salir de la sesión worktree, manteniendo o eliminando |
+
+## Planificación y Notificaciones
+
+| Herramienta | Propósito |
+|-------------|-----------|
+| [CronCreate](Tool-CronCreate.md) | Programar una solicitud en una expresión cron (recurrente o única) |
+| [CronDelete](Tool-CronDelete.md) | Cancelar un trabajo cron programado |
+| [CronList](Tool-CronList.md) | Listar trabajos cron programados |
+| [ScheduleWakeup](Tool-ScheduleWakeup.md) | Auto-marcador de iteraciones /loop programando el siguiente despertar |
+| [PushNotification](Tool-PushNotification.md) | Enviar notificación de escritorio/móvil al usuario |
+| [RemoteTrigger](Tool-RemoteTrigger.md) | Gestionar rutinas de remote-trigger de claude.ai |
 
 ## Extensiones
 
@@ -65,3 +97,4 @@ A continuación se presenta el índice clasificado de todas las herramientas.
 |-------------|-----------|
 | [getDiagnostics](Tool-getDiagnostics.md) | Obtener información de diagnóstico del lenguaje de VS Code |
 | [executeCode](Tool-executeCode.md) | Ejecutar código en el kernel de Jupyter |
+| [LSP](Tool-LSP.md) | Consultas de servidor de lenguaje (definiciones, referencias, símbolos) |
