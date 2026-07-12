@@ -259,3 +259,43 @@ describe('session-boundary parity — post-/clear checkpoint', () => {
     assert.equal(getSessionStableId(live[1]), T2);
   });
 });
+
+describe('session-boundary parity — session.model stamp', () => {
+  function entryWithModel(messages, ts, model, responseModel) {
+    const e = entryOf(messages, ts);
+    e.body.model = model;
+    if (responseModel) e.response.body.model = responseModel;
+    return e;
+  }
+
+  it('same-user rebuild: both legs upgrade the single session to the response-reported model', () => {
+    const entries = [
+      entryWithModel(conv(12), T1, 'claude-fable-5'),
+      // Big drop 12 → 5 with the same user REBUILDS the session in place (no append); the
+      // response-reported model must win over body.model on both legs (hot-switch semantics).
+      entryWithModel(conv(5, { seed: 'fresh-' }), T2, 'claude-fable-5', 'claude-opus-4-8'),
+    ];
+    const { batch, live } = assertParity(entries, 'session-model-rebuild');
+    assert.equal(batch.length, 1);
+    assert.equal(batch[0].model, 'claude-opus-4-8');
+    assert.equal(live[0].model, 'claude-opus-4-8');
+  });
+
+  it('post-clear checkpoint: both legs stamp each session with its own model', () => {
+    const clearMsg = {
+      role: 'user',
+      content: [{ type: 'text', text: '<command-name>/clear</command-name>' }],
+    };
+    const clearEntry = { ...entryWithModel([clearMsg], T2, 'claude-opus-4-8'), _isCheckpoint: true, _deltaFormat: 1, _totalMessageCount: 1 };
+    const entries = [
+      entryWithModel(conv(30), T1, 'claude-fable-5'),
+      clearEntry,
+    ];
+    const { batch, live } = assertParity(entries, 'session-model-clear');
+    assert.equal(batch.length, 2);
+    for (const sessions of [batch, live]) {
+      assert.equal(sessions[0].model, 'claude-fable-5');
+      assert.equal(sessions[1].model, 'claude-opus-4-8');
+    }
+  });
+});

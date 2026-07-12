@@ -1,5 +1,6 @@
 // Wire format 协议详见 docs/WIRE_FORMAT.md（服务端 entry 形态 / 关键字段 / 已知特殊窗口）
 import { isPostClearCheckpoint } from './clearCheckpoint.js';
+import { getEffectiveModel } from './effectiveModel.js';
 
 /**
  * 计算消息的轻量内容指纹，用于「反向锚点」对齐：以 `newMessages[0]` 的 fp 为锚，
@@ -145,9 +146,14 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
   const userId = entry.body.metadata?.user_id || null;
 
   const entryTimestamp = entry.timestamp || null;
+  // Session-level model identity: ChatView falls back to it when per-message producer resolution
+  // is null (e.g. the session's carrier entry is still in-flight and filtered out) — prevents the
+  // "MainAgent" + generic-avatar flash on carried-over history. Latest wins: an inProgress carrier
+  // stamps body.model, completion re-stamps the authoritative response.body.model.
+  const entryModel = getEffectiveModel(entry);
 
   if (prevSessions.length === 0) {
-    return [{ userId, messages: newMessages, response: newResponse, entryTimestamp }];
+    return [{ userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
   }
 
   const lastSession = prevSessions[prevSessions.length - 1];
@@ -163,7 +169,7 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
     for (let i = 0; i < newMessages.length; i++) {
       if (!newMessages[i]._timestamp) newMessages[i]._timestamp = entryTimestamp;
     }
-    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp }];
+    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
   }
 
   if (!options.skipTransientFilter && isNewConversation && newMessages.length <= 4 && prevMsgCount > 4) {
@@ -245,8 +251,9 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
 
     lastSession.response = newResponse;
     lastSession.entryTimestamp = entryTimestamp;
+    if (entryModel) lastSession.model = entryModel; // latest wins; model-less entries keep the stamp
     return [...prevSessions];
   } else {
-    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp }];
+    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
   }
 }

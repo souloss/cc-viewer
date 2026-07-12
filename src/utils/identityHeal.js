@@ -17,28 +17,44 @@ import { formatTeammateLabel } from './requestType';
 /**
  * Patch cached ChatMessage elements whose modelInfo was baked as null once the
  * request scan can resolve it. Mirrors refreshCachedItemProp: clones ONLY rows
- * that transition null → resolved, returns the SAME array reference when
- * nothing changed (React reconciler then skips everything).
+ * that transition to a different resolved value, returns the SAME array
+ * reference when nothing changed (React reconciler then skips everything).
  *
  * Strict-null marker: rows that display model identity always receive
  * `modelInfo` explicitly (null when unresolved); rows that never get the prop
  * have `undefined` and are skipped. Permanently-unresolvable rows stay null
  * and are re-checked cheaply each pass without cloning.
  *
+ * Session-fallback rows: rows baked with the session-level model fallback
+ * carry a `_fromSession: true` marker ON the modelInfo object (a per-session
+ * wrapper around getModelInfo's cached ref) and stay heal-eligible so they
+ * upgrade to the precise per-message model once the producer becomes
+ * resolvable. The resolver passed here MUST be the precise one (NOT the
+ * session-fallback wrapped one), or marked rows would "heal" back to the same
+ * fallback. Precise resolutions come from getModelInfo's cache and never carry
+ * the marker, so an upgraded row drops out of heal eligibility — the upgrade
+ * clones each fallback row exactly once (same cost as today's null→resolved
+ * heal), never churns.
+ *
  * @param {Array} items - cached ChatMessage element array
  * @param {Function} resolveModelInfo - (ts, role) => modelInfo|null, closing
- *   over the CURRENT request-scan caches
+ *   over the CURRENT request-scan caches (precise resolver, no fallback)
  * @returns {Array} same array if clean, else a new array with healed clones
  */
 export function refreshResolvedModelInfo(items, resolveModelInfo) {
   let dirty = false;
   const out = items.map((m) => {
-    if (!m || !m.props || m.props.modelInfo !== null || !m.props.timestamp) return m;
+    if (!m || !m.props || !m.props.timestamp) return m;
+    const mi = m.props.modelInfo;
+    if (mi !== null && !(mi && mi._fromSession)) return m;
     // Non-assistant rows (plan-prompt/teammate/task-notification) were
     // originally computed with msg.role 'user' — preserve that mapping.
     const role = m.props.role === 'assistant' ? 'assistant' : 'user';
     const next = resolveModelInfo(m.props.timestamp, role);
-    if (!next) return m;
+    // Defense-in-depth: a marked value here means a caller passed the session-fallback WRAPPED
+    // resolver by mistake — treating it as a heal would clone marked rows forever (the clone
+    // keeps the marker → eligible again next pass). Never "heal" to a fallback value.
+    if (!next || next._fromSession) return m;
     dirty = true;
     return React.cloneElement(m, { modelInfo: next });
   });

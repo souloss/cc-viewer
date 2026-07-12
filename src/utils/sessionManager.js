@@ -1,6 +1,7 @@
 // Wire format 协议详见 docs/WIRE_FORMAT.md（applyInPlaceLastMsgReplace 信号驱动短路是其客户端唯一消费方）
 import { parseImOrigin } from './imOrigin.js';
 import { isSessionBoundary, isPostClearCheckpoint } from './clearCheckpoint.js';
+import { getEffectiveModel } from './effectiveModel.js';
 
 export const HOT_SESSION_COUNT = 8;
 
@@ -640,6 +641,11 @@ export function applyInPlaceLastMsgReplace(prevSessions, entry, timestamp, isNew
     messages: stitched,
     response: entry.response,
     entryTimestamp: timestamp,
+    // Carry the session-level model stamp (see mergeMainAgentSessions): this path bypasses the
+    // merge and rebuilds the session object — dropping the stamp would re-bake the whole session
+    // with the "MainAgent" fallback. entry.response is guaranteed by the guard above, so
+    // getEffectiveModel is authoritative here; fall back to the previous stamp.
+    model: getEffectiveModel(entry) || lastSession.model || null,
   };
   // 末位替换：返回新 sessions 数组保持原顺序、prev 长度不变。
   // 下游 ChatView _sessionItemCache[last] 按 index 索引该 session，依赖 index 恒定不能错位。

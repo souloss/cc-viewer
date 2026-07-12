@@ -1713,7 +1713,8 @@ class ChatMessage extends React.Component {
               key: '1',
               label: (
                 <span className={styles.systemMsgLabel}>
-                  ⚙️ {t('ui.systemMessage')}
+                  <span className={styles.systemMsgLogo} aria-hidden="true" dangerouslySetInnerHTML={{ __html: getSvgAvatar('system') }} />
+                  {t('ui.systemMessage')}
                   {timeStr && <Text className={`${styles.timeTextNoMargin} ${styles.skillTimeIndent}`}>{timeStr}</Text>}
                 </span>
               ),

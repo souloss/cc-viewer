@@ -43,6 +43,42 @@ describe('refreshResolvedModelInfo', () => {
     assert.equal(refreshResolvedModelInfo(items, () => null), items);
   });
 
+  it('session-fallback rows (_fromSession marker) stay heal-eligible and upgrade to the precise model', () => {
+    const fallback = { ...INFO, _fromSession: true };
+    const row = mk({ role: 'assistant', modelInfo: fallback, timestamp: 't1' });
+    // While the producer is still unresolvable: no clone, marker persists.
+    const same = refreshResolvedModelInfo([row], () => null);
+    assert.equal(same[0], row, 'unresolvable marker row must not clone');
+    // Producer becomes resolvable: upgraded to the precise (canonical, unmarked) ref exactly once.
+    const healed = refreshResolvedModelInfo([row], () => INFO);
+    assert.notEqual(healed[0], row);
+    assert.equal(healed[0].props.modelInfo, INFO);
+    assert.equal(healed[0].props.modelInfo._fromSession, undefined, 'upgrade drops the marker');
+    // Idempotence: the upgraded row is no longer eligible — next pass is same-ref (no churn).
+    const again = refreshResolvedModelInfo(healed, () => INFO);
+    assert.equal(again, healed, 'post-upgrade pass must return the SAME array reference');
+  });
+
+  it('precise (unmarked) modelInfo rows are never touched even when a resolver is available', () => {
+    const row = mk({ role: 'assistant', modelInfo: INFO, timestamp: 't1' });
+    const out = refreshResolvedModelInfo([row], () => ({ name: 'other' }));
+    assert.equal(out[0], row);
+  });
+
+  it('never "heals" to a marked value (guards against passing the wrapped session resolver)', () => {
+    const fallback = { ...INFO, _fromSession: true };
+    const row = mk({ role: 'assistant', modelInfo: fallback, timestamp: 't1' });
+    // A mistakenly-wrapped resolver returns the fallback itself — must be a same-ref no-op
+    // (otherwise the clone keeps the marker and every pass clones again, forever).
+    const items = [row];
+    const out = refreshResolvedModelInfo(items, () => fallback);
+    assert.equal(out, items, 'wrapped-resolver output must not count as a heal');
+    // Null rows are protected the same way.
+    const nullRow = mk({ role: 'assistant', modelInfo: null, timestamp: 't2' });
+    const out2 = refreshResolvedModelInfo([nullRow], () => fallback);
+    assert.equal(out2[0], nullRow);
+  });
+
   it('maps element role to resolver role (assistant vs user)', () => {
     const seen = [];
     const resolver = (ts, role) => { seen.push(role); return INFO; };

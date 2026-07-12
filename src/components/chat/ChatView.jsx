@@ -1787,6 +1787,20 @@ class ChatView extends React.Component {
         return; // 跳过 renderSessionMessages
       }
 
+      // Session-level model fallback: when per-message producer resolution is null (the session's
+      // carrier entry is in-flight and filtered out — the "MainAgent" flash on carried-over
+      // history), fall back to the session's stamped model. The `_fromSession` marker on the
+      // wrapper object keeps such rows heal-eligible in refreshResolvedModelInfo (which MUST keep
+      // receiving the precise resolver below), so they upgrade to the per-message model once the
+      // producer becomes resolvable. Teammate rows use their own resolver (tmModelResolver) and
+      // are untouched.
+      const sessionModelInfo = session.model
+        ? { ...getModelInfo(session.model), _fromSession: true }
+        : null;
+      const sessionResolveModelInfo = sessionModelInfo
+        ? (ts, role) => resolveModelInfo(ts, role) || sessionModelInfo
+        : resolveModelInfo;
+
       // === session 级缓存判断 ===
       const sc = this._sessionItemCache[si];
       let msgs, lastPendingAskId, lastPendingPlanId;
@@ -1828,16 +1842,19 @@ class ChatView extends React.Component {
         // could resolve the producer (post-refresh race). The resolver closes
         // over caches rebuilt earlier in THIS call; the write-back below
         // persists healed elements, so later FULL HITs are same-ref and free.
+        // MUST stay the PRECISE resolver — never sessionResolveModelInfo (see
+        // identityHeal.js: a wrapped resolver would re-"heal" marked rows).
         msgs = refreshResolvedModelInfo(msgs, resolveModelInfo);
         lastPendingAskId = sc.lastPendingAskId;
         lastPendingPlanId = sc.lastPendingPlanId;
       } else if (sc && sc.session === session && session.messages.length > sc.msgsLen) {
         // 增量：session 对象不变但消息增长 → 只渲染新消息，拼接到缓存
-        const result = this.renderSessionMessages(session.messages, `s${si}`, resolveModelInfo, tsToIndex, requestCacheTokenMap, sc.msgsLen);
+        const result = this.renderSessionMessages(session.messages, `s${si}`, sessionResolveModelInfo, tsToIndex, requestCacheTokenMap, sc.msgsLen);
         // 旧段同样要刷新 planApprovalMap / askAnswerMap prop（同 FULL HIT 理由）
         msgs = refreshCachedItemProp(sc.items, sc.planApprovalMap, mergedPlanApprovalMap, 'ExitPlanMode', 'planApprovalMap').slice();
         msgs = refreshCachedItemProp(msgs, sc.askAnswerMap, mergedAskAnswerMap, 'AskUserQuestion', 'askAnswerMap');
         // Same modelInfo healing for the reused old segment (see FULL HIT above).
+        // MUST stay the PRECISE resolver — never sessionResolveModelInfo.
         msgs = refreshResolvedModelInfo(msgs, resolveModelInfo);
         // 增量 result 范围内若无新 pending plan/ask，但 sc 旧值仍未 resolved → 保留 sc 值，
         // 否则会让 modal 在 streaming 间隙短暂关闭再重弹（闪烁）。Heal logic shared
@@ -1889,7 +1906,7 @@ class ChatView extends React.Component {
         msgs = msgs.concat(result.items);
       } else {
         // 缓存未命中 → 全量渲染
-        const result = this.renderSessionMessages(session.messages, `s${si}`, resolveModelInfo, tsToIndex, requestCacheTokenMap);
+        const result = this.renderSessionMessages(session.messages, `s${si}`, sessionResolveModelInfo, tsToIndex, requestCacheTokenMap);
         msgs = result.items;
         lastPendingAskId = result.lastPendingAskId;
         lastPendingPlanId = result.lastPendingPlanId;
@@ -3139,7 +3156,13 @@ class ChatView extends React.Component {
     // --- 角色收集 + 筛选 ---
     const collectedRolesMap = new Map();
     const userProfile = this.props.userProfile;
-    const modelInfo = this._reqScanCache ? getModelInfo(this._reqScanCache.modelName) : null;
+    // Chip fallback mirrors the per-row session-model fallback: when the scan has no model yet
+    // (the session's carrier entry is in-flight), use the latest main-agent session's stamp so
+    // the assistant chip stays in sync with the rows instead of degrading to "Claude".
+    const latestSessionModel = (this.props.mainAgentSessions || []).length
+      ? this.props.mainAgentSessions[this.props.mainAgentSessions.length - 1].model
+      : null;
+    const modelInfo = getModelInfo((this._reqScanCache && this._reqScanCache.modelName) || latestSessionModel);
     for (const item of allItems) {
       if (!item || !item.props) continue;
       const role = item.props.role;
@@ -3220,8 +3243,12 @@ class ChatView extends React.Component {
         // 而非当前正在进行中的 request.body.model（后者可能还没被扫到或不稳定）。
         // completedModelName 仅在 req.response 存在时更新，流式期间永远指向上一次已完成模型。
         // fallback 到 modelName 只是为了冷启动（从未有已完成请求时的边界情况）。
+        // Tail fallback sl.model: the stream-progress SSE's own model — fires only when NO
+        // MainAgent request was ever scanned (very first turn of a fresh view), where the
+        // deliberate "don't use the in-flight model" note above has nothing better to offer;
+        // previously that window rendered the generic "MainAgent" fallback.
         const cache = this._reqScanCache;
-        const streamingModelInfo = cache ? getModelInfo(cache.completedModelName || cache.modelName) : null;
+        const streamingModelInfo = getModelInfo((cache && (cache.completedModelName || cache.modelName)) || sl.model);
         streamingLiveItem = (
           <ChatMessage
             key="streaming-live-msg"
