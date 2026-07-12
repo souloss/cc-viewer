@@ -18,6 +18,10 @@ import { registerAdapter } from '../im-bridge-core.js';
 let sdkFactory = null;
 export function __setClientFactory(fn) { sdkFactory = fn; }
 
+// Internal connect guard (< core CONNECT_TIMEOUT_MS): bounds the onReady wait on hook-capable SDK
+// builds so a misconfigured app fails with lastError instead of leaking a background retry loop.
+const CONNECT_PROBE_MS = 12_000;
+
 const TOKEN_PATH = '/open-apis/auth/v3/tenant_access_token/internal';
 function tokenHost(region) {
   return region === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
@@ -90,17 +94,59 @@ const feishuAdapter = {
     const base = { appId: cfg.appId, appSecret: cfg.appSecret, domain };
     // Outbound client (auto-manages the tenant_access_token cache).
     ctx.store.sendClient = new Lark.Client(base);
-    // Inbound long-connection event client. wsConfig is REQUIRED — omitting PingInterval/PingTimeout
-    // makes start() throw or hang on some SDK builds.
+    let settled = false;
+    let resolveReady, rejectReady;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    ready.catch(() => {}); // detached guard: a pre-await rejection must not raise unhandledRejection
+    // Inbound long-connection event client. wsConfig keys per SDK build: 1.66.0 reads ONLY the
+    // lowercase `pingTimeout` (seconds) — it arms the pong/liveness watchdog that terminates a
+    // zombie socket after a SILENT network drop (NAT idle, sleep, no FIN) and triggers reconnect;
+    // without it such drops are never detected. The capitalized PingInterval/PingTimeout keys are
+    // kept for older builds that read them (1.66.0 ignores unknown keys, so both are safe).
     const ws = new Lark.WSClient({
       ...base,
       loggerLevel: Lark.LoggerLevel ? Lark.LoggerLevel.warn : undefined, // warn: avoid noisy info-level stdout
-      wsConfig: { PingInterval: 30, PingTimeout: 5 },
+      wsConfig: { PingInterval: 30, PingTimeout: 5, pingTimeout: 5 },
+      // Lifecycle hooks ship with newer SDK builds (present in the installed 1.66.0); an older
+      // build silently ignores unknown ctor options, so wiring them is always safe.
+      onReady: () => {
+        if (settled) { hooks.onConnectionChange?.('connected'); return; }
+        settled = true; resolveReady();
+      },
+      onReconnecting: () => hooks.onConnectionChange?.('reconnecting'),
+      onReconnected: () => hooks.onConnectionChange?.('connected'),
+      onError: (err) => {
+        if (settled) { hooks.onConnectionChange?.('disconnected', err); return; }
+        settled = true; rejectReady(err instanceof Error ? err : new Error(String(err?.message || err)));
+      },
     });
     const dispatcher = new Lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data) => hooks.onInbound(normalizeInbound(data), null),
     });
-    await ws.start({ eventDispatcher: dispatcher });
+    if (typeof ws.getConnectionStatus === 'function') {
+      // Hook-capable build (feature-detected): start() resolves before the handshake completes,
+      // so gate on onReady/onError; bound with an internal timeout below the core's connect race.
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        rejectReady(new Error('connect timeout'));
+      }, CONNECT_PROBE_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      try {
+        await ws.start({ eventDispatcher: dispatcher });
+        await ready;
+      } catch (e) {
+        // Stop the SDK's background retry loop so a failed connect doesn't leak.
+        try { await ws.close?.({}); } catch { /* best-effort */ }
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    } else {
+      // Older SDK (and legacy test fakes): original behavior — start() is trusted, no
+      // lifecycle hooks fire, connection state stays start/stop-driven.
+      await ws.start({ eventDispatcher: dispatcher });
+    }
     return ws;
   },
 

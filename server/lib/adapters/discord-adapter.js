@@ -80,10 +80,21 @@ const discordAdapter = {
     });
     ctx.store.client = client;
     // Persistent error listener for the life of the client: a Node EventEmitter that emits 'error'
-    // with NO listener throws and crashes the process. The connect-window once('error') below is
-    // consumed on resolve, so without this a later gateway 'error' would be fatal. Swallow (the
-    // gateway auto-reconnects; connection state surfaces via the bridge status).
-    client.on('error', () => { /* swallowed — see comment */ });
+    // with NO listener throws and crashes the process. NOTE: the connect-window once('error') below
+    // is NOT consumed by a successful ClientReady resolve — it survives and must therefore be a
+    // settled-guarded no-op post-connect (see below). Record errors as lastError here (state flips
+    // come from the shard lifecycle events below; the gateway auto-reconnects).
+    client.on('error', (e) => hooks.onConnectionChange?.(null, e));
+    // Shard lifecycle → core tri-state. Single unsharded gateway = one shard, so no per-shard map.
+    // Events?.X ?? 'literal' keeps test fakes (whose Events map lacks shard constants) working.
+    client.on(Events?.ShardReconnecting ?? 'shardReconnecting', () => hooks.onConnectionChange?.('reconnecting'));
+    client.on(Events?.ShardResume ?? 'shardResume', () => hooks.onConnectionChange?.('connected'));
+    client.on(Events?.ShardReady ?? 'shardReady', () => hooks.onConnectionChange?.('connected'));
+    client.on(Events?.ShardDisconnect ?? 'shardDisconnect', (ev) =>
+      hooks.onConnectionChange?.('disconnected', new Error(`gateway closed (code ${ev?.code ?? 'unknown'})`)));
+    client.on(Events?.Invalidated ?? 'invalidated', () =>
+      hooks.onConnectionChange?.('disconnected', new Error('session invalidated')));
+    client.on(Events?.ShardError ?? 'shardError', (e) => hooks.onConnectionChange?.(null, e));
     client.on(Events.MessageCreate, (message) => {
       // Loop-guard: ignore the bot's own messages (Discord redelivers our send as a new event) and
       // all other bots. author.bot covers self; the id check is belt-and-suspenders.
@@ -98,8 +109,19 @@ const discordAdapter = {
       const timer = setTimeout(() => { try { client.destroy(); } catch { /* best-effort */ } finish(reject, new Error('connect timeout')); }, CONNECT_PROBE_MS);
       if (typeof timer.unref === 'function') timer.unref();
       client.once(Events.ClientReady, () => finish(resolve, client));
-      client.once('error', (e) => { try { client.destroy(); } catch { /* best-effort */ } finish(reject, new Error(String(e?.message || e))); });
-      client.login(cfg.botToken).catch((e) => { try { client.destroy(); } catch { /* best-effort */ } finish(reject, new Error(String(e?.message || e))); });
+      // Guard the destroy behind `settled`: this once-listener is NOT consumed by ClientReady, so
+      // an unguarded destroy would kill the LIVE client on the first post-connect 'error' event
+      // (freezing the bridge with no reconnect — the exact stale-status bug this adapter fixes).
+      client.once('error', (e) => {
+        if (settled) return; // post-connect errors are handled by the persistent listener above
+        try { client.destroy(); } catch { /* best-effort */ }
+        finish(reject, new Error(String(e?.message || e)));
+      });
+      client.login(cfg.botToken).catch((e) => {
+        if (settled) return;
+        try { client.destroy(); } catch { /* best-effort */ }
+        finish(reject, new Error(String(e?.message || e)));
+      });
     });
   },
 

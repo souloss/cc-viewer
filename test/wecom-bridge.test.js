@@ -223,4 +223,60 @@ describe('wecom AI 卡片流式 (aiCard)', () => {
   });
 });
 
+describe('wecom connection tri-state (mid-life socket drops)', () => {
+  it('disconnected → reconnecting; authenticated → connected again', () => {
+    assert.equal(core.getBridgeStatus('wecom').connectionState, 'connected');
+    rec.client.emit('disconnected', 'net down');
+    let st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'reconnecting');
+    assert.equal(st.connected, false);
+    assert.match(st.lastError || '', /net down/);
+    rec.client.emit('authenticated');
+    st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'connected');
+    assert.equal(st.connected, true);
+    assert.equal(st.lastError, null, 'recovery must clear the retained disconnect cause');
+  });
+
+  it("'reconnecting' emits map to reconnecting", () => {
+    rec.client.emit('reconnecting', 1);
+    assert.equal(core.getBridgeStatus('wecom').connectionState, 'reconnecting');
+  });
+
+  it('terminal error (WSReconnectExhaustedError) → disconnected', () => {
+    rec.client.emit('error', Object.assign(new Error('gave up'), { name: 'WSReconnectExhaustedError' }));
+    const st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /gave up/);
+  });
+
+  it('non-terminal error records lastError without flipping the state', () => {
+    rec.client.emit('error', new Error('transient'));
+    const st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'connected');
+    assert.match(st.lastError, /transient/);
+  });
+
+  it('server kick (event.disconnected_event then disconnected) stays terminal', () => {
+    rec.client.emit('event.disconnected_event', {});
+    rec.client.emit('disconnected', 'closed'); // SDK emits this right after the kick — must not downgrade
+    const st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /kicked/);
+    // A later successful re-auth (e.g. after re-enable) clears the kicked latch.
+    rec.client.emit('authenticated');
+    assert.equal(core.getBridgeStatus('wecom').connectionState, 'connected');
+  });
+
+  it('emits after stopBridge cannot flip the state', async () => {
+    const client = rec.client;
+    await core.stopBridge('wecom');
+    client.emit('authenticated');
+    client.emit('disconnected', 'x');
+    const st = core.getBridgeStatus('wecom');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.equal(st.connected, false);
+  });
+});
+
 after(() => { rmSync(tmpDir, { recursive: true, force: true }); });

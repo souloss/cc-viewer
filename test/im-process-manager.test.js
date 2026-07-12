@@ -85,6 +85,7 @@ describe('im-process-manager: getImProcessStatus', () => {
     assert.equal(s.state, 'dead');
     assert.equal(s.running, false);
     assert.equal(s.connected, false);
+    assert.equal(s.connectionState, 'disconnected');
   });
 
   it('ready (running + connected) when lock has port and probe succeeds', async () => {
@@ -95,7 +96,23 @@ describe('im-process-manager: getImProcessStatus', () => {
     assert.equal(s.state, 'ready');
     assert.equal(s.running, true);
     assert.equal(s.connected, true);
+    // Old-worker probe (no connectionState) → derived from connected.
+    assert.equal(s.connectionState, 'connected');
     assert.equal(s.port, 7050);
+    wipe(id);
+  });
+
+  it('ready + reconnecting carries the tri-state and lastError through', async () => {
+    const id = freshId(); wipe(id);
+    acquireImLock(id);
+    updateImLockPort(id, 7055);
+    const s = await getImProcessStatus(id, {
+      probe: async () => ({ ok: true, connected: false, connectionState: 'reconnecting', lastError: 'net down', pid: process.pid }),
+    });
+    assert.equal(s.state, 'ready');
+    assert.equal(s.connected, false);
+    assert.equal(s.connectionState, 'reconnecting');
+    assert.equal(s.lastError, 'net down');
     wipe(id);
   });
 
@@ -106,6 +123,7 @@ describe('im-process-manager: getImProcessStatus', () => {
     assert.equal(s.state, 'booting');
     assert.equal(s.running, true);
     assert.equal(s.connected, false);
+    assert.equal(s.connectionState, 'disconnected');
     wipe(id);
   });
 });

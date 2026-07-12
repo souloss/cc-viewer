@@ -142,6 +142,30 @@ describe('GET /api/dingtalk/status loopback gate', () => {
     assert.deepEqual(ld.allowStaffIds, ['staff-x']);
     assert.equal(ld.connection.boundConversationId, 'cidSECRET');
   });
+
+  it('remote trim keeps connectionState but strips lastError; main branch carries the tri-state', async () => {
+    const { dingtalkRoutes } = await import('../server/routes/dingtalk.js');
+    const route = dingtalkRoutes.find((r) => r.path === '/api/dingtalk/status' && r.method === 'GET');
+    const mkRes = () => { let payload = ''; return { writeHead() {}, end(b) { payload = b || ''; }, get payload() { return payload; } }; };
+
+    // Worker branch, remote trim.
+    const workerDeps = { dingtalk: { isWorker: true, getBridgeStatus: () => ({ running: true, connected: false, connectionState: 'reconnecting', lastError: 'boom_SECRET' }) } };
+    const remote = mkRes();
+    route.handler({}, remote, { pathname: '/api/dingtalk/status' }, /* isLocal */ false, workerDeps);
+    assert.deepEqual(JSON.parse(remote.payload).connection, { running: true, connected: false, connectionState: 'reconnecting' });
+    assert.ok(!remote.payload.includes('boom_SECRET'), 'lastError must stay loopback-only');
+
+    // Main branch: connectionState/lastError come from getProcessStatus.
+    const mainDeps = { dingtalk: { isWorker: false, getProcessStatus: async () => ({ state: 'ready', running: true, connected: false, connectionState: 'reconnecting', lastError: 'net down', pid: 1, port: 7000, startedAt: null }) } };
+    const local = mkRes();
+    await new Promise((resolve) => {
+      const res = { writeHead() {}, end(b) { local.end(b); resolve(); } };
+      route.handler({}, res, { pathname: '/api/dingtalk/status' }, /* isLocal */ true, mainDeps);
+    });
+    const ld = JSON.parse(local.payload);
+    assert.equal(ld.connection.connectionState, 'reconnecting');
+    assert.equal(ld.connection.lastError, 'net down');
+  });
 });
 
 // Loopback HTTP is always isLocal:true, so the !isLocal 403 guard can't be hit via the API.

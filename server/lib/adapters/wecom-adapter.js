@@ -75,6 +75,30 @@ const wecomAdapter = {
     const client = new WSClient({ botId: cfg.botId, secret: cfg.secret });
     ctx.store.client = client; // single client for inbound + outbound (sendOne reads it)
     client.on('message.text', (frame) => hooks.onInbound(normalizeInbound(frame), null));
+    // Persistent lifecycle listeners → core tri-state. Registered up front (pre-connect emits are
+    // ignored by the core while not running); removed by disconnect()'s removeAllListeners.
+    // NOTE: one connection per bot — running testConnection against the SAME bot kicks the live
+    // bridge via disconnected_event, which the SDK treats as TERMINAL (isManualClose, no
+    // reconnect). The status will correctly show Disconnected until the bridge is restarted;
+    // auto-restart-after-test is a deliberate non-goal for now (backlog).
+    let kicked = false;
+    client.on('event.disconnected_event', () => {
+      // Server kicked this connection (a new one took over): the SDK sets isManualClose and will
+      // NOT reconnect, so this is terminal; the 'disconnected' emit that follows must not
+      // downgrade it to reconnecting.
+      kicked = true;
+      hooks.onConnectionChange?.('disconnected', new Error('kicked: new connection established'));
+    });
+    client.on('disconnected', (reason) => {
+      if (!kicked) hooks.onConnectionChange?.('reconnecting', reason ? new Error(String(reason)) : null);
+    });
+    client.on('reconnecting', () => hooks.onConnectionChange?.('reconnecting'));
+    client.on('authenticated', () => { kicked = false; hooks.onConnectionChange?.('connected'); });
+    client.on('error', (e) => {
+      const terminal = e?.name === 'WSReconnectExhaustedError' || e?.name === 'WSAuthFailureError'
+        || e?.code === 'WS_RECONNECT_EXHAUSTED';
+      hooks.onConnectionChange?.(terminal ? 'disconnected' : null, e);
+    });
     // connect() is synchronous; resolve once the WS handshake authenticates so the core's
     // `connected` flag and CONNECT_TIMEOUT_MS race are meaningful (bad creds → lastError, not a
     // false "connected"). Reject (and tear down) on error or an internal timeout.

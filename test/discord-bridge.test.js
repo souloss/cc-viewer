@@ -191,4 +191,63 @@ describe('discord testConnection (REST /users/@me)', () => {
   });
 });
 
+describe('discord connection tri-state (shard lifecycle)', () => {
+  // The fake Events map lacks shard constants, so the adapter falls back to the literal names —
+  // exactly what real discord.js emits.
+  it('shardReconnecting → reconnecting; shardResume/shardReady → connected', () => {
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'connected');
+    rec.client.emit('shardReconnecting', 0);
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'reconnecting');
+    rec.client.emit('shardResume', 0);
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'connected');
+    rec.client.emit('shardReconnecting', 0);
+    rec.client.emit('shardReady', 0);
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'connected');
+  });
+
+  it('shardDisconnect (unrecoverable close) → disconnected with the close code', () => {
+    rec.client.emit('shardDisconnect', { code: 4004 }, 0);
+    const st = core.getBridgeStatus('discord');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /4004/);
+  });
+
+  it('invalidated session → disconnected', () => {
+    rec.client.emit('invalidated');
+    const st = core.getBridgeStatus('discord');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /invalidated/);
+  });
+
+  it("'error' and 'shardError' record lastError without flipping the state", () => {
+    rec.client.emit('error', new Error('gateway blip'));
+    let st = core.getBridgeStatus('discord');
+    assert.equal(st.connectionState, 'connected');
+    assert.match(st.lastError, /gateway blip/);
+    rec.client.emit('shardError', new Error('shard blip'), 0);
+    st = core.getBridgeStatus('discord');
+    assert.equal(st.connectionState, 'connected');
+    assert.match(st.lastError, /shard blip/);
+  });
+
+  it("a post-connect 'error' must NOT destroy the live client (connect-window once('error') is settled-guarded)", () => {
+    rec.client.emit('error', new Error('gateway blip'));
+    assert.notEqual(rec.destroyed, true, 'client.destroy() must not run for a post-connect error');
+    // The client is still alive: the subsequent shard lifecycle still drives the state.
+    rec.client.emit('shardReconnecting', 0);
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'reconnecting');
+    rec.client.emit('shardResume', 0);
+    const st = core.getBridgeStatus('discord');
+    assert.equal(st.connectionState, 'connected');
+    assert.equal(st.lastError, null, 'recovery clears the recorded error');
+  });
+
+  it('shard emits after stopBridge cannot flip the state', async () => {
+    const client = rec.client;
+    await core.stopBridge('discord');
+    client.emit('shardReady', 0);
+    assert.equal(core.getBridgeStatus('discord').connectionState, 'disconnected');
+  });
+});
+
 after(() => { rmSync(tmpDir, { recursive: true, force: true }); });

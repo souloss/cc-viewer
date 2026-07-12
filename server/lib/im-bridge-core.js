@@ -43,6 +43,10 @@ const STREAM_MIN_DELTA = 20;             // 累计增长达 20 字才推一帧�
 const STREAM_MAX_FRAMES = 25;            // 每回合中途流式帧硬上限；超限停推，finalize 仍落全文
 const STREAM_MAX_CHARS = 20_000;         // 卡片内容字符上限，超出截断
 
+// Poll interval for adapters that expose connectionProbe() instead of lifecycle events
+// (dingtalk-stream replaces its internal ws on every reconnect, so no listener survives).
+let CONN_POLL_MS = 5_000;
+
 // ─── registry + core-global single-flight ───
 const instances = new Map();             // platformId → instance
 let activeInjection = null;              // { platformId, since, target } — the one in-flight turn
@@ -61,6 +65,9 @@ function newInstance(adapter) {
     client: null,
     running: false,
     connected: false,
+    connectionState: 'disconnected',      // 'connected' | 'reconnecting' | 'disconnected'; invariant: connected === (connectionState === 'connected')
+    startGen: 0,                          // generation counter; stale adapter listeners from a previous start are ignored
+    connPollTimer: null,                  // fallback poll timer for adapters exposing connectionProbe()
     lastError: null,
     bridgeDeps: null,
     boundConversation: null,
@@ -88,9 +95,15 @@ function newInstance(adapter) {
  * @property {Object}  [capabilities]  Informational flags ({inboundAck, sdkManagesToken}); not read by the core.
  * @property {(cfg:Object)=>boolean}  hasCreds        True when cfg carries enough creds to connect.
  * @property {(cfg:Object)=>Object}   [statusFields]  Extra non-secret status fields for the admin API.
- * @property {(cfg:Object, hooks:{onInbound:(normalized:Object, ackCtx:*)=>void}, ctx:{fetch,store})=>Promise<*>} connect
+ * @property {(cfg:Object, hooks:{onInbound:(normalized:Object, ackCtx:*)=>void, onConnectionChange?:(state:?string, err?:*)=>void}, ctx:{fetch,store})=>Promise<*>} connect
  *           Open the long connection; return the live client. Call hooks.onInbound(normalized, ackCtx)
  *           per inbound message, where normalized = {text, conversationId, senderId, msgId, target}.
+ *           Optionally call hooks.onConnectionChange?.(state, err) on transport lifecycle changes,
+ *           where state ∈ 'connected'|'reconnecting'|'disconnected', or null to record err only.
+ *           Always invoke it with optional chaining — callers (tests) may pass onInbound alone.
+ * @property {(client:*)=>('connected'|'reconnecting'|'disconnected')} [connectionProbe]
+ *           For SDKs without usable lifecycle events: derive the live connection state from the
+ *           client's fields. When present, the core polls it every CONN_POLL_MS while running.
  * @property {(client:*, ctx:{fetch,store})=>Promise<void>} [disconnect]  Tear down the client (best-effort).
  * @property {(ackCtx:*, client:*)=>void} [ack]  Ack an inbound msg (platforms that redeliver if not acked).
  * @property {(cfg:Object, target:Object, content:string, ctx:{fetch,store})=>Promise<void>} sendOne  Send one chunk.
@@ -318,6 +331,26 @@ function armActiveInjection(inst, target, since) {
       });
     }
   }
+}
+
+/**
+ * Transition the tri-state connection status. `gen` binds the caller to one startBridge lifetime,
+ * so a stale adapter listener firing after stopBridge/reloadBridge can never flip the state.
+ * state === null records the error only; identical consecutive states are no-ops (collapses
+ * SDK error/reconnect storms into single audited transitions).
+ */
+function setConnectionState(inst, gen, state, err) {
+  if (gen !== inst.startGen || !inst.running) return;
+  const errStr = err != null ? String(err?.message || err) : null;
+  if (errStr) inst.lastError = errStr;
+  if (state == null || state === inst.connectionState) return;
+  inst.connectionState = state;
+  inst.connected = state === 'connected';
+  // Recovery clears the retained disconnect cause — the UI ranks lastError above connected, so
+  // keeping it would leave the status stuck on "Error" after every transient drop. Deduped
+  // repeats and null-state calls don't clear, preserving send-failure diagnostics while healthy.
+  if (state === 'connected' && !errStr) inst.lastError = null;
+  audit(inst, 'connection', { state, ...(errStr ? { error: errStr } : {}) });
 }
 
 // ─── small helpers ───
@@ -711,21 +744,45 @@ export async function startBridge(id, deps) {
   if (!inst.bridgeDeps || typeof inst.bridgeDeps.getConfig !== 'function') { audit(inst, 'start-skipped', { reason: 'no-deps' }); return; }
   const cfg = inst.bridgeDeps.getConfig();
   if (!cfg || !cfg.enabled || !inst.adapter.hasCreds(cfg)) return; // off / incomplete → no-op
+  // Bump AFTER the early-return guards: startBridge on an already-running instance is a legal
+  // no-op, and bumping there would orphan the live adapter's listeners (state frozen forever).
+  const gen = ++inst.startGen;
   try {
-    const hooks = { onInbound: (normalized, ackCtx) => handleInbound(inst, normalized, ackCtx) };
+    const hooks = {
+      onInbound: (normalized, ackCtx) => handleInbound(inst, normalized, ackCtx),
+      onConnectionChange: (state, err) => setConnectionState(inst, gen, state, err),
+    };
     // Bound the connect so a hung adapter (e.g. Feishu WSClient.start() on a misconfigured app)
     // becomes a lastError instead of blocking the whole startup chain.
-    inst.client = await Promise.race([
+    const client = await Promise.race([
       inst.adapter.connect(cfg, hooks, ctxFor(inst)),
       new Promise((_, reject) => { const tm = setTimeout(() => reject(new Error('connect timeout')), CONNECT_TIMEOUT_MS); if (typeof tm.unref === 'function') tm.unref(); }),
     ]);
+    if (gen !== inst.startGen) {
+      // stopBridge / reload ran while the connect was in flight: this start lost the race. Don't
+      // resurrect the instance — tear down the late-arriving client so it doesn't leak.
+      try { await inst.adapter.disconnect?.(client, ctxFor(inst)); } catch { /* best-effort */ }
+      audit(inst, 'start-superseded', {});
+      return;
+    }
+    inst.client = client;
     inst.running = true;
     inst.connected = true;
+    inst.connectionState = 'connected';
     inst.lastError = null;
+    if (typeof inst.adapter.connectionProbe === 'function') {
+      inst.connPollTimer = setInterval(() => {
+        try { setConnectionState(inst, gen, inst.adapter.connectionProbe(inst.client), null); }
+        catch { /* best-effort: a probe throw must not kill the interval */ }
+      }, CONN_POLL_MS);
+      if (typeof inst.connPollTimer.unref === 'function') inst.connPollTimer.unref();
+    }
     audit(inst, 'start', inst.adapter.statusFields ? inst.adapter.statusFields(cfg) : {});
   } catch (e) {
+    if (gen !== inst.startGen) return; // superseded by stop/reload — don't overwrite their state
     inst.lastError = String(e?.message || e);
     inst.connected = false;
+    inst.connectionState = 'disconnected';
     audit(inst, 'start-error', { error: inst.lastError });
   }
 }
@@ -733,6 +790,9 @@ export async function startBridge(id, deps) {
 export async function stopBridge(id) {
   const inst = instances.get(id);
   if (!inst) return;
+  // Invalidate connection hooks up front so anything the adapter teardown fires can't flip state.
+  inst.startGen++;
+  if (inst.connPollTimer) { clearInterval(inst.connPollTimer); inst.connPollTimer = null; }
   if (inst.ackCardPromise && activeInjection?.platformId === id) {
     await finalizeAckCard(inst, activeInjection.target, tr(inst, 'noSession'), 'error');
   } else {
@@ -743,6 +803,7 @@ export async function stopBridge(id) {
   inst.client = null;
   inst.running = false;
   inst.connected = false;
+  inst.connectionState = 'disconnected';
   inst.boundConversation = null;
   if (activeInjection && activeInjection.platformId === id) clearActiveInjection();
   inst.queue.length = 0;
@@ -760,10 +821,11 @@ export function isBridgeRunning(id) {
 
 export function getBridgeStatus(id) {
   const inst = instances.get(id);
-  if (!inst) return { running: false, connected: false, lastError: null, boundConversationId: null };
+  if (!inst) return { running: false, connected: false, connectionState: 'disconnected', lastError: null, boundConversationId: null };
   const base = {
     running: inst.running,
     connected: inst.connected,
+    connectionState: inst.connectionState,
     lastError: inst.lastError,
     boundConversationId: inst.boundConversation?.conversationId || null,
   };
@@ -799,6 +861,8 @@ export async function stopAll() {
 // ─── test seams ───
 export function __setStreamTickMsForTests(ms) { STREAM_TICK_MS = (ms == null ? 300 : ms); }
 
+export function __setConnPollMsForTests(ms) { CONN_POLL_MS = (ms == null ? 5_000 : ms); }
+
 export function __setMaxQueueForTests(id, n) {
   const inst = instances.get(id);
   if (inst) inst.maxQueueOverride = n;
@@ -809,6 +873,9 @@ export function __resetForTests(id) {
   const inst = instances.get(id);
   if (!inst) return;
   inst.client = null; inst.running = false; inst.connected = false; inst.lastError = null;
+  inst.connectionState = 'disconnected';
+  inst.startGen++; // orphan any listeners still bound to a previous start
+  if (inst.connPollTimer) { clearInterval(inst.connPollTimer); inst.connPollTimer = null; }
   inst.bridgeDeps = null; inst.boundConversation = null; inst.lastRepliedTurnTs = null;
   inst.maxQueueOverride = null;
   inst.seenMsgIds.length = 0; inst.queue.length = 0; inst.sendTimes.length = 0;

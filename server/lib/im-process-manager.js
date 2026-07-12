@@ -139,7 +139,7 @@ export async function stopImProcess(id, opts = {}) {
 
 /**
  * 查询某 IM 的进程状态（供 header chip / 路由）。
- * @returns {Promise<{state:string, running:boolean, connected:boolean, pid:number|null, port:number|null, startedAt:string|null}>}
+ * @returns {Promise<{state:string, running:boolean, connected:boolean, connectionState:string, lastError:string|null, pid:number|null, port:number|null, startedAt:string|null}>}
  */
 export async function getImProcessStatus(id, opts = {}) {
   const live = await getImLiveness(id, opts);
@@ -147,6 +147,12 @@ export async function getImProcessStatus(id, opts = {}) {
     state: live.state,
     running: live.state === 'ready' || live.state === 'booting' || live.state === 'hung',
     connected: live.state === 'ready' && !!live.connected,
+    // Tri-state IM link status from the worker's own report; a non-ready process cannot be
+    // connected or reconnecting, so it reads as disconnected.
+    connectionState: live.state === 'ready'
+      ? (live.connectionState || (live.connected ? 'connected' : 'disconnected'))
+      : 'disconnected',
+    lastError: live.lastError ?? null,
     pid: live.lock?.pid ?? null,
     port: live.lock?.port ?? null,
     startedAt: live.lock?.startedAt ?? null,

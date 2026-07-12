@@ -130,6 +130,22 @@ describe('im-lock', () => {
       const r = await getImLiveness(id, { probe });
       assert.equal(r.state, 'ready');
       assert.equal(r.connected, true);
+      // Probe without connectionState (old worker) → derived from connected.
+      assert.equal(r.connectionState, 'connected');
+      assert.equal(r.lastError, null);
+      wipe(id);
+    });
+
+    it('ready carries connectionState/lastError through from a tri-state probe', async () => {
+      const id = freshId(); wipe(id);
+      acquireImLock(id);
+      updateImLockPort(id, 7054);
+      const probe = async () => ({ ok: true, connected: false, connectionState: 'reconnecting', lastError: 'net down', pid: process.pid });
+      const r = await getImLiveness(id, { probe });
+      assert.equal(r.state, 'ready');
+      assert.equal(r.connected, false);
+      assert.equal(r.connectionState, 'reconnecting');
+      assert.equal(r.lastError, 'net down');
       wipe(id);
     });
 

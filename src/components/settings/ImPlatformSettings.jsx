@@ -3,6 +3,7 @@ import { Switch, Input, Button, Select, Tag, Tooltip, Dropdown, message } from '
 import { DownOutlined, RightOutlined, QuestionCircleOutlined, PlusOutlined, SettingOutlined, FolderOpenOutlined, FileZipOutlined, FileMarkdownOutlined } from '@ant-design/icons';
 import { apiUrl } from '../../utils/apiUrl';
 import { imTr as _tr } from '../../utils/imTr';
+import { imBadgeModel } from '../../utils/imConnState';
 import ImAppendSystemModal from './ImAppendSystemModal';
 import ImSkillsModal from './ImSkillsModal';
 import styles from './ImPlatformSettings.module.css';
@@ -294,24 +295,16 @@ export default function ImPlatformSettings({ descriptor }) {
   };
 
   // 状态徽标：以真实进程状态为准（含服务端口）。远端无 process → 回落 connection。
+  // Decision logic lives in imBadgeModel (shared with ImConversationModal).
   const renderBadge = () => {
-    if (connection?.lastError) return <Tag color="error">{_tr('ui.im.statusError', null, 'Error')}: {connection.lastError}</Tag>;
-    const portSuffix = proc?.port ? ` :${proc.port}` : '';
-    if (procState) {
-      if (procState === 'ready') {
-        return connection?.connected
-          ? <Tag color="success">{_tr('ui.im.statusConnected', null, 'Connected')}{portSuffix}</Tag>
-          : <Tag color="processing">{_tr('ui.im.statusRunning', null, 'Running, connecting…')}{portSuffix}</Tag>;
-      }
-      if (procState === 'booting') return <Tag color="processing">{_tr('ui.im.statusBooting', null, 'Starting…')}</Tag>;
-      if (procState === 'hung') return <Tag color="warning">{_tr('ui.im.statusHung', null, 'Not responding')}</Tag>;
-      return <Tag>{_tr('ui.im.statusDisconnected', null, 'Disconnected')}</Tag>; // dead
-    }
-    // 远端回落（无 process 字段）
-    if (!connection) return null;
-    if (connection.connected) return <Tag color="success">{_tr('ui.im.statusConnected', null, 'Connected')}</Tag>;
-    if (connection.running) return <Tag color="processing">{_tr('ui.im.statusRunning', null, 'Running, connecting…')}</Tag>;
-    return <Tag>{_tr('ui.im.statusDisconnected', null, 'Disconnected')}</Tag>;
+    const m = imBadgeModel({ procState, connection });
+    if (!m) return null;
+    const portSuffix = m.withPort && proc?.port ? ` :${proc.port}` : '';
+    return (
+      <Tag color={m.color || undefined}>
+        {_tr(m.key, null, m.fallback)}{m.error ? `: ${m.error}` : ''}{portSuffix}
+      </Tag>
+    );
   };
 
   const renderField = (f) => {

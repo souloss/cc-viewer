@@ -9,6 +9,7 @@ import { reconstructEntries } from '../../../server/lib/delta-reconstructor.js';
 import { apiUrl } from '../../utils/apiUrl';
 import { IM_PLATFORMS } from './imPlatforms';
 import { t } from '../../i18n';
+import { imBadgeModel } from '../../utils/imConnState';
 import styles from './ImConversationModal.module.css';
 
 // 把一份独立 IM worker 的 .jsonl 重建出的 entries 折叠成 mainAgentSessions。
@@ -174,24 +175,16 @@ export default function ImConversationModal({ open, onClose, platform, onOpenCon
   }, [open, platform, reloadKey]);
 
   // 状态徽标：以真实进程状态为准（含服务端口）。远端无 process → 回落 connection。与 ImPlatformSettings 一致。
+  // Decision logic lives in imBadgeModel (shared with ImPlatformSettings).
   const renderStatus = () => {
-    if (imConn?.lastError) return <Tag color="error">{t('ui.im.statusError')}: {imConn.lastError}</Tag>;
-    const portSuffix = imProc?.port ? ` :${imProc.port}` : '';
-    const st = imProc?.state;
-    if (st) {
-      if (st === 'ready') {
-        return imConn?.connected
-          ? <Tag color="success">{t('ui.im.statusConnected')}{portSuffix}</Tag>
-          : <Tag color="processing">{t('ui.im.statusRunning')}{portSuffix}</Tag>;
-      }
-      if (st === 'booting') return <Tag color="processing">{t('ui.im.statusBooting')}</Tag>;
-      if (st === 'hung') return <Tag color="warning">{t('ui.im.statusHung')}</Tag>;
-      return <Tag>{t('ui.im.statusDisconnected')}</Tag>;
-    }
-    if (!imConn) return null;
-    if (imConn.connected) return <Tag color="success">{t('ui.im.statusConnected')}</Tag>;
-    if (imConn.running) return <Tag color="processing">{t('ui.im.statusRunning')}</Tag>;
-    return <Tag>{t('ui.im.statusDisconnected')}</Tag>;
+    const m = imBadgeModel({ procState: imProc?.state, connection: imConn });
+    if (!m) return null;
+    const portSuffix = m.withPort && imProc?.port ? ` :${imProc.port}` : '';
+    return (
+      <Tag color={m.color || undefined}>
+        {t(m.key)}{m.error ? `: ${m.error}` : ''}{portSuffix}
+      </Tag>
+    );
   };
 
   useEffect(() => {

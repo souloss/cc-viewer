@@ -381,6 +381,35 @@ describe('IM routes: allowlist optional / process control / logs (manager-backed
     assert.equal(r.json().project, 'IM_discord');
     assert.equal(r.json().latest, null);
   });
+
+  it('status (main branch) carries connectionState/lastError from getProcessStatus', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/feishu/status', 'GET'));
+    const deps = { im: { isWorker: false, getProcessStatus: async () => ({ state: 'ready', running: true, connected: false, connectionState: 'reconnecting', lastError: 'net down', pid: 1, port: 7000, startedAt: null }) } };
+    const r = await call(route, { pathname: '/api/im/feishu/status', isLocal: true, deps });
+    assert.equal(r.status, 200);
+    const conn = r.json().connection;
+    assert.equal(conn.connectionState, 'reconnecting');
+    assert.equal(conn.lastError, 'net down');
+    assert.equal(conn.connected, false);
+  });
+
+  it('status remote trim keeps connectionState but strips lastError', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/feishu/status', 'GET'));
+    const deps = { im: { isWorker: true, getBridgeStatus: () => ({ running: true, connected: false, connectionState: 'reconnecting', lastError: 'boom_SECRET', boundConversationId: 'oc_x' }) } };
+    const r = await call(route, { pathname: '/api/im/feishu/status', isLocal: false, deps });
+    assert.deepEqual(r.json().connection, { running: true, connected: false, connectionState: 'reconnecting' });
+    assert.ok(!r.payload.includes('boom_SECRET'), 'lastError must stay loopback-only');
+  });
+
+  it('config POST optimistic response includes connectionState: disconnected', async () => {
+    const { imRoutes } = await import('../server/routes/im.js');
+    const route = imRoutes.find((r) => r.predicate('/api/im/feishu/config', 'POST'));
+    const deps = { MAX_POST_BODY: 1e6, im: { isWorker: false, restartProcess: async () => {}, stopProcess: async () => {} } };
+    const r = await call(route, { pathname: '/api/im/feishu/config', body: { enabled: true, appId: 'a', appSecret: 'b', allowUserIds: ['u'] }, deps });
+    assert.deepEqual(r.json().connection, { running: true, connected: false, connectionState: 'disconnected' });
+  });
 });
 
 // Per-IM skill management endpoints (GET /skills, POST /skills/import, POST /skills/toggle).

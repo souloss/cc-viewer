@@ -225,7 +225,7 @@ class AppHeader extends React.Component {
   _imStatus = {};
   _onImStatus = (id, info) => {
     const prev = this._imStatus[id];
-    if (prev && prev.enabled === info.enabled && prev.connected === info.connected) return;
+    if (prev && prev.enabled === info.enabled && prev.connected === info.connected && prev.state === info.state) return;
     this._imStatus[id] = info;
     this._pushHeaderModel();
   };
@@ -242,7 +242,12 @@ class AppHeader extends React.Component {
       .filter(p => this._imStatus[p.id] && this._imStatus[p.id].enabled)
       .map(p => {
         const nm = t(p.labelKey);
-        return { id: p.id, connected: !!this._imStatus[p.id].connected, name: (nm && nm !== p.labelKey) ? nm : (p.fallback || p.id) };
+        return {
+          id: p.id,
+          connected: !!this._imStatus[p.id].connected,
+          state: this._imStatus[p.id].state || null, // tri-state for tab-bar consumers; older tab bars ignore it
+          name: (nm && nm !== p.labelKey) ? nm : (p.fallback || p.id),
+        };
       });
     // 钉住的快捷方式：原生 tab bar 渲染所需。基于当前(已按 viewMode 过滤的)描述符过滤，
     // 顺序=用户钉住先后(稳定)，避免 _lastHeaderModelJson 抖动。name=菜单标签(已本地化)，作 title/aria。

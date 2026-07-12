@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Tooltip } from 'antd';
 import { apiUrl } from '../../utils/apiUrl';
 import { imTr as _tr } from '../../utils/imTr';
+import { deriveImConnState } from '../../utils/imConnState';
 import styles from './ImStatusChip.module.css';
 
 /**
@@ -33,39 +34,41 @@ export default function ImStatusChip({ descriptor, onClick, onStatus }) {
     return () => clearInterval(id);
   }, [fetchStatus]);
 
-  // 向上汇报状态（供 Electron tab bar 渲染迁移过去的 IM 图标；web 下不传 onStatus，无副作用）。
+  // Process-aware status via deriveImConnState. Each IM runs in a detached worker; the main ccv
+  // reports {running, connected, connectionState, lastError} through the manager.
+  //   error        — worker reported lastError (grey + red dot)
+  //   connected    — process up + adapter connected (brand color)
+  //   reconnecting — link dropped, SDK retrying (brand color + reduced opacity + amber dot)
+  //   running      — process up but adapter not connected yet (brand color + reduced opacity)
+  //   stopped      — process down (grey)
+  const state = deriveImConnState(connection);
+
+  // Report status upward (for the Electron tab bar's migrated IM icons; web passes no onStatus).
   useEffect(() => {
     if (!onStatus) return;
     onStatus(descriptor.id, {
       enabled,
       running: !!connection?.running,
-      connected: !!(connection && connection.connected && !connection.lastError),
+      connected: state === 'connected',
+      state,
     });
-  }, [enabled, connection, onStatus, descriptor.id]);
+  }, [enabled, connection, state, onStatus, descriptor.id]);
 
   if (!enabled) return null;
 
-  // 进程感知五态：每个 IM 现在跑在独立 worker 进程里，主 ccv 经 manager 汇报 {running, connected}。
-  //   error      —— worker 报了 lastError（灰 + 红点）
-  //   connected  —— 进程在 + 适配器已连（品牌色）
-  //   running    —— 进程在但适配器未连（品牌色 + 降透明度，"运行中，连接中…"）
-  //   stopped    —— 进程不在（灰）
-  let state = 'stopped';
-  if (connection?.lastError) state = 'error';
-  else if (connection?.running && connection?.connected) state = 'connected';
-  else if (connection?.running) state = 'running';
-
   const statusLabel = state === 'connected'
     ? _tr('ui.im.statusConnected', null, 'Connected')
-    : state === 'running'
-      ? _tr('ui.im.statusRunning', null, 'Running, connecting…')
-      : state === 'error'
-        ? `${_tr('ui.im.statusError', null, 'Error')}: ${connection.lastError}`
-        : _tr('ui.im.statusStopped', null, 'Stopped');
+    : state === 'reconnecting'
+      ? `${_tr('ui.im.statusReconnecting', null, 'Reconnecting…')}${connection?.lastError ? `: ${connection.lastError}` : ''}`
+      : state === 'running'
+        ? _tr('ui.im.statusRunning', null, 'Running, connecting…')
+        : state === 'error'
+          ? `${_tr('ui.im.statusError', null, 'Error')}: ${connection.lastError}`
+          : _tr('ui.im.statusStopped', null, 'Stopped');
   const label = _tr(descriptor.labelKey, null, descriptor.fallback);
-  // Brand color when running/connected, grey when stopped/error — driven by the descriptor.
-  const color = (state === 'connected' || state === 'running') ? descriptor.color : 'var(--text-tertiary, #999)';
-  const iconClass = state === 'running' ? `${styles.logo} ${styles.connecting}` : styles.logo;
+  // Brand color when running/connected/reconnecting, grey when stopped/error — driven by the descriptor.
+  const color = (state === 'connected' || state === 'running' || state === 'reconnecting') ? descriptor.color : 'var(--text-tertiary, #999)';
+  const iconClass = (state === 'running' || state === 'reconnecting') ? `${styles.logo} ${styles.connecting}` : styles.logo;
 
   return (
     <Tooltip title={`${label} · ${statusLabel}`}>
@@ -74,6 +77,7 @@ export default function ImStatusChip({ descriptor, onClick, onStatus }) {
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onClick?.(); }}>
         <Icon size={16} className={iconClass} style={{ color }} />
         {state === 'error' ? <span className={styles.dotError} aria-hidden="true" /> : null}
+        {state === 'reconnecting' ? <span className={styles.dotReconnecting} aria-hidden="true" /> : null}
       </span>
     </Tooltip>
   );

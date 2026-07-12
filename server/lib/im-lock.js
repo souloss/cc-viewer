@@ -135,7 +135,15 @@ export function defaultProbe(id, port, { timeoutMs = 400 } = {}) {
               const j = JSON.parse(body);
               // 身份：能对「该 id」返回 IM status 形状的 loopback 服务即视为我们的 worker
               if (j && (j.connection || typeof j.enabled === 'boolean')) {
-                finish({ ok: true, connected: !!(j.connection && j.connection.connected), pid: j.pid });
+                finish({
+                  ok: true,
+                  connected: !!(j.connection && j.connection.connected),
+                  // Old workers (pre-tri-state builds) omit connectionState → derive from connected.
+                  connectionState: j.connection?.connectionState
+                    ?? (j.connection?.connected ? 'connected' : 'disconnected'),
+                  lastError: j.connection?.lastError ?? null,
+                  pid: j.pid,
+                });
               } else finish(null);
             } catch { finish(null); }
           });
@@ -178,7 +186,13 @@ export async function getImLiveness(id, opts = {}) {
 
   const res = await probe(id, lock.port);
   if (res && res.ok && (res.pid == null || res.pid === lock.pid)) {
-    return { state: 'ready', lock, connected: !!res.connected };
+    return {
+      state: 'ready',
+      lock,
+      connected: !!res.connected,
+      connectionState: res.connectionState ?? (res.connected ? 'connected' : 'disconnected'),
+      lastError: res.lastError ?? null,
+    };
   }
   return { state: pidAlive(lock.pid) ? 'hung' : 'dead', lock };
 }

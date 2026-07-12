@@ -27,14 +27,20 @@ async function dingtalkStatus(req, res, parsedUrl, isLocal, deps) {
     conn = deps.dingtalk.getBridgeStatus();
   } else {
     processInfo = await deps.dingtalk.getProcessStatus();
-    conn = { running: processInfo.running, connected: processInfo.connected };
+    conn = {
+      running: processInfo.running,
+      connected: processInfo.connected,
+      connectionState: processInfo.connectionState,
+      lastError: processInfo.lastError ?? null,
+    };
   }
   res.writeHead(200, JSON_HEADERS);
   if (!isLocal) {
+    // connectionState passes through as-is; lastError stays loopback-only (mirrors routes/im.js).
     res.end(JSON.stringify({
       enabled: loadDingTalkState().enabled,
       hasSecret: loadDingTalkState().hasSecret,
-      connection: { running: conn.running, connected: conn.connected },
+      connection: { running: conn.running, connected: conn.connected, connectionState: conn.connectionState },
     }));
     return;
   }
@@ -93,7 +99,7 @@ function dingtalkConfigPost(req, res, parsedUrl, isLocal, deps) {
       console.error('[CC Viewer] IM config apply failed for dingtalk:', e?.message || e);
     }
     res.writeHead(200, JSON_HEADERS);
-    res.end(JSON.stringify({ ...loadDingTalkState(), connection: { running: !!(saved?.enabled ?? incoming.enabled), connected: false } }));
+    res.end(JSON.stringify({ ...loadDingTalkState(), connection: { running: !!(saved?.enabled ?? incoming.enabled), connected: false, connectionState: 'disconnected' } }));
   });
 }
 

@@ -79,16 +79,22 @@ async function imStatus(req, res, parsedUrl, isLocal, deps) {
   } else {
     // MAIN: the adapter runs in a detached worker, not here. Resolve process+connection via manager.
     processInfo = await deps.im.getProcessStatus(id);
-    connection = { running: processInfo.running, connected: processInfo.connected };
+    connection = {
+      running: processInfo.running,
+      connected: processInfo.connected,
+      connectionState: processInfo.connectionState,
+      lastError: processInfo.lastError ?? null,
+    };
   }
 
   res.writeHead(200, JSON_HEADERS);
   if (!isLocal) {
     // Loopback gate: a token-authorized LAN client sees only what the header chip needs.
+    // connectionState is passed through as-is (no defaulting); lastError stays loopback-only.
     res.end(JSON.stringify({
       enabled: state.enabled,
       hasSecret: state.hasSecret,
-      connection: { running: connection.running, connected: connection.connected },
+      connection: { running: connection.running, connected: connection.connected, connectionState: connection.connectionState },
     }));
     return;
   }
@@ -151,7 +157,7 @@ function imConfigPost(req, res, parsedUrl, isLocal, deps) {
     }
     res.writeHead(200, JSON_HEADERS);
     // 乐观返回：worker 刚 spawn 尚未就绪，避免回包瞬间显示"已停止"；chip 轮询会很快收敛到真实态。
-    res.end(JSON.stringify({ ...loadState(id), connection: { running: !!saved.enabled, connected: false } }));
+    res.end(JSON.stringify({ ...loadState(id), connection: { running: !!saved.enabled, connected: false, connectionState: 'disconnected' } }));
   });
 }
 

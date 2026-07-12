@@ -179,19 +179,33 @@ const dingtalkAdapter = {
 
   async connect(cfg, hooks) {
     let client;
+    // keepAlive is required for silent-drop detection: without it the SDK never pings, so a
+    // network loss with no FIN leaves the socket "open" and `client.connected` true forever.
+    // Known SDK quirk: dingtalk-stream arms a new heartbeat interval on every socket 'open'
+    // without clearing the previous one, so each reconnect leaks one 8s interval (bounded by
+    // reconnect count; disconnect() clears the last). Accepted — detection matters more.
+    const opts = { clientId: cfg.appKey, clientSecret: cfg.appSecret, keepAlive: true };
     if (clientFactory) {
-      client = clientFactory({ clientId: cfg.appKey, clientSecret: cfg.appSecret });
+      client = clientFactory(opts);
       if (typeof client.registerCallbackListener === 'function') {
         client.registerCallbackListener('__test__', (res) => hooks.onInbound(normalizeInbound(res), res));
       }
     } else {
       const mod = await import('dingtalk-stream');
       const { DWClient, TOPIC_ROBOT } = mod;
-      client = new DWClient({ clientId: cfg.appKey, clientSecret: cfg.appSecret });
+      client = new DWClient(opts);
       client.registerCallbackListener(TOPIC_ROBOT, (res) => hooks.onInbound(normalizeInbound(res), res));
     }
     await client.connect?.();
     return client;
+  },
+
+  // dingtalk-stream emits no client-level lifecycle events (open/close/error live on an internal
+  // ws that is replaced on every reconnect), so the core polls this instead. `userDisconnect` is
+  // TS-private but a plain runtime field; it flips true only on manual disconnect().
+  connectionProbe(client) {
+    if (!client || client.userDisconnect) return 'disconnected';
+    return client.connected ? 'connected' : 'reconnecting';
   },
 
   async disconnect(client) {

@@ -399,6 +399,23 @@ describe('connect / ack via fake client factory', () => {
     await assert.doesNotReject(() => adapter.disconnect({ disconnect() { throw new Error('boom'); } }));
     await assert.doesNotReject(() => adapter.disconnect(null));
   });
+
+  it('connect passes keepAlive: true to the client factory (silent-drop detection)', async () => {
+    let seenOpts = null;
+    __setClientFactory((opts) => { seenOpts = opts; return { registerCallbackListener() {}, connect() {} }; });
+    await adapter.connect({ appKey: 'ak', appSecret: 'sec' }, { onInbound: () => {} });
+    assert.equal(seenOpts.keepAlive, true);
+    assert.equal(seenOpts.clientId, 'ak');
+  });
+});
+
+describe('connectionProbe (dingtalk-stream has no lifecycle events — the core polls this)', () => {
+  it('truth table over the SDK client fields', () => {
+    assert.equal(adapter.connectionProbe(null), 'disconnected');
+    assert.equal(adapter.connectionProbe({ userDisconnect: true, connected: true }), 'disconnected');
+    assert.equal(adapter.connectionProbe({ userDisconnect: false, connected: true }), 'connected');
+    assert.equal(adapter.connectionProbe({ userDisconnect: false, connected: false }), 'reconnecting');
+  });
 });
 
 describe('static descriptors', () => {

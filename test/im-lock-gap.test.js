@@ -103,7 +103,27 @@ describe('im-lock gap', () => {
         res.end(JSON.stringify({ connection: { connected: true }, pid: 4242 }));
       };
       const r = await defaultProbe('any', port);
-      assert.deepEqual(r, { ok: true, connected: true, pid: 4242 });
+      // No connectionState in the body (old worker) → derived from connected.
+      assert.deepEqual(r, { ok: true, connected: true, connectionState: 'connected', lastError: null, pid: 4242 });
+    });
+
+    it('carries connectionState/lastError through from a tri-state worker', async () => {
+      handlers.fn = (req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ connection: { connected: false, connectionState: 'reconnecting', lastError: 'net down' }, pid: 4242 }));
+      };
+      const r = await defaultProbe('any', port);
+      assert.deepEqual(r, { ok: true, connected: false, connectionState: 'reconnecting', lastError: 'net down', pid: 4242 });
+    });
+
+    it('old-worker fallback: connected:false without connectionState derives disconnected', async () => {
+      handlers.fn = (req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ connection: { connected: false }, pid: 1 }));
+      };
+      const r = await defaultProbe('any', port);
+      assert.equal(r.connectionState, 'disconnected');
+      assert.equal(r.lastError, null);
     });
 
     it('accepts the "enabled boolean" shape and reports connected:false when no connection', async () => {
@@ -114,6 +134,7 @@ describe('im-lock gap', () => {
       const r = await defaultProbe('any', port);
       assert.equal(r.ok, true);
       assert.equal(r.connected, false);
+      assert.equal(r.connectionState, 'disconnected');
       assert.equal(r.pid, undefined);
     });
 

@@ -212,4 +212,80 @@ describe('feishu AI 卡片流式 (aiCard / CardKit)', () => {
   });
 });
 
+describe('feishu connection tri-state (SDK lifecycle hooks)', () => {
+  // Hook-capable @larksuiteoapi/node-sdk builds are feature-detected via getConnectionStatus();
+  // the fake above lacks it, keeping the legacy await-start() path covered by the suites above.
+  function installPatchedSdk({ readyMode = 'ok' } = {}) {
+    feishu.__setClientFactory(() => ({
+      Domain: { Feishu: 0, Lark: 1 },
+      LoggerLevel: { info: 3 },
+      Client: class { constructor(opts) { rec.clientOpts = opts; } },
+      WSClient: class {
+        constructor(opts) { rec.wsOpts = opts; }
+        getConnectionStatus() { return { state: 'connected' }; }
+        async start({ eventDispatcher }) {
+          rec.started = true; rec.dispatcher = eventDispatcher;
+          if (readyMode === 'ok') setImmediate(() => rec.wsOpts.onReady());
+          else setImmediate(() => rec.wsOpts.onError(new Error('app misconfigured')));
+        }
+        close() { rec.closed = true; }
+      },
+      EventDispatcher: class {
+        constructor() { this._h = {}; }
+        register(map) { Object.assign(this._h, map); rec.handlers = this._h; return this; }
+      },
+    }));
+  }
+
+  async function startPatched(opts) {
+    core.__resetForTests('feishu');
+    rec = { sends: [] };
+    installPatchedSdk(opts);
+    await core.startBridge('feishu', deps());
+  }
+
+  it('connect gates on onReady and reports connected', async () => {
+    await startPatched();
+    assert.equal(core.isBridgeRunning('feishu'), true);
+    assert.equal(core.getBridgeStatus('feishu').connectionState, 'connected');
+  });
+
+  it('onError before ready fails the start with lastError and tears the client down', async () => {
+    await startPatched({ readyMode: 'error' });
+    const st = core.getBridgeStatus('feishu');
+    assert.equal(core.isBridgeRunning('feishu'), false);
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /app misconfigured/);
+    assert.equal(rec.closed, true, 'ws.close() must stop the SDK retry loop');
+  });
+
+  it('onReconnecting → reconnecting; onReconnected → connected', async () => {
+    await startPatched();
+    rec.wsOpts.onReconnecting();
+    let st = core.getBridgeStatus('feishu');
+    assert.equal(st.connectionState, 'reconnecting');
+    assert.equal(st.connected, false);
+    rec.wsOpts.onReconnected();
+    st = core.getBridgeStatus('feishu');
+    assert.equal(st.connectionState, 'connected');
+    assert.equal(st.connected, true);
+  });
+
+  it('post-settle onError → terminal disconnected + lastError', async () => {
+    await startPatched();
+    rec.wsOpts.onError(new Error('pull config failed'));
+    const st = core.getBridgeStatus('feishu');
+    assert.equal(st.connectionState, 'disconnected');
+    assert.match(st.lastError, /pull config failed/);
+  });
+
+  it('hooks firing after stopBridge cannot flip the state', async () => {
+    await startPatched();
+    const wsOpts = rec.wsOpts;
+    await core.stopBridge('feishu');
+    wsOpts.onReconnected();
+    assert.equal(core.getBridgeStatus('feishu').connectionState, 'disconnected');
+  });
+});
+
 after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
