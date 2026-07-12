@@ -131,6 +131,11 @@ jobs:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
+      # OIDC trusted publishing requires npm >= 11.5.1 — Node 20's bundled npm 10.x cannot do
+      # the OIDC token exchange, so `npm publish` fails even with a correctly configured
+      # Trusted Publisher on npmjs.com (this is what broke the v1.6.346/347 releases).
+      - run: npm install -g npm@latest
+
       - run: npm ci --no-fund --no-audit
 
       - run: npm publish
