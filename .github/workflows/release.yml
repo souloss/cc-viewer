@@ -128,7 +128,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
       # OIDC trusted publishing requires npm >= 11.5.1 — Node 20's bundled npm 10.x cannot do
@@ -138,7 +138,7 @@ jobs:
 
       - run: npm ci --no-fund --no-audit
 
-      - run: npm publish
+      - run: npm publish --provenance
         # prepublishOnly runs `npm run build` automatically.
 
   # Post-release automatic Homebrew tap formula bump (reusable workflow, uses HOMEBREW_TAP_TOKEN).
