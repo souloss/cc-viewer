@@ -25,6 +25,7 @@ const CLIENT_SAFE_ALLOWLIST = new Set([
   'server/lib/delta-reconstructor.js',
   'server/lib/tools-xml-formatter.js',
   'server/lib/context-rules.js',
+  'server/lib/session-boundary.js', // wire-v2 S1: shared boundary/reverse-anchor module
 ]);
 
 function listFiles(dir, exts) {
