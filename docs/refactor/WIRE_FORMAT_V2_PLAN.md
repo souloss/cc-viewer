@@ -10,8 +10,8 @@
 |---|---|---|---|---|---|
 | S-1 | 跨 session 追踪落地（本文档 + 记忆指针） | ✅ | 2026-07-13 | c88d704 | — |
 | S0 | 协议定稿 docs/refactor/WIRE_FORMAT_V2.md | ✅ | 2026-07-13 | 0b5a87d | 用户评审通过 |
-| S1 | 共享边界+逆锚模块（clearCheckpoint 迁移 + findReverseAnchor 抽取） | 🔄 | 2026-07-13 | | 实际只改 2 个消费方（shell 使 contentFilter/entry-slim/sessionManager 免改，属计划预期内收窄）。评审 P2 backlog：docs/WIRE_FORMAT.md:46/:170、sessionManager.js:552/:555、test/entry-slim.test.js:906、test/session-boundary-parity.test.js:12 的"函数老家"注释应改指 session-boundary.js；WIRE_FORMAT.md §6 维护责任补 canonical home——并入 S2 或 S9 文档轮 |
-| S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | ⬜ | | | 依赖 S0 schema 定稿 |
+| S1 | 共享边界+逆锚模块（clearCheckpoint 迁移 + findReverseAnchor 抽取） | ✅ | 2026-07-13 | 9f44715 | 实际只改 2 个消费方（shell 使 contentFilter/entry-slim/sessionManager 免改，属计划预期内收窄）。评审 P2 backlog：docs/WIRE_FORMAT.md:46/:170、sessionManager.js:552/:555、test/entry-slim.test.js:906、test/session-boundary-parity.test.js:12 的"函数老家"注释应改指 session-boundary.js；WIRE_FORMAT.md §6 维护责任补 canonical home——并入 S2 或 S9 文档轮 |
+| S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | 🔄 | 2026-07-13 | | 依赖 S0 schema 定稿（已定稿 0b5a87d） |
 | S3 | 双写接入（writeEntry seam + CCV_WIRE_V2，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2=0 |
 | S4 | 一致性校验工具（ccv verify）+ ≥5 活跃日双写验证（人工闸门） | ⬜ | | | 五项方法论逐日记录于此表下方 |
 | S5 | v2→v1 适配读层（CCV_WIRE_V2_READ，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2_READ=0 |

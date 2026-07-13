@@ -26,6 +26,7 @@ const CLIENT_SAFE_ALLOWLIST = new Set([
   'server/lib/tools-xml-formatter.js',
   'server/lib/context-rules.js',
   'server/lib/session-boundary.js', // wire-v2 S1: shared boundary/reverse-anchor module
+  'server/lib/error-report.js', // wire-v2 S2: reportSwallowed convention, shared both sides
 ]);
 
 function listFiles(dir, exts) {
