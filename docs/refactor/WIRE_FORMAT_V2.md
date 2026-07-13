@@ -10,7 +10,7 @@
 
 1. **写侧保真，读侧物化**：对话文件存 wire 事件（增量切片 + 控制行），不在写路径做任何 merge/逆锚推断——写侧只做一个廉价判定（前缀延伸测试，与 v1 delta 同级）；一切歧义窗口（v1 §3.1/§3.2）原样落盘为 raw 快照事件，由读侧物化器用共享逆锚模块解决。写侧错误可事后在读侧修复；物化写则一错永久。
 2. **journal 是唯一定序轴**：所有顺序问题（v1 §3.7 完成序倒置）收归 journal 的**发起序 seq**；对话文件行佩戴 seq 回指，物理落盘序不承载语义。
-3. **append-only + 无 fsync 现实下的写序协议**：blob →（flush）→ conversation 行 → journal 行最后落。崩溃只产生孤儿（无引用的 blob/conv 行），绝不产生悬空引用（journal 行指向不存在的内容）。
+3. **append-only + 无 fsync 现实下的写序协议**：blob →（flush）→ conversation 行 → journal 行最后落。**硬保证只有 blob 半边**（journal 行绝不引用不存在的 blob——blob 在 journal 行入队前已持久）；conv 半边是尽力而为的批次分组——多请求同批 drain 时（如冷启动暂存队列冲刷），后一请求的 journal 行可能先于其 conv 行落盘，读侧按 §14 容忍暂缺尾部，属纵深防御而非正确性依赖。崩溃产生的只有孤儿（无引用的 blob/conv 行）与暂缺的 conv 尾。
 4. **v2 永不影响 v1**：双写期 v2 任何失败走 `reportSwallowed`，v1 路径零感知。双 kill switch：`CCV_WIRE_V2`（写）/`CCV_WIRE_V2_READ`（读）独立。
 
 ## §2 目录布局
@@ -77,7 +77,7 @@ LOG_DIR/<project>/sessions/<session_id>/
   "headers": { …redacted… },      // v1 同款脱敏后 headers（~1KB，DetailPanel 需要）
   "blobs": { "tools": "sha256-a1b2…", "sys": "sha256-c3d4…" },  // 缺失字段省略
   "msgFrom": 903, "msgTo": 905,   // 本事件对应 wire messages 的 [from,to) 计数（物化完整性校验）
-  "evt": "append" | "snapshot",   // 对应 conversation 行类型（§6）；无 conv 写入则省略
+  "evt": "append" | "snapshot" | "ctl",  // 对应 conversation 行类型（§6，replace-tail 等控制行为 ctl）；无 conv 写入则省略
   "boundary": "clear" | "compact" | "replace-tail",  // 触发的边界（可省略）
   "proxy": { "profile": "…", "url": "…" }             // proxyProfile/proxyUrl（可省略）
 }
@@ -118,7 +118,8 @@ LOG_DIR/<project>/sessions/<session_id>/
 { "seq": 42, "rid": "…", "t": "append", "msgs": [ …新增 message 切片… ] }
 
 // snapshot：前缀延伸不成立（v1 §3.1 plan-mode 短窗口 / §3.2 K 尾重叠 / 非 /clear 收缩 / 任何未知形态）
-{ "seq": 43, "rid": "…", "t": "snapshot", "msgs": [ …完整 wire messages… ], "reason": "shrunk|short-window|tail-mismatch|first" }
+{ "seq": 43, "rid": "…", "t": "snapshot", "msgs": [ …完整 wire messages… ], "reason": "shrunk|tail-mismatch|first" }
+// reason 语义：first=对话首事件/进程重启；shrunk=len<prev（含 §3.1 短窗口——不单列 short-window）；tail-mismatch=len>prev 但前缀断裂（§3.2 等）
 
 // 控制行（不携带 msgs）
 { "seq": 44, "rid": "…", "t": "ctl", "op": "replace-tail", "msg": { …新末位 message… } }   // v1 §3.3 in-place replace
@@ -127,7 +128,7 @@ LOG_DIR/<project>/sessions/<session_id>/
 
 - **写侧判定规则（穷尽）**：设 conv 上一状态计数 P、末位指纹 F（进程内存态，进程重启后 P=0）：
   - `len==P && tailFp==F` → 无事件（journal 仍记 req/done，`evt` 省略）
-  - `len==P && tailFp!=F && P>0` → `ctl replace-tail`（v1 :802-808 同判定）
+  - `len==P && tailFp!=F && P>0` → `ctl replace-tail`（v1 :802-808 同判定；实现另要求新旧 tailFp 均非空——空 fp 消息退化为 snapshot，安全偏差）
   - `len>P && messages[P-1] 指纹==F` → `append`（切片 `slice(P)`）
   - 其余一切 → `snapshot`（进程重启首请求也是 snapshot，reason=first）；若命中 compact-continuation 判定（S1 共享谓词）附加一行 `ctl compact`
   - **/clear 判定（S1 共享谓词 isPostClearCheckpoint）优先于以上**：关闭当前 epoch，新开 e<N+1>，首事件为 snapshot(reason=first)，journal 记 `boundary:"clear"`

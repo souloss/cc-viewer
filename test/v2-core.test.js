@@ -424,6 +424,40 @@ describe('V2Writer', () => {
     assert.ok(existsSync(convEpochPath(paths, req.conv, 0)));
   });
 
+  it('seq stays monotonic per session FILE across writer/session-object recreation (P1-a)', async () => {
+    const w1 = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry();
+    const h1 = w1.ingestRequest(e1, e1.body.messages);
+    assert.equal(h1.seq, 1);
+    await w1.close();
+
+    // Fresh writer binding onto the SAME session dir (process re-attach /
+    // workspace A→B→A after resetSessions) must continue, not restart at 1.
+    const w2 = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e2 = mkEntry({ requestId: 'req_2' });
+    const h2 = w2.ingestRequest(e2, e2.body.messages);
+    assert.equal(h2.seq, 2, 'seq seeded from the existing journal, no collision');
+    await w2.flush();
+    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath).filter(l => l.ph === 'req');
+    assert.deepEqual(journal.map(l => l.seq), [1, 2]);
+  });
+
+  it('held request completing after the flush still gets its done line (late handle)', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const held = { timestamp: 't0', url: 'u', method: 'POST', isCountTokens: true, requestId: 'ct-late', body: { messages: [textMsg('user', 'held')] } };
+    assert.equal(w.ingestRequest(held, held.body.messages), null);
+    const e = mkEntry();
+    w.ingestRequest(e, e.body.messages); // flushes the held request
+    w.ingestCompletion(null, { ...held, duration: 5, response: { status: 200, body: { usage: {} } } });
+    await w.flush();
+    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const heldReq = journal.find(l => l.ph === 'req' && l.rid === 'ct-late');
+    const heldDone = journal.find(l => l.ph === 'done' && l.rid === 'ct-late');
+    assert.ok(heldReq, 'held req line exists');
+    assert.ok(heldDone, 'late completion folded by rid');
+    assert.equal(heldDone.seq, heldReq.seq);
+  });
+
   it('resetConversations drops continuity → next ingest snapshots fresh, seq keeps counting', async () => {
     const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
     const e1 = mkEntry();
@@ -436,6 +470,34 @@ describe('V2Writer', () => {
     await w.flush();
     const conv = readLines(convEpochPath(sessionPaths(dir, 'proj', SID), 'main', 0));
     assert.deepEqual(conv.map(l => l.t), ['snapshot', 'snapshot'], 'post-reset ingest re-snapshots');
+  });
+});
+
+// ─── concurrency: N interleaved request/completion pairs, single-writer queue ─
+describe('concurrent ingest', () => {
+  it('N pairs fired without awaiting yield exactly N req + N done with contiguous seq', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const N = 20;
+    const mk = (i) => ({
+      timestamp: `2026-07-13T12:00:${String(i).padStart(2, '0')}.000Z`,
+      url: 'https://api.anthropic.com/v1/messages', method: 'POST', requestId: `r${i}`,
+      mainAgent: true,
+      body: { metadata: { user_id: JSON.stringify({ session_id: SID }) }, messages: [textMsg('user', 'concurrent')] },
+    });
+    const handles = [];
+    for (let i = 0; i < N; i++) handles.push(w.ingestRequest(mk(i), mk(i).body.messages));
+    // complete in REVERSE order, no awaits in between — physical write order ≠ seq order
+    for (let i = N - 1; i >= 0; i--) {
+      w.ingestCompletion(handles[i], { ...mk(i), duration: i, response: { status: 200, body: { content: [], usage: {} } } });
+    }
+    await w.flush();
+    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath).filter(l => l.ph !== 'meta');
+    const reqs = journal.filter(l => l.ph === 'req');
+    const dones = journal.filter(l => l.ph === 'done');
+    assert.equal(reqs.length, N, 'no dropped req lines');
+    assert.equal(dones.length, N, 'no dropped done lines');
+    assert.deepEqual(reqs.map(l => l.seq).sort((a, b) => a - b), Array.from({ length: N }, (_, i) => i + 1), 'contiguous initiation seq');
+    assert.deepEqual(new Set(dones.map(l => l.seq)).size, N, 'every seq folded exactly once');
   });
 });
 
@@ -464,5 +526,45 @@ describe('write-order protocol', () => {
     };
     w.ingestRequest(e, e.body.messages);
     assert.deepEqual(observed, [true], 'journal line enqueued only after its blob is durable');
+  });
+
+  it('within one request, the conv line is enqueued before the journal req line', () => {
+    const paths = ensureSessionDirSync(dir, 'proj', SID);
+    const order = [];
+    const spyQueue = {
+      appendTo(path, data, onDone) {
+        order.push(path === paths.journalPath ? 'journal' : (path.includes('conversations') ? 'conv' : 'other'));
+        if (onDone) onDone();
+      },
+      flush: async () => {}, close: async () => {},
+    };
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true, queue: spyQueue });
+    const e = {
+      timestamp: 't', url: 'u', method: 'POST', requestId: 'r1', mainAgent: true,
+      body: { metadata: { user_id: jsonUserId }, messages: [textMsg('user', 'x')] },
+    };
+    w.ingestRequest(e, e.body.messages);
+    assert.deepEqual(order, ['conv', 'journal']);
+  });
+
+  it('cold-start hold flush: cross-request batch ordering is best-effort (documented, read side tolerates)', async () => {
+    // A held metadata-less request flushes together with the first sid-bearing
+    // one. AsyncWriteQueue groups by path at FIRST-enqueue position, so the
+    // journal group (keyed at the held request's position) drains before the
+    // later request's conv line — this pins the documented weak ordering so an
+    // S3+ change to the queue's grouping is caught deliberately, not silently.
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const held = { timestamp: 't0', url: 'u', method: 'POST', isCountTokens: true, requestId: 'ct', body: { messages: [textMsg('user', 'held')] } };
+    assert.equal(w.ingestRequest(held, held.body.messages), null, 'held: no sid yet');
+    const e = {
+      timestamp: 't1', url: 'u', method: 'POST', requestId: 'r1', mainAgent: true,
+      body: { metadata: { user_id: jsonUserId }, messages: [textMsg('user', 'first')] },
+    };
+    assert.ok(w.ingestRequest(e, e.body.messages));
+    await w.flush();
+    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const kinds = journal.filter(l => l.ph === 'req').map(l => l.kind);
+    assert.deepEqual(kinds, ['countTokens', 'main'], 'held request journals first, in one batch');
+    assert.ok(existsSync(convEpochPath(sessionPaths(dir, 'proj', SID), 'misc', 0)), 'held conv content still lands');
   });
 });

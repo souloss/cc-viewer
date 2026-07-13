@@ -11,10 +11,10 @@
 | S-1 | 跨 session 追踪落地（本文档 + 记忆指针） | ✅ | 2026-07-13 | c88d704 | — |
 | S0 | 协议定稿 docs/refactor/WIRE_FORMAT_V2.md | ✅ | 2026-07-13 | 0b5a87d | 用户评审通过 |
 | S1 | 共享边界+逆锚模块（clearCheckpoint 迁移 + findReverseAnchor 抽取） | ✅ | 2026-07-13 | 9f44715 | 实际只改 2 个消费方（shell 使 contentFilter/entry-slim/sessionManager 免改，属计划预期内收窄）。评审 P2 backlog：docs/WIRE_FORMAT.md:46/:170、sessionManager.js:552/:555、test/entry-slim.test.js:906、test/session-boundary-parity.test.js:12 的"函数老家"注释应改指 session-boundary.js；WIRE_FORMAT.md §6 维护责任补 canonical home——并入 S2 或 S9 文档轮 |
-| S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | 🔄 | 2026-07-13 | | 依赖 S0 schema 定稿（已定稿 0b5a87d） |
-| S3 | 双写接入（writeEntry seam + CCV_WIRE_V2，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2=0 |
+| S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | ✅ | 2026-07-13 | 074a2c2 | errorReport 移至 server/lib（src 不发布）；2 个评审 agent 报告在 S3 期间跟进整合 |
+| S3 | 双写接入（writeEntry seam + CCV_WIRE_V2，默认关） | 🔄 | 2026-07-13 | | 代码+测试完成待提交。回滚=CCV_WIRE_V2=0。soak（本机日常开双写）为独立人工闸门，跨入 S4：`export CCV_WIRE_V2=1` 后正常使用 ccv |
 | S4 | 一致性校验工具（ccv verify）+ ≥5 活跃日双写验证（人工闸门） | ⬜ | | | 五项方法论逐日记录于此表下方 |
-| S5 | v2→v1 适配读层（CCV_WIRE_V2_READ，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2_READ=0 |
+| S5 | v2→v1 适配读层（CCV_WIRE_V2_READ，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2_READ=0。S2 评审递延项：崩溃截断（kill between tmp/rename、journal 尾行截断）的**读侧容忍**测试在此步落地（spec §14） |
 | S6a | 列表/管理/寻址切换（listLocalLogs、workspace-registry、download 契约） | ⬜ | | | |
 | S6b | live watcher + IM 接入（最高风险，单列） | ⬜ | | | v1 watcher 并行保留 |
 | S6c | 统计与残余（stats-worker 重键、死代码退役） | ⬜ | | | |

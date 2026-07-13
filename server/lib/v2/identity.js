@@ -85,8 +85,10 @@ export class ConvResolver {
 
   /**
    * Register Agent-spawn pairs from a completed response body (assistant
-   * content blocks with type 'tool_use' and name 'Agent'/'Task'). Mirrors
-   * v1 extractAgentSpawnPairs but keeps the block id (spec §10).
+   * content blocks with type 'tool_use' and name 'Agent'/'Task'). Same keying
+   * idea as v1 extractAgentSpawnPairs but keeps the block id (spec §10) and
+   * covers 'Task' too (v1's extractor only handles 'Agent'; 'Task' is a
+   * recognized spawn tool elsewhere in the codebase, e.g. interceptor-core).
    */
   registerSpawns(responseBody) {
     const content = responseBody && Array.isArray(responseBody.content) ? responseBody.content : null;
@@ -120,6 +122,11 @@ export class ConvResolver {
     // Same-length tie-break: while an UNCLAIMED spawn id exists for this prompt
     // prefix, a same-length duplicate is a parallel sibling spawn, not a retry —
     // claim the fresh id instead of stealing the sibling's conversation.
+    // Residual mis-attribution edges (accepted; keys stay distinct, only the
+    // label can be wrong): (1) a same-length RETRY racing an unclaimed sibling
+    // spawn of the identical prompt claims the sibling's id; (2) a fresh
+    // sibling whose first request already has MORE messages than an existing
+    // sibling's count extends that one instead of opening its own key.
     const prefix = prompt.trimStart().slice(0, SPAWN_PROMPT_PREFIX_LEN);
     const pendingSpawn = this._spawnIds.has(prefix);
     let best = null;

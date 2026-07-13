@@ -33,7 +33,7 @@ export class ConversationStore {
   _state(convKey) {
     let st = this._convs.get(convKey);
     if (!st) {
-      st = { epoch: 0, count: 0, tailFp: '', dirEnsured: false };
+      st = { epoch: 0, count: 0, tailFp: '', dirEnsured: false, everWrote: false };
       this._convs.set(convKey, st);
     }
     return st;

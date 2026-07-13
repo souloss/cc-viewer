@@ -76,12 +76,14 @@ export function ensureSessionDirSync(logDir, project, sessionId, meta = {}) {
   mkdirSync(paths.conversationsDir, { recursive: true });
   mkdirSync(paths.blobsDir, { recursive: true });
   if (!existsSync(paths.metaPath)) {
+    // `...meta` first: identity fields below must win even if a caller ever
+    // passes overlapping keys (defensive — current callers pass none of them).
     const record = {
+      ...meta,
       wireFormat: 2,
       sessionId,
       project,
       startTs: meta.startTs || new Date().toISOString(),
-      ...meta,
     };
     writeFileAtomicSync(paths.metaPath, JSON.stringify(record, null, 2) + '\n');
   }

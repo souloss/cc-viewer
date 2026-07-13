@@ -17,6 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
 import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs, parseRotationContextHead } from './lib/interceptor-core.js';
+import { V2Writer } from './lib/v2/v2-writer.js';
 
 
 
@@ -322,17 +323,37 @@ function _commitDeltaState(originalLength, originalTailFp) {
   }
 }
 
+// wire-v2 S3 seam: the single completion-write helper shared by all five v1
+// completion/error paths (streaming happy/assemble-fail, stream-setup catch,
+// non-streaming happy, read-error). The v1 portion is byte-for-byte what the
+// five inline blocks used to do; the only addition is the v2 completion ingest,
+// which runs FIRST — while the entry is still fully intact — and is internally
+// caught (a v2 failure can never reach the v1 write). The rotation sentinel is
+// deliberately NOT part of this seam (it is baked into file creation).
+function _writeCompletedEntry(requestEntry, deltaLen, deltaTailFp, v2Handle) {
+  // Belt-and-braces bare catch: V2Writer catches + reportSwallowed internally;
+  // this guard only exists so a broken guard (bug outside V2Writer's own
+  // try/catch) still cannot reach the v1 write below.
+  try { _v2Writer.ingestCompletion(v2Handle, requestEntry); } catch { }
+  delete requestEntry.inProgress;
+  delete requestEntry.requestId;
+  _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(deltaLen, deltaTailFp));
+}
+
 // Teammate 子进程检测：--parent-session-id（旧模式）或 --agent-name（原生 team 模式）
 const _isTeammate = process.argv.includes('--parent-session-id') || process.argv.includes('--agent-name');
 // 提取 teammate 元数据（--agent-name worker-1 --team-name fix-ts-errors）
 let _teammateName = null;
 let _teamName = null;
+let _parentSessionId = null;
 {
   const args = process.argv;
   const nameIdx = args.indexOf('--agent-name');
   if (nameIdx !== -1 && nameIdx + 1 < args.length) _teammateName = args[nameIdx + 1];
   const teamIdx = args.indexOf('--team-name');
   if (teamIdx !== -1 && teamIdx + 1 < args.length) _teamName = args[teamIdx + 1];
+  const parentIdx = args.indexOf('--parent-session-id');
+  if (parentIdx !== -1 && parentIdx + 1 < args.length) _parentSessionId = args[parentIdx + 1];
 }
 
 // `--pid` 实例 id（cli.js 在 import server 前已设 env，时序安全）。null = 默认模式（不分实例）。
@@ -364,6 +385,27 @@ let LOG_FILE = _newLogFile;
 
 // 异步写入队列 — 替代 appendFileSync，避免阻塞事件循环（Windows NTFS 尤为严重）
 const _writeQueue = new AsyncWriteQueue(() => LOG_FILE);
+
+// Wire-v2 dual-write tap (S3, docs/refactor/WIRE_FORMAT_V2.md §13): a side
+// observer of the v1 write path, gated by CCV_WIRE_V2 (default OFF). Every
+// V2Writer method is internally caught + reportSwallowed — a v2 failure can
+// never disturb v1. IM workers stay v1-only until S6b wires their watcher
+// (spec §10). Project resolves through a getter because workspace mode rebinds
+// _projectName at runtime. Escape hatch / rollback: CCV_WIRE_V2=0 (or unset).
+const _v2Writer = new V2Writer({
+  logDir: LOG_DIR,
+  project: () => _projectName,
+  instanceId: INSTANCE_ID,
+  enabled: process.env.CCV_WIRE_V2 === '1' && !process.env.CCV_IM_PLATFORM,
+  ...(_isTeammate && {
+    leader: {
+      ...(_teammateName && { agentName: _teammateName }),
+      ...(_teamName && { teamName: _teamName }),
+      ...(_parentSessionId && { parentSessionId: _parentSessionId }),
+    },
+  }),
+});
+export { _v2Writer };
 
 // 现在 _projectName/_logDir 已初始化，可以安全加载 proxy profile（含 workspace override）
 // 并挂载 watchFile 同步列表变化。
@@ -432,6 +474,9 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
     // the next rotation's carry-forward stays complete after a restart/switch.
     _agentSpawnRegistry.clear();
     seedSpawnRegistryFromLogHead(LOG_FILE);
+    // wire-v2: project rebinding — future requests must create session dirs
+    // under the NEW project, so drop all cached session bindings.
+    _v2Writer.resetSessions();
     // workspace 切换后，重读该 workspace 的 active-profile.json（可能和上一个 workspace 不同）
     _loadProxyProfile();
     return { filePath: recentLog, dir, projectName, resumed: true };
@@ -455,6 +500,7 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) {
   LOG_FILE = filePath;
   // Fresh file for a fresh workspace context — no carried names apply.
   _agentSpawnRegistry.clear();
+  _v2Writer.resetSessions(); // wire-v2: same project-rebinding rule as above
   _loadProxyProfile(); // 同上
 
   return { filePath, dir, projectName, resumed: false };
@@ -470,6 +516,7 @@ export function resetWorkspace() {
   // write a sentinel carrying THIS workspace's names (unbounded growth +
   // cross-workspace leakage into the route's teammateNames snapshot).
   _agentSpawnRegistry.clear();
+  _v2Writer.resetSessions(); // wire-v2: empty project → ingest no-ops until re-init
   _loadProxyProfile(); // workspace 上下文消失，回落到 profile.json.active
 }
 
@@ -634,16 +681,18 @@ export function setupInterceptor() {
     }
   };
 
+  // wire-v2: the v2 queue drains alongside v1's on every exit path — close()
+  // falls back to synchronous drain, so a Ctrl-C cannot strand queued v2 lines.
   process.on('SIGINT', () => {
-    _writeQueue.close().then(() => cleanupViewer()).finally(() => process.exit(0));
+    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('SIGTERM', () => {
-    _writeQueue.close().then(() => cleanupViewer()).finally(() => process.exit(0));
+    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('beforeExit', () => {
-    _writeQueue.close().then(() => cleanupViewer());
+    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer());
   });
 
   const _originalFetch = globalThis.fetch;
@@ -769,6 +818,14 @@ export function setupInterceptor() {
     // Delta storage：仅 mainAgent 且开关启用时，将 body.messages 转为增量格式
     let _deltaOriginalMessagesLength = 0; // 缓存本次请求的原始 messages 长度，用于 completed 后更新状态
     let _deltaOriginalTailFp = '';        // 缓存本次请求末位 message 的指纹，用于 completed 后更新 _lastTailFp
+    // wire-v2 tap: capture the ORIGINAL messages array reference BEFORE the
+    // delta branch below reassigns requestEntry.body.messages to a slice — the
+    // v2 store needs the full wire truth (WIRE_FORMAT_V2.md §13). The array
+    // itself is never mutated (slice creates a new one), so holding the
+    // reference is safe. Handle flows to the completion seam below.
+    const _v2OriginalMessages = (requestEntry && requestEntry.body && Array.isArray(requestEntry.body.messages))
+      ? requestEntry.body.messages : null;
+    let _v2Handle = null;
     if (_deltaStorageEnabled && requestEntry?.mainAgent && Array.isArray(requestEntry.body?.messages)) {
       const messages = requestEntry.body.messages;
       _deltaOriginalMessagesLength = messages.length;
@@ -845,6 +902,13 @@ export function setupInterceptor() {
     if (requestEntry) {
       requestEntry.requestId = requestId;
       requestEntry.inProgress = true;  // 标记为在途请求
+      // wire-v2 req-phase ingest: journal seq is allocated inside, in this same
+      // synchronous segment as the `_seq` stamp above — no await sits between
+      // them, so v2's initiation order can never diverge from v1's (§3.7 guard).
+      // Internally caught; returns null when disabled/failed. Replaces the v1
+      // placeholder's role on the v2 side (req line carries no body). The bare
+      // catch is belt-and-braces for a broken guard, same as _writeCompletedEntry.
+      try { _v2Handle = _v2Writer.ingestRequest(requestEntry, _v2OriginalMessages); } catch { }
     }
 
     // 在发起请求前先写入一条未完成的条目，让前端可以检测在途请求
@@ -1088,11 +1152,8 @@ export function setupInterceptor() {
                       collectAgentSpawns(requestEntry);
 
 
-                      // 移除在途请求标记，保持原始报文
-                      delete requestEntry.inProgress;
-                      delete requestEntry.requestId;
-                      { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-                        _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+                      // 移除在途请求标记，保持原始报文（seam 内先做 v2 completion ingest）
+                      _writeCompletedEntry(requestEntry, _deltaOriginalMessagesLength, _deltaOriginalTailFp, _v2Handle);
                       // Release memory: clear large objects after disk write
                       streamedChunks = [];
                       streamedContentLen = 0;
@@ -1100,10 +1161,7 @@ export function setupInterceptor() {
                       resetStreamingState();
                     } catch (err) {
                       requestEntry.response.body = fullContent.slice(0, 1000);
-                      delete requestEntry.inProgress;
-                      delete requestEntry.requestId;
-                      { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-                        _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+                      _writeCompletedEntry(requestEntry, _deltaOriginalMessagesLength, _deltaOriginalTailFp, _v2Handle);
                       streamedChunks = [];
                       streamedContentLen = 0;
                       requestEntry.response = null;
@@ -1185,10 +1243,7 @@ export function setupInterceptor() {
             headers: Object.fromEntries(response.headers.entries()),
             body: '[Streaming Response - Capture failed]'
           };
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _deltaOriginalMessagesLength, _deltaOriginalTailFp, _v2Handle);
           resetStreamingState();
         }
       } else {
@@ -1213,16 +1268,9 @@ export function setupInterceptor() {
 
           collectAgentSpawns(requestEntry);
 
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _deltaOriginalMessagesLength, _deltaOriginalTailFp, _v2Handle);
         } catch (err) {
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _deltaOriginalMessagesLength, _deltaOriginalTailFp, _v2Handle);
         }
       }
     }
