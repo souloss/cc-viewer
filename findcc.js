@@ -279,10 +279,16 @@ export function resolveNpmClaudePath() {
             const match = normReal.match(/(.*node_modules\/@[^/]+\/[^/]+)\//);
             if (match) {
               const packageDir = match[1];
+              // Claude Code 1.x: cli.js (injected with interceptor)
               const cliPath = join(packageDir, CLI_ENTRY);
               if (existsSync(cliPath)) {
                 return cliPath;
               }
+              // Claude Code 2.x layout ships no cli.js — the package's bin/ binary IS
+              // the entry point; without this fallback the resolver returns null and
+              // the launch dies with no claude at all.
+              const binPath = findNpmBinFallback(packageDir);
+              if (binPath) return binPath;
             }
           }
         } catch { }
@@ -300,13 +306,33 @@ export function resolveNpmClaudePath() {
   const globalRoot = getGlobalNodeModulesDir();
   if (globalRoot) {
     for (const packageName of PACKAGES) {
-      const cliPath = join(globalRoot, packageName, CLI_ENTRY);
+      const pkgDir = join(globalRoot, packageName);
+      // Claude Code 1.x: cli.js
+      const cliPath = join(pkgDir, CLI_ENTRY);
       if (existsSync(cliPath)) {
         return cliPath;
       }
+      // Claude Code 2.x: no cli.js, fall back to the package's bin/ entry.
+      const binPath = findNpmBinFallback(pkgDir);
+      if (binPath) return binPath;
     }
   }
 
+  return null;
+}
+
+// Claude Code 2.x npm packages ship no cli.js — bin/claude(.exe) is the entry point.
+// `claude.exe` is checked FIRST even on POSIX: 2.1.x's package.json maps
+// `bin: {"claude": "bin/claude.exe"}` on every platform (verified on macOS 2.1.207,
+// where bin/claude.exe is the platform-native binary hard-linked into bin/).
+// Returns the first existing bin candidate under `<pkgDir>/bin`, or null (1.x layout).
+function findNpmBinFallback(pkgDir) {
+  const binDir = join(pkgDir, 'bin');
+  const names = process.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude.exe', 'claude'];
+  for (const name of names) {
+    const binPath = join(binDir, name);
+    if (existsSync(binPath)) return binPath;
+  }
   return null;
 }
 

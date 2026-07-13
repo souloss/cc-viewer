@@ -127,6 +127,12 @@ describe('renderSystemPromptFileArgs', () => {
     const input = { args: [], loaded: [], model: null };
     assert.equal(renderSystemPromptFileArgs(input, {}), input);
   });
+
+  it('null / non-object input → safe default (entry guard, PR#128)', () => {
+    assert.deepEqual(renderSystemPromptFileArgs(null), { args: [], loaded: [], model: null });
+    assert.deepEqual(renderSystemPromptFileArgs(undefined), { args: [], loaded: [], model: null });
+    assert.deepEqual(renderSystemPromptFileArgs(42), { args: [], loaded: [], model: null });
+  });
 });
 
 describe('createSystemPromptVariables opts.cwd', () => {

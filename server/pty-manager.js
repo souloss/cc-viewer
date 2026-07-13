@@ -10,7 +10,7 @@ import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-sli
 import { buildSystemPromptFileArgs } from './lib/system-prompt-files.js';
 import { renderSystemPromptFileArgs } from './lib/system-prompt-render.js';
 import { MODEL_PROMPT_DIR } from './lib/model-system-prompts.js';
-import { readClaudeProjectModel } from './lib/context-watcher.js';
+import { resolveSpawnModel } from './lib/spawn-model-resolver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -51,18 +51,29 @@ export function _setPtyImportForTests(fn) {
   _ptyImportForTests = fn;
 }
 
-// spawn 时读取「上次启动所用模型 id」供模型定制 system prompt 匹配。
-// readClaudeProjectModel 读的是真实 ~/.claude.json(无 NODE_TEST_CONTEXT 屏障)，
-// 而多数 pty 单测以仓库根为 cwd —— 默认读取器在测试上下文里必须失活，
-// 否则开发机的真实模型记录会漏进单测(机器状态依赖)。测试用 _setSpawnModelReaderForTests 显式注入。
-// env/reader 参数化只为可测性：单测能直接断言「测试上下文 → null / 生产 → 透传」，
-// 而无需真的读 ~/.claude.json(见 test/pty-manager.test.js 的 guard 单测)。
-export function _defaultSpawnModelReader(c, env = process.env, reader = readClaudeProjectModel) {
-  return env.NODE_TEST_CONTEXT ? null : reader(c);
+// spawn 时解析「当前生效配置」下的模型 id 供模型定制 system prompt 匹配（resolveSpawnModel：
+// 激活的三方 proxy profile 模型映射 > env CLAUDE_MODEL/ANTHROPIC_MODEL > settings.json；
+// 无实时配置信号 → null → 不注入模型条目）。旧判据读 ~/.claude.json 的 lastModelUsage
+// ——那是上次会话的使用统计而非配置，陈旧记录会把三方模型的 override 提示词强加给
+// 官方模型会话（review round：deepseek 残留记录事故）。
+// NODE_TEST_CONTEXT 屏障保留：resolveSpawnModel 会读 process.env 的模型变量，开发机
+// shell export 会漏进单测(机器状态依赖)；测试用 _setSpawnModelReaderForTests 显式注入。
+// env/reader 参数化只为可测性(见 test/pty-manager.test.js 的 guard 单测)。
+export function _defaultSpawnModelReader(c, env = process.env, reader = resolveSpawnModel) {
+  return env.NODE_TEST_CONTEXT ? null : reader(c, env);
 }
 let _spawnModelReader = _defaultSpawnModelReader;
 export function _setSpawnModelReaderForTests(fn) {
   _spawnModelReader = fn || _defaultSpawnModelReader;
+}
+
+// 启动兜底的时间源与窗口：spawn 后在窗口内死亡视为「引导期死亡」。真实引导崩溃 <1s，
+// 5s 足够；更长的窗口只会扩大「用户快速主动退出」的误报面(评审取值)。
+// _now 可注入：兜底用例需要拨表模拟「存活超窗后退出」。
+const SYS_PROMPT_BOOT_WINDOW_MS = 5000;
+let _now = Date.now;
+export function _setNowForTests(fn) {
+  _now = fn || Date.now;
 }
 
 async function getPty() {
@@ -153,7 +164,14 @@ const _thinkingDisplayRejectedPaths = new Set();
 // 启动目录里的 CC_SYSTEM.md / CC_APPEND_SYSTEM.md 自动注入 --system-prompt-file/--append-system-prompt-file。
 // 若目标 claude(或三方 fork/wrapper)不识别该 flag，onExit 检测 "unknown option" 后把 claudePath 记入此集，
 // 下次 spawn 跳过注入并去 flag 重启(对齐 _thinkingDisplayRejectedPaths 自愈)。
+// 语义：永久(进程级)——"unknown option" 是该二进制不支持 flag 的确定性能力信号。
 const _systemPromptFileRejectedPaths = new Set();
+
+// 一次性跳过令牌：启动兜底一级的放宽半支(引导窗口内非信号 exit≠0)覆盖的是**瞬态**崩溃
+// (API key 失效/网络抖动/与注入无关的秒退)，不能写进上面的永久拒绝集——否则一次瞬态故障
+// 会在整个 ccv 进程生命周期内静默禁用该二进制的注入(review P1)。令牌在下一次 spawn 被
+// 消费(delete)：恰好保证去注入重试一次，之后的 spawn 恢复正常注入尝试。
+const _skipInjectionOncePaths = new Set();
 
 // 内部重启(-c 重试 / flag 自愈)时抑制一次注入提示，避免终端重复打印同一行。
 let _suppressNextSpawnNotice = false;
@@ -173,9 +191,10 @@ export function _markThinkingDisplayRejected(claudePath) {
   _thinkingDisplayRejectedPaths.add(claudePath);
 }
 
-// 仅用于测试/内部：清空 system-prompt-file 拒绝集
+// 仅用于测试/内部：清空 system-prompt-file 拒绝集(连同一次性跳过令牌，保持用例间干净)
 export function _clearSystemPromptFileRejectedPaths() {
   _systemPromptFileRejectedPaths.clear();
+  _skipInjectionOncePaths.clear();
 }
 
 // 仅用于测试：查询路径是否已被标记为不支持 --system-prompt-file
@@ -300,27 +319,41 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // LOG_DIR 内的 spawn(IM worker 工作目录 = <LOG_DIR>/IM_<id>/)跳过模型匹配：
   // IM 人格依赖默认 sentinel CC_APPEND_SYSTEM.md 注入，全局模型条目不得静默取代它。
   const spawnDir = cwd || process.cwd();
+  // insideLogDir 留在 try 外：下方 onExit 的启动兜底门控也要用它。
   const insideLogDir = spawnDir === LOG_DIR || spawnDir.startsWith(LOG_DIR + sep);
-  const resolvedModelId = insideLogDir ? null : _spawnModelReader(spawnDir);
-  let sysPrompt = buildSystemPromptFileArgs(spawnDir, finalExtraArgs, process.env, {
-    modelId: resolvedModelId,
-    globalModelDir: join(LOG_DIR, MODEL_PROMPT_DIR),
-  });
-  if (_systemPromptFileRejectedPaths.has(claudePath)) {
+  // 整个 system prompt 构建 + 渲染管道包在 try-catch 里(PR#128)：任何意外抛错(模型解析、
+  // buildSystemPromptFileArgs 文件系统竞态、渲染的 git 子进程异常)都走兜底——按「没命中任何
+  // 条目」处理，launch 不带 --system-prompt-file/--append-system-prompt-file，claude 用自身
+  // 默认 system prompt 启动。注入失败绝不能阻断 spawn。
+  let sysPrompt = { args: [], loaded: [], model: null };
+  // 一次性跳过令牌在进入管道前无条件消费(delete)：放宽半支的兜底只跳过紧随其后的这一次注入。
+  // 若放在 build 之后，build 抛错时令牌残留、会再多跳过一次(违反 exactly-once，review)。
+  const skipOnce = _skipInjectionOncePaths.delete(claudePath);
+  try {
+    const resolvedModelId = insideLogDir ? null : _spawnModelReader(spawnDir);
+    sysPrompt = buildSystemPromptFileArgs(spawnDir, finalExtraArgs, process.env, {
+      modelId: resolvedModelId,
+      globalModelDir: join(LOG_DIR, MODEL_PROMPT_DIR),
+    });
+    if (_systemPromptFileRejectedPaths.has(claudePath) || skipOnce) {
+      sysPrompt = { args: [], loaded: [], model: null };
+    } else if (resolvedModelId && !sysPrompt.model && !sysPrompt.suppressed
+      && (existsSync(join(spawnDir, MODEL_PROMPT_DIR)) || existsSync(join(LOG_DIR, MODEL_PROMPT_DIR)))) {
+      // The one diagnostic case worth a warning: a system_prompt dir is configured
+      // but the resolved model matched no entry (likely a misnamed file). Intentional
+      // skips (CCV_DISABLE_AUTO_SYSTEM_PROMPT=1, or a manual --system-prompt flag
+      // suppressing a matched entry) carry `suppressed` and stay quiet. The
+      // successful-injection notice is emitted below via emitSpawnNotice (with
+      // internal-restart suppression); no-modelId spawns are the normal quiet path.
+      console.warn(`[CC Viewer] model-specific prompt: modelId="${resolvedModelId}" resolved from active config but no matching entry found in workspace or global ${MODEL_PROMPT_DIR}/`);
+    }
+    // Resolve `${...}` template variables in the injected files (editor stores them literal —
+    // the substitution documented by the editor's parameter reference happens here, at launch).
+    sysPrompt = renderSystemPromptFileArgs(sysPrompt, { cwd: spawnDir, modelId: resolvedModelId });
+  } catch (err) {
+    console.warn('[CC Viewer] system prompt build/render failed, launching without injected prompt:', err?.message || err);
     sysPrompt = { args: [], loaded: [], model: null };
-  } else if (resolvedModelId && !sysPrompt.model && !sysPrompt.suppressed
-    && (existsSync(join(spawnDir, MODEL_PROMPT_DIR)) || existsSync(join(LOG_DIR, MODEL_PROMPT_DIR)))) {
-    // The one diagnostic case worth a warning: a system_prompt dir is configured
-    // but the resolved model matched no entry (likely a misnamed file). Intentional
-    // skips (CCV_DISABLE_AUTO_SYSTEM_PROMPT=1, or a manual --system-prompt flag
-    // suppressing a matched entry) carry `suppressed` and stay quiet. The
-    // successful-injection notice is emitted below via emitSpawnNotice (with
-    // internal-restart suppression); no-modelId spawns are the normal quiet path.
-    console.warn(`[CC Viewer] model-specific prompt: modelId="${resolvedModelId}" resolved but no matching entry found in workspace or global ${MODEL_PROMPT_DIR}/`);
   }
-  // Resolve `${...}` template variables in the injected files (editor stores them literal —
-  // the substitution documented by the editor's parameter reference happens here, at launch).
-  sysPrompt = renderSystemPromptFileArgs(sysPrompt, { cwd: spawnDir, modelId: resolvedModelId });
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
   let command = claudePath;
@@ -336,6 +369,9 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   outputBuffer = '';
   currentWorkspacePath = cwd || process.cwd();
   lastWorkspacePath = currentWorkspacePath;
+  // Boot-window anchor for the injection fallback tiers below (same clock as the
+  // comparison — _now(), never Date.now(), so tests can steer both ends together).
+  const spawnedAt = _now();
 
   ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
@@ -348,13 +384,8 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // --allow-dangerously-skip-permissions only enables a later toggle, so it must NOT count.
   ptySkipPermissions = extraArgs.includes('--dangerously-skip-permissions');
 
-  // 注入了 system prompt 文件时向终端打印一行提示(可见性/安全)；内部重启已抑制以免重复。
-  if (sysPrompt.loaded.length && !_suppressNextSpawnNotice) {
-    const modelSuffix = sysPrompt.model ? ` (model match: ${sysPrompt.model})` : '';
-    emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt${modelSuffix}`);
-  }
-  _suppressNextSpawnNotice = false;
-
+  // PTY 事件处理器必须紧随 spawn 注册(PR#128)：若子进程在 onExit 挂载前就退出(二进制缺失/
+  // 秒崩/拒绝注入 flag)，exit 事件会丢失——句柄释放后事件循环可能排空。注入提示挪到注册之后。
   ptyProcess.onData((data) => {
     outputBuffer += data;
     if (outputBuffer.length > MAX_BUFFER) {
@@ -369,12 +400,16 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
     }
   });
 
-  ptyProcess.onExit(({ exitCode }) => {
+  ptyProcess.onExit(({ exitCode, signal }) => {
     flushBatch(true);
     lastExitCode = exitCode;
     ptyProcess = null;
     ptyKind = null;
     ptySkipPermissions = false;
+    // 引导期死亡：spawn 后窗口内退出。窗口外的退出一律不属于「注入拖崩启动」的兜底范围。
+    // 单次取 _now(评审)：一级/二级共用同一时刻，注入的 fake clock 不会在分支间发散。
+    const elapsedMs = _now() - spawnedAt;
+    const diedInBootWindow = elapsedMs < SYS_PROMPT_BOOT_WINDOW_MS;
 
     // Auto-retry without -c/--continue if "No conversation found"
     // 注意：早退 return 会跳过下方的 exitListeners 广播——第一次失败的 pty 死亡对消费者
@@ -405,16 +440,46 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
       return;
     }
 
-    // 事后兜底：claude(或三方 fork/wrapper)不识别 --system-prompt-file/--append-system-prompt-file 而崩溃时，
-    // 记下该 claudePath、跳过注入并重启一次，避免自动注入把会话拖崩(对齐上面的 --thinking-display 自愈)。
+    // 事后兜底一级：注入过 system-prompt 文件的 claude 非正常死亡时，跳过注入重启一次
+    // (对齐上面的 --thinking-display 自愈；该确诊分支必须在前——用户自传 --thinking-display
+    // 且有注入时这里最多浪费一次去注入重试，第二次即广播真实报错)。两个半支的**持久性不同**：
+    //  - 精确半支(原语义)：输出含 "unknown option --system-prompt-file" —— 确诊该二进制不支持
+    //    flag(稳定能力信号)→ 写永久拒绝集；任何场景(含 IM worker，否则它永远起不来)都自愈。
+    //  - 放宽半支(启动兜底)：引导窗口内 exit≠0 —— 注入**可能**是拖崩启动的原因(也可能是无关的
+    //    瞬态故障)→ 只发一次性跳过令牌，绝不写永久集(review P1：一次瞬态崩溃不得在整个进程
+    //    生命周期内静默禁用注入)。门控 !signal(用户 Ctrl-C/关标签/切 workspace 的 killPtyTree
+    //    都是信号终止，不是引导崩溃，盲目重启会把用户刚关的会话强行拉回来；Windows ConPTY 无
+    //    POSIX 信号语义，已知限制：Ctrl-C 可能多一次无害重试)与 !insideLogDir(IM worker
+    //    「去注入重启」= 剥离 CC_APPEND_SYSTEM.md 人格后存活，比崩溃更难排查——IM 秒退只广播
+    //    真实报错)。
+    // 无死循环：respawn 时拒绝集/令牌把 loaded 清空 → 本分支不再命中，恰好重试一次。
+    // 一级重试只去掉注入、其余参数原样；根因是别的(如 API key 失效)时首次报错已实时流入
+    // 终端 scrollback 不丢失，第二次照常死亡并广播。
+    const unknownSysFileFlag = /unknown option ['"]--(append-)?system-prompt-file/i.test(outputBuffer);
+    const injectedBootCrash = !insideLogDir && !signal && diedInBootWindow;
     const sysFileRejected = sysPrompt.loaded.length > 0 && exitCode !== 0
-      && /unknown option ['"]--(append-)?system-prompt-file/i.test(outputBuffer);
+      && (unknownSysFileFlag || injectedBootCrash);
     if (sysFileRejected) {
-      console.error('[CC Viewer] claude rejected --system-prompt-file, skipping CC_SYSTEM.md/CC_APPEND_SYSTEM.md and retrying');
-      _systemPromptFileRejectedPaths.add(claudePath);
+      if (unknownSysFileFlag) {
+        console.error('[CC Viewer] claude rejected --system-prompt-file, marking as unsupported and retrying without injection');
+        _systemPromptFileRejectedPaths.add(claudePath);
+      } else {
+        console.error(`[CC Viewer] claude exited (code ${exitCode}) ${Math.round(elapsedMs / 1000)}s after launch with injected system prompt (${sysPrompt.loaded.join(', ')}); retrying once without injection`);
+        _skipInjectionOncePaths.add(claudePath);
+      }
       _suppressNextSpawnNotice = true;
+      // 措辞留有余地(评审)：引导期死亡可能与注入无关(API key/网络等)，不断言因果。
+      emitSpawnNotice(`[CC Viewer] claude exited during boot (code ${exitCode}); the injected system prompt may or may not be the cause — retrying once without ${sysPrompt.loaded.join(', ')}`);
       spawnClaude(proxyPort, cwd, extraArgs, claudePath, isNpmVersion, serverPort, serverProtocol, internalToken);
       return;
+    }
+
+    // 事后兜底二级：注入过且 exit=0 秒退 —— 无法与「用户主动快速 /exit」区分(日常高频)，
+    // 所以只打诊断提示、不自动重启、不加入拒绝集(自动关停会因使用习惯静默禁用注入，评审否决)，
+    // 也不早退——照常广播 exit，前端退出横幅路径与用户正常 /exit 完全一致。
+    // !insideLogDir：IM worker 的 pty 数据流可能被桥接转发，诊断行不该漏进 IM 会话(评审)。
+    if (sysPrompt.loaded.length > 0 && exitCode === 0 && diedInBootWindow && !insideLogDir) {
+      emitSpawnNotice(`[CC Viewer] claude exited ${Math.round(elapsedMs / 1000)}s after launch with an injected system prompt (${sysPrompt.loaded.join(', ')}). If this keeps happening the injected prompt may be incompatible — remove the entry or set CCV_DISABLE_AUTO_SYSTEM_PROMPT=1 to skip injection.`);
     }
 
     // 保留 lastWorkspacePath，不清除，用于 respawn
@@ -423,6 +488,14 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
       try { cb(exitCode); } catch { }
     }
   });
+
+  // 注入了 system prompt 文件时向终端打印一行提示(可见性/安全)；内部重启已抑制以免重复。
+  // 必须在 onData/onExit 注册之后再打(PR#128)，缩小「子进程在处理器挂载前退出」的丢事件窗口。
+  if (sysPrompt.loaded.length && !_suppressNextSpawnNotice) {
+    const modelSuffix = sysPrompt.model ? ` (model match: ${sysPrompt.model})` : '';
+    emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt${modelSuffix}`);
+  }
+  _suppressNextSpawnNotice = false;
 
   return ptyProcess;
 }

@@ -968,9 +968,15 @@ export async function startViewer() {
           currentServer = createServer(handleRequest);
         }
 
-        currentServer.listen(port, HOST, async () => {
+        currentServer.listen(port, HOST, () => {
           server = currentServer;
           actualPort = port;
+          // 整段异步启动逻辑包进 fire-and-forget try-catch(PR#128)：端口已绑定、cli.js 的
+          // 端口轮询即将放行并继续 spawnClaude——此后任何 await 拒绝(setupTerminalWebSocket /
+          // runParallelHook / startBridge)都不能变成 unhandled rejection 打死进程；
+          // resolve(server) 必达。
+          (async () => {
+          try {
           // 把服务端 i18n 的 currentLang 同步成用户在 UI 配置的语言（preferences.lang）。
           // 否则服务端 t() 恒为默认 'zh'——DingTalk 桥接的系统提示、登录页回落语言都不跟随配置。
           // setLang 自带 locale 校验，非法/缺失值回落 en，读 prefs 失败也安全跳过。
@@ -1118,6 +1124,11 @@ export async function startViewer() {
             imProcMgr.reconcileImProcesses().catch((e) => console.error('[CC Viewer] IM reconcile failed:', e?.message || e));
           }
           resolve(server);
+          } catch (err) {
+            console.error('[CC Viewer] server start callback error:', err?.message || err);
+            try { resolve(server); } catch { /* already settled */ }
+          }
+          })();
         });
 
         currentServer.on('error', (err) => {
