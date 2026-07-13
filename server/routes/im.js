@@ -8,6 +8,11 @@
 //                                    runs with --dangerously-skip-permissions.
 //   POST /api/im/:platform/test    — loopback-only; validate creds (fetch an access token).
 //   POST /api/im/:platform/process — loopback-only; {action:start|stop|restart} the detached worker.
+//                                    'start' requires stored creds (400 `missing …` otherwise) and
+//                                    also persists enabled:true (merged into the stored config):
+//                                    a worker spawned while the config says disabled no-ops in
+//                                    im-bridge-core and would not survive a restart reconcile,
+//                                    so "start" must mean "enable + spawn".
 //   GET  /api/im/:platform/logs    — resolve the worker's latest .jsonl (for the records popup).
 //
 // Architecture: IM adapters no longer run in the main ccv. Each enabled IM runs as an independent
@@ -54,6 +59,27 @@ function loopbackOnly(res) {
 
 function secretKeys(id) {
   return getDescriptor(id).fields.filter((f) => f.type === 'secret').map((f) => f.key);
+}
+
+/** Required cred/secret field keys that are empty in `cfg` (same gate as the /test route). */
+function missingCreds(id, cfg) {
+  return getDescriptor(id).fields
+    .filter((f) => (f.type === 'cred' || f.type === 'secret') && !cfg[f.key])
+    .map((f) => f.key);
+}
+
+// Audit every path that flips a platform on with an empty sender allowlist (bind-first-conversation
+// under --dangerously-skip-permissions). Shared by config POST and process 'start' so no enabling
+// path can bypass the server-side warning — headless callers never see the frontend toast.
+function warnIfEmptyAllowlist(id, cfg) {
+  const allowField = getDescriptor(id).allowListField;
+  // 过滤空白项后再判空：saveConfig 会 normalize（trim+丢空），若只看原始长度，[" "] 这类全空白
+  // 白名单会被当成"已配置"而漏掉审计告警，但实际保存的是空名单（与 dingtalk 路由保持一致）。
+  const raw = Array.isArray(cfg[allowField]) ? cfg[allowField] : [];
+  const list = raw.filter((s) => typeof s === 'string' && s.trim());
+  if (list.length === 0) {
+    console.warn(`[CC Viewer] IM ${id} enabled with EMPTY allowlist — bind-first-conversation; the first conversation to message can drive this --dangerously-skip-permissions session`);
+  }
 }
 
 function readBody(req, deps, cb) {
@@ -130,16 +156,7 @@ function imConfigPost(req, res, parsedUrl, isLocal, deps) {
     // bind-first-conversation（im-bridge-core.js）——首个向机器人发消息的会话被绑定，该会话内任何人
     // 都可无审批驱动本地会话。这里打一条服务端审计（curl/headless 启用走不到前端 toast），
     // PreToolUse permissions.deny 硬拦截（perm-bridge/im-deny，独立于白名单）仍然生效。
-    if (incoming.enabled) {
-      const allowField = getDescriptor(id).allowListField;
-      // 过滤空白项后再判空：saveConfig 会 normalize（trim+丢空），若只看原始长度，[" "] 这类全空白
-      // 白名单会被当成"已配置"而漏掉审计告警，但实际保存的是空名单（与 dingtalk 路由保持一致）。
-      const raw = Array.isArray(incoming[allowField]) ? incoming[allowField] : [];
-      const list = raw.filter((s) => typeof s === 'string' && s.trim());
-      if (list.length === 0) {
-        console.warn(`[CC Viewer] IM ${id} enabled with EMPTY allowlist — bind-first-conversation; the first conversation to message can drive this --dangerously-skip-permissions session`);
-      }
-    }
+    if (incoming.enabled) warnIfEmptyAllowlist(id, incoming);
     const saved = saveConfig(id, incoming);
     // applyProcess（默认 true，保持旧调用方语义）：前端 onBlur 自动保存传 false → 仅存盘、不驱动进程，
     // 否则每次输入框失焦都会重启 worker。显式「启动/停止」按钮则不传（=true），沿用下述驱动逻辑。
@@ -171,9 +188,7 @@ function imTestPost(req, res, parsedUrl, isLocal, deps) {
     const stored = loadConfig(id);
     const cfg = {};
     for (const f of getDescriptor(id).fields) cfg[f.key] = incoming[f.key] || stored[f.key];
-    const missing = getDescriptor(id).fields
-      .filter((f) => (f.type === 'cred' || f.type === 'secret') && !cfg[f.key])
-      .map((f) => f.key);
+    const missing = missingCreds(id, cfg);
     if (missing.length) {
       res.writeHead(200, JSON_HEADERS);
       res.end(JSON.stringify({ ok: false, detail: `missing ${missing.join('/')}` }));
@@ -201,8 +216,25 @@ function imProcessPost(req, res, parsedUrl, isLocal, deps) {
     try {
       if (action === 'stop') await deps.im.stopProcess(id);
       else if (action === 'restart') await deps.im.restartProcess(id);
-      else if (action === 'start') await deps.im.startProcess(id);
-      else {
+      else if (action === 'start') {
+        const cfg = loadConfig(id);
+        // Credential gate (same as /test): without creds the spawned worker's bridge no-ops
+        // forever, and persisting enabled:true would make reconcile respawn that zombie on
+        // every server restart. Reject up front — nothing is persisted, nothing is spawned.
+        const missing = missingCreds(id, cfg);
+        if (missing.length) {
+          res.writeHead(400, JSON_HEADERS);
+          res.end(JSON.stringify({ ok: false, error: `missing ${missing.join('/')}`, detail: `missing ${missing.join('/')}` }));
+          return;
+        }
+        // Persist enabled:true first (read-merge-write keeps creds/allowlist intact): a worker
+        // spawned with enabled:false no-ops its bridge, and reconcile would not respawn it.
+        if (!cfg.enabled) {
+          warnIfEmptyAllowlist(id, cfg);
+          saveConfig(id, { ...cfg, enabled: true });
+        }
+        await deps.im.startProcess(id);
+      } else {
         res.writeHead(400, JSON_HEADERS);
         res.end(JSON.stringify({ error: 'action must be start|stop|restart' }));
         return;

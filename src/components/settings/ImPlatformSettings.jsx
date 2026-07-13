@@ -246,14 +246,17 @@ export default function ImPlatformSettings({ descriptor }) {
       if (isAllowlistEmpty()) {
         message.warning(_tr('ui.im.savedNoAllowlistWarn', null, 'No sender allowlist set: the first conversation that messages the bot is bound and anyone in it can drive the local session with no approval. Add an allowlist under More settings.'), 8);
       }
-      // 轮询 status 直到 worker 真就绪（state==='ready'）或超时——这才是「启动成功」的判据。
+      // 轮询 status 直到桥接真连上或超时——这才是「启动成功」的判据。ready 只代表 worker 的
+      // HTTP 身份服务就绪，凭证失效时 bridge no-op 而 worker 照样 ready，若以 ready 为判据会
+      // 弹出与徽标「运行中，连接中…」矛盾的「已连接」成功提示（与 ImConversationModal 对齐）。
       const deadline = Date.now() + START_POLL_TIMEOUT_MS;
       let ready = false;
       while (Date.now() < deadline) {
         await new Promise((res) => setTimeout(res, START_POLL_INTERVAL_MS));
         if (!mountedRef.current) return;
         const d = await fetchStatus(false);
-        if (d?.process?.state === 'ready') { ready = true; break; }
+        if (d?.process?.state === 'ready'
+          && (d?.connection?.connected || d?.connection?.connectionState === 'connected')) { ready = true; break; }
       }
       if (!mountedRef.current) return;
       if (ready) message.success(_tr('ui.im.statusConnected', null, 'Connected'));
