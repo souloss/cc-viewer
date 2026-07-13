@@ -112,7 +112,11 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     // 时,回包应折叠成 "~/.claude"。仅临时改 env 跑一次只读 GET(绝不写真实目录),随后立即还原。
     const { homedir } = await import('node:os');
     const prev = process.env.CLAUDE_CONFIG_DIR;
+    const prevCtx = process.env.NODE_TEST_CONTEXT;
     process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+    // L1d 铁闸(2026-07-12)在测试上下文里拒绝非 tmp 的显式 CLAUDE_CONFIG_DIR；本用例只做
+    // 一次只读 GET 验证【回显映射】，临时剥掉 NODE_TEST_CONTEXT 模拟生产语义，随后立即还原。
+    delete process.env.NODE_TEST_CONTEXT;
     try {
       const res = await httpRequest(port, '/api/preferences');
       const data = res.json();
@@ -122,6 +126,7 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = prev;
+      if (prevCtx !== undefined) process.env.NODE_TEST_CONTEXT = prevCtx;
     }
   });
 

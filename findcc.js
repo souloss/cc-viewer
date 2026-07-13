@@ -1,4 +1,4 @@
-import { resolve, join } from 'node:path';
+import { resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, realpathSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir, arch } from 'node:os';
@@ -22,11 +22,42 @@ const NODE_MODULES = resolve(__dirname, '..');
  * Claude Code's config from ~/.claude/ to a custom location.
  * @returns {string} absolute path to the Claude config directory
  */
+// ████████ Test isolation barrier L1c helper — DO NOT REMOVE (2026-07-12 data loss) ████████
+// A ccv-hosted shell exports CCV_LOG_DIR=<real user data dir> (and possibly CLAUDE_CONFIG_DIR)
+// into every child process — the claude pty, its Bash tool, any nested shell. A direct
+// `node --test <file>` run there inherits those vars and sails through the explicit-value fast
+// paths below, handing the test process the REAL user directories; test fixtures/cleanup then
+// delete real user data (confirmed 2026-07-12: a pty-manager fixture's finally-rmSync wiped the
+// user's global system_prompt/ model prompts). Policy: a test process may only ever target
+// disposable temp directories. This helper decides whether an explicit dir qualifies.
+function isDisposableTmpPath(p) {
+  const roots = new Set();
+  const t = resolve(tmpdir());
+  roots.add(t);
+  try { roots.add(realpathSync(t)); } catch { /* keep the unresolved form */ }
+  if (process.platform !== 'win32') { roots.add('/tmp'); roots.add('/private/tmp'); }
+  const forms = new Set([resolve(p)]);
+  try { forms.add(realpathSync(resolve(p))); } catch { /* path may not exist yet */ }
+  for (const f of forms) {
+    for (const r of roots) {
+      if (f === r || f.startsWith(r + sep)) return true;
+    }
+  }
+  return false;
+}
+
 export function getClaudeConfigDir() {
   const envDir = process.env.CLAUDE_CONFIG_DIR;
   if (envDir && typeof envDir === 'string' && envDir.trim()) {
     const raw = envDir.trim();
-    return raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : resolve(raw);
+    const resolved = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : resolve(raw);
+    // ████ L1d: in test context an explicit CLAUDE_CONFIG_DIR must still be a throwaway dir —
+    // an inherited real config dir would re-open the 2026-06-06 updater CACHE_DIR hole. ████
+    if (process.env.NODE_TEST_CONTEXT && !isDisposableTmpPath(resolved)) {
+      console.warn(`[findcc] L1d test-isolation barrier: CLAUDE_CONFIG_DIR="${raw}" is not under the OS temp dir — forcing a private guard config dir (tests may only target disposable temp dirs)`);
+      return join(tmpdir(), 'cc-viewer-test', `guard-cfg-${process.pid}-${threadId}`);
+    }
+    return resolved;
   }
   // ████████ Test isolation barrier L1b — DO NOT REMOVE (prevents data-loss regressions, 2026-06-06) ████████
   // CCV_LOG_DIR=tmp only redirects LOG_DIR; it does not cover this function: updater.js's
@@ -69,7 +100,21 @@ function resolveLogDir() {
       return join(tmpdir(), 'cc-viewer-test', `${process.pid}-${threadId}`);
     }
     const expanded = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw;
-    return resolve(expanded);
+    const resolved = resolve(expanded);
+    // ████████ Test isolation barrier L1c — DO NOT REMOVE (2026-07-12 data loss) ████████
+    // The NODE_TEST_CONTEXT guard below only covers the no-CCV_LOG_DIR case; this explicit-value
+    // fast path used to accept ANY inherited dir. Inside a ccv-hosted shell CCV_LOG_DIR points at
+    // the real ~/.claude/cc-viewer, so a direct `node --test <file>` there resolved LOG_DIR to
+    // real user data — test cleanup then deleted it (2026-07-12: the user's global system_prompt/
+    // entries were wiped this way, twice). Tests may only target disposable temp dirs: anything
+    // outside the OS temp root is forced to the private guard dir. Use CCV_LOG_DIR=tmp or a
+    // mkdtemp path in tests. Unit test: test/logdir-test-guard.test.js.
+    if (process.env.NODE_TEST_CONTEXT && !isDisposableTmpPath(resolved)) {
+      console.warn(`[findcc] L1c test-isolation barrier: CCV_LOG_DIR="${raw}" is not under the OS temp dir — forcing a private guard LOG_DIR (tests may only target disposable temp dirs; use CCV_LOG_DIR=tmp or a mkdtemp path)`);
+      return join(tmpdir(), 'cc-viewer-test', `guard-${process.pid}-${threadId}`);
+    }
+    // ████████████████████████████████████████████████████████████████████████████
+    return resolved;
   }
   // Test isolation barrier: in node:test environment (NODE_TEST_CONTEXT is auto-injected by the
   // test runner and inherited by spawned child processes via spread env), if CCV_LOG_DIR is not

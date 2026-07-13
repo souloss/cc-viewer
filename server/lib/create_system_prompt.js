@@ -130,8 +130,11 @@ function resolveMemory(home, cwd) {
   return { dir, index, enabled: enabled ? 'true' : 'false' }
 }
 
-export function createSystemPromptVariables(overrides = {}) {
-  const cwd = stringOrEmpty(() => process.cwd())
+export function createSystemPromptVariables(overrides = {}, opts = {}) {
+  // opts.cwd: resolve cwd-dependent variables (environment.cwd, git.*, memory.dir) against a
+  // caller-supplied directory instead of process.cwd() — the spawn-time renderer passes the
+  // workspace being launched, which is not necessarily where the ccv server itself runs.
+  const cwd = (typeof opts.cwd === 'string' && opts.cwd) ? opts.cwd : stringOrEmpty(() => process.cwd())
   const now = new Date()
   const timeZone = stringOrEmpty(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone,

@@ -8,6 +8,7 @@ import { prepareEmbeddedShellSpawn, stripClaudeNoFlickerUnlessOptedIn, applyClau
 import { killPtyTree } from './lib/term-signals.js';
 import { findSafeSliceStart, splitTrailingIncomplete } from './lib/ansi-safe-slice.js';
 import { buildSystemPromptFileArgs } from './lib/system-prompt-files.js';
+import { renderSystemPromptFileArgs } from './lib/system-prompt-render.js';
 import { MODEL_PROMPT_DIR } from './lib/model-system-prompts.js';
 import { readClaudeProjectModel } from './lib/context-watcher.js';
 
@@ -307,14 +308,19 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   });
   if (_systemPromptFileRejectedPaths.has(claudePath)) {
     sysPrompt = { args: [], loaded: [], model: null };
-  } else if (resolvedModelId && !sysPrompt.model
+  } else if (resolvedModelId && !sysPrompt.model && !sysPrompt.suppressed
     && (existsSync(join(spawnDir, MODEL_PROMPT_DIR)) || existsSync(join(LOG_DIR, MODEL_PROMPT_DIR)))) {
     // The one diagnostic case worth a warning: a system_prompt dir is configured
-    // but the resolved model matched no entry (likely a misnamed file). The
+    // but the resolved model matched no entry (likely a misnamed file). Intentional
+    // skips (CCV_DISABLE_AUTO_SYSTEM_PROMPT=1, or a manual --system-prompt flag
+    // suppressing a matched entry) carry `suppressed` and stay quiet. The
     // successful-injection notice is emitted below via emitSpawnNotice (with
     // internal-restart suppression); no-modelId spawns are the normal quiet path.
     console.warn(`[CC Viewer] model-specific prompt: modelId="${resolvedModelId}" resolved but no matching entry found in workspace or global ${MODEL_PROMPT_DIR}/`);
   }
+  // Resolve `${...}` template variables in the injected files (editor stores them literal —
+  // the substitution documented by the editor's parameter reference happens here, at launch).
+  sysPrompt = renderSystemPromptFileArgs(sysPrompt, { cwd: spawnDir, modelId: resolvedModelId });
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
   let command = claudePath;

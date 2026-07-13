@@ -117,14 +117,19 @@ describe('preferencesGet 分支', () => {
   it('CLAUDE_CONFIG_DIR 等于 ~/.claude 时回显 home-friendly "~/.claude"（L37 默认臂）', async () => {
     // 临时把 CLAUDE_CONFIG_DIR 指向真实 ~/.claude（getClaudeConfigDir 在调用期读 env），
     // 使 _cDir === join(homedir(),'.claude') 成立 → 三元真臂。调用后立即还原，不污染其他用例。
+    // L1d 铁闸(2026-07-12)在测试上下文里会拒绝非 tmp 的显式 CLAUDE_CONFIG_DIR——本 GET 仅
+    // 把目录格式化成字符串回显（只读，不落盘），故临时剥掉 NODE_TEST_CONTEXT 模拟生产语义。
     const prev = process.env.CLAUDE_CONFIG_DIR;
+    const prevCtx = process.env.NODE_TEST_CONTEXT;
     process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+    delete process.env.NODE_TEST_CONTEXT;
     try {
       const res = await callGet(preferencesGet);
       const data = JSON.parse(res.body);
       assert.equal(data.claudeConfigDir, '~/.claude');
     } finally {
       process.env.CLAUDE_CONFIG_DIR = prev;
+      if (prevCtx !== undefined) process.env.NODE_TEST_CONTEXT = prevCtx;
     }
   });
 });
