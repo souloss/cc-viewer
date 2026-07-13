@@ -1,15 +1,17 @@
 // Pure function + integration tests for ccswitch-import.
 // mapProviderToProfile / mergeImportedProfiles are pure-function unit tests;
 // readCcSwitchProviders runs integration verification against the real local cc-switch.db (run if present, skip otherwise).
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import {
   mapProviderToProfile,
   mergeImportedProfiles,
   findCcSwitchDbPath,
+  _candidateDbPathsForTest,
   readCcSwitchProviders,
   discoverCcSwitchProviders,
 } from '../server/lib/ccswitch-import.js';
@@ -105,6 +107,36 @@ describe('mapProviderToProfile', () => {
     const p = mapProviderToProfile(row);
     assert.equal(p.apiKey, 'token-val');
   });
+
+  it('CLAUDE_CODE_EFFORT_LEVEL 映射到 effort（不丢失）', () => {
+    // cc-switch's "通用配置" effort toggle writes CLAUDE_CODE_EFFORT_LEVEL="max".
+    // cc-viewer's profile model supports an effort field (the request layer injects
+    // profile.effort as output_config.effort at send time). The import must map this
+    // env var → effort, otherwise a user who set effort in cc-switch silently loses it.
+    const row = {
+      id: 'eff', app_type: 'claude', name: 'EffortProv',
+      settings_config: JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: 'https://x',
+          ANTHROPIC_AUTH_TOKEN: 'tok',
+          CLAUDE_CODE_EFFORT_LEVEL: 'max',
+        },
+      }),
+    };
+    const p = mapProviderToProfile(row);
+    assert.equal(p.effort, 'max');
+  });
+
+  it('无 CLAUDE_CODE_EFFORT_LEVEL 时 effort 为空串（不误注入）', () => {
+    const row = {
+      id: 'noeff', app_type: 'claude', name: 'NoEffort',
+      settings_config: JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: 'https://x', ANTHROPIC_AUTH_TOKEN: 'tok' },
+      }),
+    };
+    const p = mapProviderToProfile(row);
+    assert.equal(p.effort, '');
+  });
 });
 
 describe('mergeImportedProfiles', () => {
@@ -180,6 +212,78 @@ describe('findCcSwitchDbPath', () => {
       assert.equal(p, null);
     }
   });
+
+  it('~/.cc-switch/cc-switch.db 优先于 legacy 平台路径（stale 文件不遮蔽真实 db）', () => {
+    // cc-switch hardcodes ~/.cc-switch/cc-switch.db on ALL platforms. A stale/empty leftover
+    // file at a legacy platform-specific probe path must NOT shadow the real db. Override
+    // HOME to a temp dir so homedir() (which respects HOME on linux) resolves there, then lay
+    // out both a legacy-path file and the real ~/.cc-switch/cc-switch.db and assert the real
+    // one wins. Restores HOME in finally so other tests are unaffected.
+    const realHome = process.env.HOME;
+    const tmp = mkdtempSync(join(tmpdir(), 'ccv-ccswitch-prio-'));
+    process.env.HOME = tmp;
+    try {
+      // legacy linux path cc-switch never writes to (only matters if probed first)
+      const stale = join(tmp, '.local', 'share', 'cc-switch');
+      mkdirSync(stale, { recursive: true });
+      writeFileSync(join(stale, 'cc-switch.db'), 'stale leftover');
+      // the real db cc-switch actually uses
+      const realDir = join(tmp, '.cc-switch');
+      mkdirSync(realDir, { recursive: true });
+      writeFileSync(join(realDir, 'cc-switch.db'), 'real');
+      const got = findCcSwitchDbPath();
+      assert.equal(got, join(realDir, 'cc-switch.db'));
+    } finally {
+      process.env.HOME = realHome;
+      try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+});
+
+// Cross-platform priority: cc-switch hardcodes ~/.cc-switch/cc-switch.db on ALL platforms.
+// These unit tests inject platform/home/env so the win32 + darwin branches can be exercised
+// on any host (the runtime tests above only cover the linux branch's behavior).
+describe('_candidateDbPathsForTest (cross-platform priority)', () => {
+  const home = '/home/me';
+
+  it('win32: ~/.cc-switch/cc-switch.db 优先于 %APPDATA% / %LOCALAPPDATA%', () => {
+    const paths = _candidateDbPathsForTest({
+      plat: 'win32', home,
+      env: { APPDATA: 'C:\\Users\\me\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' },
+    });
+    // [0] is the primary ~/.cc-switch path on every platform
+    assert.equal(paths[0], '/home/me/.cc-switch/cc-switch.db');
+    // the AppData paths must come AFTER, never first (so a stale leftover can't shadow)
+    assert.ok(!paths.slice(1).includes(paths[0]), 'primary must not be duplicated later');
+    assert.ok(paths.length >= 3);
+  });
+
+  it('darwin: ~/.cc-switch/cc-switch.db 优先于 Library/Application Support/*', () => {
+    const paths = _candidateDbPathsForTest({ plat: 'darwin', home });
+    assert.equal(paths[0], '/home/me/.cc-switch/cc-switch.db');
+    assert.ok(paths.slice(1).some(p => p.includes('Library/Application Support')));
+    assert.ok(!paths.slice(1).includes(paths[0]));
+  });
+
+  it('linux: ~/.cc-switch/cc-switch.db 优先，且 legacy 路径在其后', () => {
+    const paths = _candidateDbPathsForTest({ plat: 'linux', home, env: {} });
+    assert.equal(paths[0], '/home/me/.cc-switch/cc-switch.db');
+    assert.ok(paths[paths.length - 1].includes('.local/share/cc-switch'));
+  });
+
+  it('win32: USERPROFILE/APPDATA 缺省时回退到 home 下 AppData（home 为任意值都成立）', () => {
+    // The primary path is <home>/.cc-switch/cc-switch.db for ANY home value — we do NOT hardcode
+    // a real username (that would couple the test to one machine). home is an opaque base dir.
+    // Assert on path *structure*, not exact separators: path.join uses the host separator,
+    // so on a linux test host the Windows-style backslashes mix with '/'. The logic is what matters.
+    const winHome = 'C:\\Users\\anybody';
+    const paths = _candidateDbPathsForTest({ plat: 'win32', home: winHome, env: {} });
+    assert.ok(paths[0].startsWith(winHome), `primary should be under home, got ${paths[0]}`);
+    assert.ok(paths[0].includes('.cc-switch'), `primary should target .cc-switch, got ${paths[0]}`);
+    // APPDATA/LOCALAPPDATA unset → fallbacks resolve under <home>\AppData\...
+    assert.ok(paths[1].includes('AppData'), `fallback should be under AppData, got ${paths[1]}`);
+    assert.ok(paths[2].includes('AppData'));
+  });
 });
 
 // Integration test: real local cc-switch.db (run only if a *valid* one is present).
@@ -240,5 +344,52 @@ describe('discoverCcSwitchProviders (integration)', { skip: !hasRealDb }, () => 
     assert.ok(r.dbPath);
     assert.equal(r.error, null);
     assert.ok(Array.isArray(r.profiles));
+  });
+});
+
+// Error-surfacing tests: verify readCcSwitchProviders reports the REAL cause when the DB is
+// unreadable, rather than masking every failure behind "providers table not found".
+// A non-SQLite / corrupt file opens read-only (the open does not validate content), then the
+// sqlite_master query throws — that throw must surface, not be swallowed into a misleading
+// "providers table not found". These run on any temp dir and need no real cc-switch install.
+const hasSqlite = (() => {
+  try {
+    const req = createRequire(import.meta.url);
+    return !!req('node:sqlite').DatabaseSync;
+  } catch { return false; }
+})();
+
+describe('readCcSwitchProviders (error surfacing)', { skip: !hasSqlite }, () => {
+  let tmpDir;
+  before(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-ccswitch-err-')); });
+  after(() => { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+  it('非 SQLite 文件不报 "providers table not found"，而是暴露真实错误', async () => {
+    // A bytes-file that is clearly not a SQLite database. Opens read-only, then the
+    // sqlite_master query throws "file is not a database" — that real cause must surface.
+    const dbPath = join(tmpDir, 'cc-switch.db');
+    writeFileSync(dbPath, 'not a sqlite database at all');
+    const { profiles, error } = await readCcSwitchProviders(dbPath);
+    assert.deepEqual(profiles, []);
+    assert.ok(error, 'error should be set');
+    // The masked bug returned exactly 'providers table not found'; the fix must surface the
+    // real cause instead (the underlying SQLite "not a database" message, via 'query failed:').
+    assert.notEqual(error, 'providers table not found');
+    assert.ok(/database|query failed|file/i.test(error), `error should expose real cause, got: ${error}`);
+  });
+
+  it('有效 SQLite 库但无 providers 表 → 报 "providers table not found in <path>"', async () => {
+    // A valid SQLite DB that simply does not have a providers table (genuine schema mismatch).
+    // This must still report "providers table not found" — and now names the resolved path so
+    // the user can tell which file was opened (e.g. a stale leftover vs. the real cc-switch db).
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const dbPath = join(tmpDir, 'empty.db');
+    const db = new DatabaseSync(dbPath);
+    db.exec('CREATE TABLE other (id TEXT)'); // valid db, no providers table
+    db.close();
+    const { profiles, error } = await readCcSwitchProviders(dbPath);
+    assert.deepEqual(profiles, []);
+    assert.ok(error.includes('providers table not found'), `got: ${error}`);
+    assert.ok(error.includes(dbPath), `error should name the resolved db path, got: ${error}`);
   });
 });

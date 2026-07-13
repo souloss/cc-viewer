@@ -38,29 +38,36 @@ async function getDatabaseSync() {
 }
 
 // Cross-platform candidate paths (ordered by priority; the first existsSync hit wins).
-// Linux empirically uses ~/.cc-switch/; mac/win follow Tauri v2 standard dirs plus a dot-dir fallback.
-function candidateDbPaths() {
-  const home = homedir();
-  const plat = platform();
-  const paths = [];
+// cc-switch hardcodes ~/.cc-switch/cc-switch.db on ALL platforms (get_app_config_dir() in its
+// config.rs; the Tauri identifier com.ccswitch.desktop does NOT affect the DB path). So that
+// path is probed first. The platform-specific Tauri app-data dirs below are kept only as
+// legacy fallbacks in case some very old cc-switch version wrote there — never first — so a
+// stale/empty leftover file in them cannot shadow the real ~/.cc-switch/cc-switch.db.
+function candidateDbPaths(opts) {
+  // opts is for testing only (inject platform/home/env without touching the runtime);
+  // production callers omit it and use the real homedir()/platform()/process.env.
+  const home = opts && opts.home != null ? opts.home : homedir();
+  const plat = opts && opts.plat != null ? opts.plat : platform();
+  const env = opts && opts.env ? opts.env : process.env;
+  const paths = [join(home, '.cc-switch', 'cc-switch.db')]; // primary on every platform
   if (plat === 'darwin') {
     paths.push(join(home, 'Library', 'Application Support', 'cc-switch', 'cc-switch.db'));
     paths.push(join(home, 'Library', 'Application Support', 'com.ccswitch.desktop', 'cc-switch.db'));
   } else if (plat === 'win32') {
-    const appdata = process.env.APPDATA || join(home, 'AppData', 'Roaming');
-    const localappdata = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    const appdata = env.APPDATA || join(home, 'AppData', 'Roaming');
+    const localappdata = env.LOCALAPPDATA || join(home, 'AppData', 'Local');
     paths.push(join(appdata, 'cc-switch', 'cc-switch.db'));
     paths.push(join(localappdata, 'cc-switch', 'cc-switch.db'));
   } else {
     // linux and other unix
-    const xdg = process.env.XDG_DATA_HOME;
+    const xdg = env.XDG_DATA_HOME;
     if (xdg) paths.push(join(xdg, 'cc-switch', 'cc-switch.db'));
     paths.push(join(home, '.local', 'share', 'cc-switch', 'cc-switch.db'));
   }
-  // Generic dot-dir fallback (binary strings confirm this path is hardcoded)
-  paths.push(join(home, '.cc-switch', 'cc-switch.db'));
   return paths;
 }
+// Exported for unit tests so the win32/darwin priority ordering can be exercised on any host.
+export { candidateDbPaths as _candidateDbPathsForTest };
 
 // Returns the first existing cc-switch.db path, or null if none found.
 export function findCcSwitchDbPath() {
@@ -84,6 +91,10 @@ const ENV_FIELD_MAP = {
   ANTHROPIC_DEFAULT_OPUS_MODEL: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
   ANTHROPIC_DEFAULT_SONNET_MODEL: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
   ANTHROPIC_DEFAULT_HAIKU_MODEL: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  // cc-switch's "通用配置" effort toggle writes CLAUDE_CODE_EFFORT_LEVEL (e.g. "max").
+  // cc-viewer's interceptor injects profile.effort as output_config.effort, so mapping
+  // this env var preserves the user's effort setting across import (was previously dropped).
+  CLAUDE_CODE_EFFORT_LEVEL: 'effort',
 };
 
 // Map a cc-switch providers row into a cc-viewer profile object.
@@ -106,6 +117,7 @@ export function mapProviderToProfile(row) {
     name: String(row.name),
     baseURL: '',
     apiKey: '',
+    effort: '', // CLAUDE_CODE_EFFORT_LEVEL → output_config.effort (injected by interceptor)
     ANTHROPIC_MODEL: '',
     ANTHROPIC_DEFAULT_OPUS_MODEL: '',
     ANTHROPIC_DEFAULT_SONNET_MODEL: '',
@@ -144,13 +156,12 @@ export async function readCcSwitchProviders(dbPath) {
     return { profiles: [], error: `cannot open db: ${err && err.message}` };
   }
   try {
-    // providers table existence check (older / corrupt dbs may not have it)
-    let hasTable = false;
-    try {
-      const r = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='providers'").get();
-      hasTable = !!r;
-    } catch { hasTable = false; }
-    if (!hasTable) return { profiles: [], error: 'providers table not found' };
+    // providers table existence check. A query that throws here means the file is
+    // unreadable as a SQLite db (corrupt / non-SQLite / truncated) — the real cause
+    // must surface, not be masked as "table not found". Let it propagate to the
+    // outer catch, which formats it as `query failed: <message>`.
+    const r = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='providers'").get();
+    if (!r) return { profiles: [], error: `providers table not found in ${dbPath}` };
 
     const rows = db.prepare(
       "SELECT id, app_type, name, settings_config, is_current FROM providers WHERE app_type = 'claude' ORDER BY sort_index, name"
