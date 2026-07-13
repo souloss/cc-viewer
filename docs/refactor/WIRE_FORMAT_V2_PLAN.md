@@ -8,8 +8,8 @@
 
 | 步骤 | 内容 | 状态 | 日期 | commit | 下一步动作备注 |
 |---|---|---|---|---|---|
-| S-1 | 跨 session 追踪落地（本文档 + 记忆指针） | ✅ | 2026-07-13 | (待本次 commit) | — |
-| S0 | 协议定稿 docs/refactor/WIRE_FORMAT_V2.md | ⬜ | | | 需用户评审通过才算完成 |
+| S-1 | 跨 session 追踪落地（本文档 + 记忆指针） | ✅ | 2026-07-13 | c88d704 | — |
+| S0 | 协议定稿 docs/refactor/WIRE_FORMAT_V2.md | 🔄 | 2026-07-13 | | 草案已成稿，待用户评审通过 |
 | S1 | 共享边界+逆锚模块（clearCheckpoint 迁移 + findReverseAnchor 抽取） | ⬜ | | | entry-slim 3 处故意分化副本不得统一 |
 | S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | ⬜ | | | 依赖 S0 schema 定稿 |
 | S3 | 双写接入（writeEntry seam + CCV_WIRE_V2，默认关） | ⬜ | | | 回滚=CCV_WIRE_V2=0 |
