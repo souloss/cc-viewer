@@ -16,27 +16,69 @@
 // Every stored line carries the initiating seq + rid (plan risk F8): physical
 // append order is completion order, semantic order is seq.
 
-import { isPostClearCheckpoint, isCompactContinuation, messageFingerprint } from '../session-boundary.js';
+import { isPostClearCheckpoint, isCompactContinuation, normalizeMsgForEquality } from '../session-boundary.js';
+import { fingerprintMsg } from '../interceptor-core.js';
 import { ensureConvDirSync, convEpochPath } from './layout.js';
+
+/** FNV-1a over a string — cheap full-content discriminator for exact mode. */
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
 
 export class ConversationStore {
   /**
    * @param {object} paths - sessionPaths() object
    * @param {{appendTo: Function}} queue - AsyncWriteQueue (explicit-path API)
+   * @param {{exactFps?: boolean}} [opts] - exact mode: judgement fingerprints
+   *   additionally hash the FULL message JSON. The offline converter needs
+   *   byte-grade faithfulness (its golden gate replays byte-identical wire);
+   *   fingerprintMsg's 80-char first-block snip cannot distinguish wires that
+   *   share a long prefix (real data 2026-07-14: sub prompts identical in the
+   *   first 80 chars, differing later, judged "unchanged" → replay stuck on
+   *   the first wire). The live request path keeps the cheap default.
    */
-  constructor(paths, queue) {
+  constructor(paths, queue, opts = {}) {
     this._paths = paths;
     this._queue = queue;
-    this._convs = new Map(); // convKey → { epoch, count, tailFp, dirEnsured }
+    this._convs = new Map(); // convKey → { epoch, count, fps, dirEnsured }
+    // Exact fps hash the NORMALIZED message (S4 decision 2026-07-14): the
+    // client migrates cache_control breakpoints onto old messages (string →
+    // block array), which is invisible to fingerprintMsg but flips the full
+    // JSON hash — without normalization the converter degrades to a snapshot
+    // per request on affected conversations (real-data storm, ~62% of corpus
+    // bytes). Storage still records the wire verbatim; only the judgement
+    // compares modulo cache_control/form.
+    this._fpOf = opts.exactFps
+      ? (m) => { const n = normalizeMsgForEquality(m); return `${fingerprintMsg(n)}:${fnv1a(JSON.stringify(n))}`; }
+      : fingerprintMsg;
   }
 
   _state(convKey) {
     let st = this._convs.get(convKey);
     if (!st) {
-      st = { epoch: 0, count: 0, tailFp: '', dirEnsured: false, everWrote: false };
+      // fps: per-message judgement fingerprints of the CURRENT wire state.
+      // Tail-only comparison proved insufficient on real data (2026-07-14):
+      // interleaved same-sid streams (pre-flag proxy teammates, dual writers)
+      // share prefixes/tails while differing in the middle — append/replace
+      // judgements must verify the WHOLE prefix or replay produces a
+      // franken-mix. Strings are ~90 chars × wire length: negligible memory.
+      st = { epoch: 0, count: 0, fps: [], dirEnsured: false, everWrote: false };
       this._convs.set(convKey, st);
     }
     return st;
+  }
+
+  /** All fps[0..n) pairwise equal between the stored state and the incoming wire. */
+  static _prefixEqual(prevFps, fpsIn, n) {
+    for (let i = 0; i < n; i++) {
+      if (prevFps[i] !== fpsIn[i]) return false;
+    }
+    return true;
   }
 
   /**
@@ -54,9 +96,16 @@ export class ConversationStore {
     const st = this._state(convKey);
     const msgs = Array.isArray(messages) ? messages : [];
     const len = msgs.length;
-    const tailFp = len > 0 ? messageFingerprint(msgs[len - 1]) : '';
+    // Judgement fingerprint = v1's fingerprintMsg, NOT the client-shared
+    // messageFingerprint: fingerprintMsg is content-aware for tool_result
+    // bodies (40-char snippet) where messageFingerprint keys tool_result on
+    // tool_use_id ONLY. A same-id tool_result tail edit must be detected here
+    // exactly like v1's Plan C does, or the two dual-write sides legitimately
+    // diverge in a way the verify digest (built on messageFingerprint) is
+    // structurally blind to (review P2).
+    const fpsIn = msgs.map(this._fpOf);
     const prev = st.count;
-    const prevTailFp = st.tailFp;
+    const prevFps = st.fps;
 
     let evt = null;
     let ctl = null;
@@ -70,20 +119,27 @@ export class ConversationStore {
     if (isClear) {
       st.epoch += 1;
       st.count = 0;
-      st.tailFp = '';
+      st.fps = [];
       boundary = 'clear';
       evt = 'snapshot';
       lines.push({ seq: ids.seq, rid: ids.rid, t: 'snapshot', msgs, reason: 'first' });
-    } else if (len === prev && tailFp === prevTailFp) {
+    } else if (len === prev && ConversationStore._prefixEqual(prevFps, fpsIn, len)) {
       // Unchanged wire state → no conversation event (journal still records req/done).
       evt = null;
-    } else if (len === prev && prev > 0 && prevTailFp !== '' && tailFp !== '' && tailFp !== prevTailFp) {
-      // v1 §3.3 in-place last-message replace (same judgement as interceptor.js:802-808).
+    } else if (len === prev && prev > 0 && ConversationStore._prefixEqual(prevFps, fpsIn, len - 1)
+               && prevFps[len - 1] !== '' && fpsIn[len - 1] !== '' && fpsIn[len - 1] !== prevFps[len - 1]) {
+      // v1 §3.3 in-place last-message replace (same judgement family as the
+      // interceptor's `_sameLenInPlaceReplace`, same fingerprintMsg formula) —
+      // gated on FULL prefix equality: an equal-length but different wire array
+      // (real data: pre-flag proxy teammates / dual writers interleaved into
+      // one stream, §3.7 L104) must NOT be patched tail-only, or the replayed
+      // state becomes a franken-mix. Any prefix mismatch falls through to the
+      // snapshot branch (write-side never merges — snapshot is truth).
       evt = 'ctl';
       ctl = 'replace-tail';
       boundary = 'replace-tail';
       lines.push({ seq: ids.seq, rid: ids.rid, t: 'ctl', op: 'replace-tail', msg: msgs[len - 1] });
-    } else if (len > prev && (prev === 0 || messageFingerprint(msgs[prev - 1]) === prevTailFp)) {
+    } else if (len > prev && (prev === 0 || ConversationStore._prefixEqual(prevFps, fpsIn, prev))) {
       if (prev === 0 && st.epoch === 0 && st.count === 0 && !st.everWrote) {
         // First event of a brand-new conversation → snapshot(first), so every
         // epoch file is self-contained even when it starts mid-wire (teammate
@@ -122,7 +178,7 @@ export class ConversationStore {
     // Advance state to this wire truth (eagerly, mirroring v1's eager-update
     // fix for <30ms bursts — the next request must compare against THIS one).
     st.count = len;
-    st.tailFp = tailFp;
+    st.fps = fpsIn;
 
     // [from,to) of the wire messages this event covers (spec §4):
     // snapshot ⇒ [0,len); append ⇒ [prev,len); replace-tail ⇒ [len-1,len);

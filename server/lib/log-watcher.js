@@ -7,7 +7,6 @@ import { reconstructEntries, createIncrementalReconstructor } from './delta-reco
 import { countLogEntries, streamReconstructedEntriesAsync } from './log-stream.js';
 import { enrichEntry } from './enrich-plan-input.js';
 import { enrichEntry as enrichWorkflowEntry } from './enrich-workflow.js';
-import { resolveJsonlPath } from './jsonl-archive.js';
 
 // 跟踪所有被 watch 的日志文件。value: fileState 对象（外部只用 .has()/.keys()）
 const watchedFiles = new Map();
@@ -29,7 +28,6 @@ const FORCE_POLL = process.env.CCV_FORCE_POLL === '1';
  * @returns {Array} parsed and deduplicated entries
  */
 export function readLogFile(logFile) {
-  logFile = resolveJsonlPath(logFile);
   if (!existsSync(logFile)) {
     return [];
   }

@@ -22,6 +22,12 @@ export class BlobStore {
    * Idempotent: same content → same ref, at most one disk write per process
    * (existsSync re-check makes restarts cheap too). Returns null for
    * undefined/null values so callers can spread `...(ref && {tools: ref})`.
+   *
+   * KEEP IN SYNC: replay.js `blobRefOf` re-implements this exact formula
+   * (sha256 of JSON.stringify, hex, first 16) so the verifier can compare v1
+   * inline values against journal refs WITHOUT reading blob files — change the
+   * hash, the slice length, or the serialization here and the verify gate
+   * silently produces false diffs/OKs unless blobRefOf changes with it.
    */
   put(value) {
     if (value === undefined || value === null) return null;

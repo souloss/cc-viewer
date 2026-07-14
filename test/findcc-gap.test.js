@@ -106,6 +106,20 @@ describe('findcc: setLogDir 边界与安全约束', () => {
     assert.equal(await readLogDir(), join(homedir(), 'findcc-gap-tilde'),
       '~/x 应展开为 <home>/x 并被接受');
   });
+
+  it('returns boolean: true on accept — INCLUDING a path equal to the current LOG_DIR — false on reject', async () => {
+    // Regression pin (2026-07-14): cli.js used to detect rejection by diffing
+    // LOG_DIR before/after, which mis-rejected `--log-dir <current default>`
+    // (a no-op change). setLogDir now returns the accept/reject verdict itself.
+    const dir = '/tmp/findcc-gap-samevalue';
+    assert.equal(setLogDir(dir), true, 'fresh valid path accepted');
+    assert.equal(setLogDir(dir), true, 'SAME path again must still report accepted (the fixed bug)');
+    assert.equal(await readLogDir(), dir);
+    assert.equal(setLogDir('/etc/ccv-evil'), false, 'rejected path reports false');
+    assert.equal(setLogDir(''), false, 'empty string reports false');
+    assert.equal(setLogDir(undefined), false, 'undefined reports false');
+    assert.equal(await readLogDir(), dir, 'rejections leave LOG_DIR untouched');
+  });
 });
 
 // ════════════════════════ resolveCliPath ════════════════════════

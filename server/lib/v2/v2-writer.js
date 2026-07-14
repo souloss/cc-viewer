@@ -56,6 +56,13 @@ export class V2Writer {
     this._queue = opts.queue || new AsyncWriteQueue(''); // paths are always explicit
     this._minFreeBytes = typeof opts.minFreeBytes === 'number' ? opts.minFreeBytes : MIN_FREE_BYTES;
     this._statfs = opts.statfs || statfsSync;
+    // Offline-converter seams (S8): write under a sibling staging dir name,
+    // stamp extra meta fields (e.g. {origin:'convert'}), and use exact
+    // conversation judgement fingerprints (byte-grade golden gate). Live
+    // writers pass none of these.
+    this._sessionsDirName = opts.sessionsDirName || 'sessions';
+    this._metaExtra = opts.metaExtra || null;
+    this._exactConvFps = !!opts.exactConvFps;
     this._sessions = new Map(); // sessionId → {paths, blobs, journal, convs, resolver}
     this._currentSid = null;    // last successfully resolved session (fallback routing §8.3)
     this._pendingNoSid = [];    // requests seen before any sid (cold-start heartbeats).
@@ -78,13 +85,14 @@ export class V2Writer {
       ...(userIdRaw && { userIdRaw }),
       ...(encoding && { userIdEncoding: encoding }),
       ...(this._leader && { leader: this._leader }),
+      ...(this._metaExtra || {}),
     };
-    const paths = ensureSessionDirSync(this._logDir, project, sessionId, meta);
+    const paths = ensureSessionDirSync(this._logDir, project, sessionId, meta, this._sessionsDirName);
     s = {
       paths,
       blobs: new BlobStore(paths),
       journal: new Journal(paths, this._queue),
-      convs: new ConversationStore(paths, this._queue),
+      convs: new ConversationStore(paths, this._queue, { exactFps: this._exactConvFps }),
       resolver: new ConvResolver(),
     };
     this._sessions.set(sessionId, s);
@@ -138,7 +146,10 @@ export class V2Writer {
         // the first resolved request. Bounded to avoid growing forever on a
         // process that only ever sees metadata-less traffic.
         if (this._pendingNoSid.length < 64) {
-          this._pendingNoSid.push({ entry, originalMessages });
+          // rid captured NOW: the v1 seam deletes entry.requestId at completion,
+          // which can happen before the hold queue flushes (review P3-4 — the
+          // held request would otherwise never get its done line).
+          this._pendingNoSid.push({ entry, originalMessages, rid: entry.requestId || null });
           return null;
         }
         sid = `noid-${process.pid}-${Date.now()}`;
@@ -154,9 +165,9 @@ export class V2Writer {
         const pending = this._pendingNoSid.splice(0);
         for (const p of pending) {
           const pseq = this._ingestInto(s, sid, p.entry, p.originalMessages);
-          const prid = p.entry && p.entry.requestId;
+          const prid = p.rid; // captured at hold time — the seam may have deleted entry.requestId by now
           if (pseq != null && prid) {
-            this._lateHandles.set(prid, { sid, seq: pseq, rid: prid });
+            this._lateHandles.set(prid, { s, sid, seq: pseq, rid: prid });
             if (this._lateHandles.size > 64) {
               this._lateHandles.delete(this._lateHandles.keys().next().value);
             }
@@ -165,7 +176,12 @@ export class V2Writer {
       }
 
       const seq = this._ingestInto(s, sid, entry, originalMessages);
-      return seq == null ? null : { sid, seq, rid: entry.requestId || `${seq}` };
+      // The handle carries the RESOLVED session object, not just the sid:
+      // resetSessions() (workspace switch) clears the _sessions map, and a
+      // completion arriving after the switch must still land its done/response
+      // lines in the session the request belonged to (review P2: a map lookup
+      // at completion time silently dropped them).
+      return seq == null ? null : { s, sid, seq, rid: entry.requestId || `${seq}` };
     } catch (err) {
       reportSwallowed('v2-write.ingestRequest', err);
       return null;
@@ -220,8 +236,10 @@ export class V2Writer {
    * registration for future sub-conversation keying, spec §10).
    * @param {{sid:string, seq:number}|null} handle - from ingestRequest
    * @param {object} entry - completed v1 entry (response populated)
+   * @param {{doneTs?: string}} [opts] - offline converter: historical done
+   *   timestamp (entry start + duration); live callers omit it (wall clock).
    */
-  ingestCompletion(handle, entry) {
+  ingestCompletion(handle, entry, opts = {}) {
     if (!this._enabled || !entry) return;
     try {
       // Held cold-start requests returned a null handle at ingestRequest time;
@@ -231,7 +249,9 @@ export class V2Writer {
         this._lateHandles.delete(entry.requestId);
       }
       if (!handle) return;
-      const s = this._sessions.get(handle.sid);
+      // Prefer the session object carried in the handle (survives
+      // resetSessions); the map lookup is only a legacy fallback.
+      const s = handle.s || this._sessions.get(handle.sid);
       if (!s) return;
 
       const resp = entry.response || null;
@@ -256,7 +276,7 @@ export class V2Writer {
       s.journal.writeDone({
         seq: handle.seq,
         rid,
-        ts: new Date().toISOString(),
+        ts: opts.doneTs || new Date().toISOString(),
         ...(typeof entry.duration === 'number' && { dur: entry.duration }),
         status: resp && resp.error ? 'error' : (respBody == null ? 'capture-failed' : 'ok'),
         ...(resp && typeof resp.status === 'number' && { http: resp.status }),

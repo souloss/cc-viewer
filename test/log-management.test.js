@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { validateLogPath, listLocalLogs, readLocalLog, deleteLogFiles, mergeLogFiles } from '../server/lib/log-management.js';
+import { validateLogPath, listLocalLogs, readLocalLog, deleteLogFiles } from '../server/lib/log-management.js';
 
 let tmpDir;
 
@@ -59,6 +59,18 @@ describe('listLocalLogs', () => {
     writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [makeEntry('t2', 'u2')]);
     const result = await listLocalLogs(tmpDir, 'proj');
     assert.equal(result.proj.length, 1);
+  });
+
+  it('never lists legacy .jsonl.zip archives (zip support removed 2026-07-14)', async () => {
+    const { isLogFileName, parseLogTs } = await import('../server/lib/log-management.js');
+    assert.equal(isLogFileName('proj_20260601_100000.jsonl.zip'), false);
+    assert.equal(parseLogTs('proj_20260601_100000.jsonl.zip'), '');
+    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [makeEntry('t2', 'u2')]);
+    const projectDir = join(tmpDir, 'proj');
+    writeFileSync(join(projectDir, 'proj_20260601_100000.jsonl.zip'), 'legacy zip bytes');
+    const result = await listLocalLogs(tmpDir, 'proj');
+    assert.equal(result.proj.length, 1, 'the zip must not appear in the list');
+    assert.equal(result.proj[0].file, 'proj/proj_20260602_100000.jsonl');
   });
 });
 
@@ -143,52 +155,6 @@ describe('deleteLogFiles', () => {
   });
 });
 
-describe('mergeLogFiles', () => {
-  it('merges two files into the first, deletes the second', async () => {
-    const e1 = makeEntry('2026-06-01T00:00:00Z', 'http://api/v1/messages');
-    const e2 = makeEntry('2026-06-01T00:00:01Z', 'http://api/v1/messages');
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [e1]);
-    writeLog(tmpDir, 'proj', 'proj_20260601_110000.jsonl', [e2]);
-    const target = await mergeLogFiles(tmpDir, [
-      'proj/proj_20260601_100000.jsonl',
-      'proj/proj_20260601_110000.jsonl',
-    ]);
-    assert.equal(target, 'proj/proj_20260601_100000.jsonl');
-    const merged = await readLocalLog(tmpDir, target);
-    assert.equal(merged.length, 2);
-  });
-
-  it('rejects fewer than 2 files', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/a.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects cross-project merge', async () => {
-    writeLog(tmpDir, 'a', 'a_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
-    writeLog(tmpDir, 'b', 'b_20260601_100000.jsonl', [makeEntry('t2', 'u2')]);
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['a/a_20260601_100000.jsonl', 'b/b_20260601_100000.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects archived (.jsonl.zip) files', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/a.jsonl.zip', 'proj/b.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects path traversal in file paths', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/../evil.jsonl', 'proj/b.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-});
-
 // ─────────────────────────── findPreviousSegment ───────────────────────────
 describe('findPreviousSegment', () => {
   let tmpDir;
@@ -225,13 +191,14 @@ describe('findPreviousSegment', () => {
     assert.equal(findPreviousSegment(untaggedCurrent, 'proj', null), join(tmpDir, 'proj_20260601_100000.jsonl'));
   });
 
-  it('includes archived .jsonl.zip predecessors and ignores foreign files', async () => {
+  it('ignores foreign files (non-jsonl, other projects, legacy .jsonl.zip)', async () => {
     const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    const zipped = touch('proj_20260601_100000.jsonl.zip', 'zip-bytes');
+    const expected = touch('proj_20260601_100000.jsonl');
     touch('notes.txt', 'hello');
     touch('otherproj_20260602_100000.jsonl');
+    touch('proj_20260602_120000.jsonl.zip', 'legacy zip bytes'); // zip support removed — never a candidate
     const current = touch('proj_20260603_100000.jsonl');
-    assert.equal(findPreviousSegment(current, 'proj'), zipped);
+    assert.equal(findPreviousSegment(current, 'proj'), expected);
   });
 
   it('is null-safe on garbage input', async () => {
@@ -239,23 +206,5 @@ describe('findPreviousSegment', () => {
     assert.equal(findPreviousSegment('', 'proj'), null);
     assert.equal(findPreviousSegment(join(tmpDir, 'proj_nots.jsonl'), 'proj'), null);
     assert.equal(findPreviousSegment(join(tmpDir, 'proj_20260601_100000.jsonl'), ''), null);
-  });
-});
-
-// ───────────────────── mergeLogFiles drops rotation sentinels ─────────────────────
-describe('mergeLogFiles rotation-sentinel strip', () => {
-  let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-mergesent-')); });
-  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
-
-  it('merged output contains the real entries but no ccvRotationContext frames', async () => {
-    const sentinel = JSON.stringify({ ccvRotationContext: 1, url: 'ccv://rotation-context', from: 'proj_20260601_100000.jsonl', teammateNames: [['p', 'alice']], timestamp: '2026-06-02T00:00:00.000Z' });
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('2026-06-01T00:00:01Z', '/v1/messages')]);
-    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [sentinel, makeEntry('2026-06-02T00:00:01Z', '/v1/messages')]);
-    await mergeLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl', 'proj/proj_20260602_100000.jsonl']);
-    const merged = readFileSync(join(tmpDir, 'proj', 'proj_20260601_100000.jsonl'), 'utf-8');
-    assert.ok(!merged.includes('ccvRotationContext'));
-    assert.ok(merged.includes('2026-06-01T00:00:01Z'));
-    assert.ok(merged.includes('2026-06-02T00:00:01Z'));
   });
 });

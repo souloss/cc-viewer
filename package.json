@@ -20,6 +20,7 @@
     "build:sourcemap": "CCV_SOURCEMAP=1 node build.js",
     "start": "node server.js",
     "lint:control-bytes": "node scripts/check-no-control-bytes.js",
+    "verify:wire-v2": "node cli.js verify",
     "pretest": "npm run lint:control-bytes",
     "pretest:cli": "npm run lint:control-bytes",
     "pretest:coverage": "npm run lint:control-bytes",

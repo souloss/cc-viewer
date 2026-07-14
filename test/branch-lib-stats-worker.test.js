@@ -39,8 +39,7 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-// 进程级私有 TMPDIR:stats-worker 解 zip 走 jsonl-archive 的 extract cache(基于 os.tmpdir())。
-// 在 import 目标模块前固定一个私有 TMPDIR,避免与并行测试争用共享 ccv-extract。
+// 进程级私有 TMPDIR:避免与并行测试争用共享临时目录。
 const PRIVATE_TMP = join(tmpdir(), `ccv-branch-sw-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(PRIVATE_TMP, { recursive: true });
 process.env.TMPDIR = PRIVATE_TMP;
@@ -473,25 +472,6 @@ describe('stats-worker 分支: 会话轮次统计与去重', () => {
     const p = Object.values(readStats(workRoot, projectName).files)[0].preview[0];
     assert.equal(p.length, 100);
     assert.ok(!/[\r\n]/.test(p));
-  });
-});
-
-// ─── parseJsonlFile 读取/解压失败 catch (lines 187-189) ───
-
-describe('stats-worker 分支: parseJsonlFile 读取/解压失败 catch', () => {
-  it('损坏 .jsonl.zip → resolveJsonlPath 解压抛错被 catch,结果为空 (lines 187-189)', () => {
-    const projectName = 'badzip';
-    const projectDir = join(workRoot, projectName);
-    mkdirSync(projectDir, { recursive: true });
-    writeFileSync(join(projectDir, 'corrupt.jsonl.zip'), 'not a real zip payload at all');
-    writeFileSync(join(projectDir, 'good.jsonl'), buildJsonlContent([
-      { body: { model: 'g' }, response: { body: { model: 'g', usage: { input_tokens: 2, output_tokens: 1 } } } },
-    ]));
-    dispatch({ type: 'init', logDir: workRoot, projectName });
-    const stats = readStats(workRoot, projectName);
-    assert.equal(stats.summary.requestCount, 1);
-    assert.ok(stats.files['corrupt.jsonl.zip']);
-    assert.equal(stats.files['corrupt.jsonl.zip'].summary.requestCount, 0);
   });
 });
 

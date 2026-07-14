@@ -18,6 +18,7 @@ import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
 import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs, parseRotationContextHead } from './lib/interceptor-core.js';
 import { V2Writer } from './lib/v2/v2-writer.js';
+import { resolveWireV2Mode, resolveWireV2ReadEnabled, isWriteMode } from './lib/v2/mode.js';
 
 
 
@@ -387,16 +388,25 @@ let LOG_FILE = _newLogFile;
 const _writeQueue = new AsyncWriteQueue(() => LOG_FILE);
 
 // Wire-v2 dual-write tap (S3, docs/refactor/WIRE_FORMAT_V2.md §13): a side
-// observer of the v1 write path, gated by CCV_WIRE_V2 (default OFF). Every
-// V2Writer method is internally caught + reportSwallowed — a v2 failure can
-// never disturb v1. IM workers stay v1-only until S6b wires their watcher
-// (spec §10). Project resolves through a getter because workspace mode rebinds
-// _projectName at runtime. Escape hatch / rollback: CCV_WIRE_V2=0 (or unset).
+// observer of the v1 write path, default OFF. The mode resolves ONCE at boot
+// (startup-only switch, user decision): env CCV_WIRE_V2 ('1'/'0') overrides
+// the persisted LOG_DIR/wire-v2.json written by the logs-modal toggle /
+// POST /api/wire-v2-mode. Every V2Writer method is internally caught +
+// reportSwallowed — a v2 failure can never disturb v1. IM workers stay
+// v1-only until S6b wires their watcher (spec §10). Project resolves through
+// a getter because workspace mode rebinds _projectName at runtime.
+// Escape hatch / rollback: CCV_WIRE_V2=0 (beats the config file).
+const _wireV2Mode = resolveWireV2Mode(LOG_DIR);
+// wire-v2 S5: read-side switch, resolved ONCE at boot like the write mode
+// (startup-only semantics). Independent kill switch: CCV_WIRE_V2_READ=0 forces
+// v1 reads regardless of the persisted 'dual-read' choice (plan F9).
+const _wireV2ReadEnabled = resolveWireV2ReadEnabled(LOG_DIR).enabled;
+export { _wireV2ReadEnabled };
 const _v2Writer = new V2Writer({
   logDir: LOG_DIR,
   project: () => _projectName,
   instanceId: INSTANCE_ID,
-  enabled: process.env.CCV_WIRE_V2 === '1' && !process.env.CCV_IM_PLATFORM,
+  enabled: isWriteMode(_wireV2Mode.mode) && !process.env.CCV_IM_PLATFORM,
   ...(_isTeammate && {
     leader: {
       ...(_teammateName && { agentName: _teammateName }),
@@ -683,16 +693,25 @@ export function setupInterceptor() {
 
   // wire-v2: the v2 queue drains alongside v1's on every exit path — close()
   // falls back to synchronous drain, so a Ctrl-C cannot strand queued v2 lines.
+  // The 2s race is insurance now that TWO queues gate exit (review P2): a
+  // hung async appendFile (network FS, etc.) must never hold Ctrl-C hostage —
+  // the pre-existing v1-only path had the same theoretical hang with half the
+  // surface. The sync-drain fallback inside close() is not raceable (blocking),
+  // which is fine: it cannot hang on the event loop.
+  const _closeQueuesBounded = () => Promise.race([
+    Promise.all([_writeQueue.close(), _v2Writer.close()]),
+    new Promise(resolve => { const t = setTimeout(resolve, 2000); if (t.unref) t.unref(); }),
+  ]);
   process.on('SIGINT', () => {
-    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer()).finally(() => process.exit(0));
+    _closeQueuesBounded().then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('SIGTERM', () => {
-    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer()).finally(() => process.exit(0));
+    _closeQueuesBounded().then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('beforeExit', () => {
-    Promise.all([_writeQueue.close(), _v2Writer.close()]).then(() => cleanupViewer());
+    _closeQueuesBounded().then(() => cleanupViewer());
   });
 
   const _originalFetch = globalThis.fetch;
@@ -822,8 +841,11 @@ export function setupInterceptor() {
     // delta branch below reassigns requestEntry.body.messages to a slice — the
     // v2 store needs the full wire truth (WIRE_FORMAT_V2.md §13). The array
     // itself is never mutated (slice creates a new one), so holding the
-    // reference is safe. Handle flows to the completion seam below.
-    const _v2OriginalMessages = (requestEntry && requestEntry.body && Array.isArray(requestEntry.body.messages))
+    // reference is safe. GATED on enabled and RELEASED right after the sync
+    // ingest below: without that, default-off users would keep the full
+    // pre-delta array alive for the request's in-flight duration for nothing
+    // (review P2 — violates the default-off zero-overhead contract).
+    let _v2OriginalMessages = (_v2Writer.enabled && requestEntry && requestEntry.body && Array.isArray(requestEntry.body.messages))
       ? requestEntry.body.messages : null;
     let _v2Handle = null;
     if (_deltaStorageEnabled && requestEntry?.mainAgent && Array.isArray(requestEntry.body?.messages)) {
@@ -909,6 +931,7 @@ export function setupInterceptor() {
       // placeholder's role on the v2 side (req line carries no body). The bare
       // catch is belt-and-braces for a broken guard, same as _writeCompletedEntry.
       try { _v2Handle = _v2Writer.ingestRequest(requestEntry, _v2OriginalMessages); } catch { }
+      _v2OriginalMessages = null; // release: the sync ingest is its only consumer
     }
 
     // 在发起请求前先写入一条未完成的条目，让前端可以检测在途请求

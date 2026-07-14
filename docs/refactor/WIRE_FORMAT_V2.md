@@ -26,7 +26,7 @@ LOG_DIR/<project>/sessions/<session_id>/
 
 - `<project>`：与 v1 相同的 project 目录名（`basename(cwd)` 清洗后），v1 平铺 `.jsonl` 与 v2 `sessions/` 子目录**共存于同一 project 目录**，双写期互不干扰。
 - `<session_id>`：从 `body.metadata.user_id` 解析出的 UUID（§8）；无法解析时的兜底见 §8.3。
-- `<convKey>`：`main` ｜ `sub-<tool_use.id 前 12 字符>`（fallback：`sub-fp-<首 user msg 指纹前 12>`）｜ `misc`（countTokens 等无对话归属）。**路径组件白名单 `[a-zA-Z0-9._-]`，超界字符替换为 `_`**（防注入，v1 先例 `interceptor.js:353`）。
+- `<convKey>`：`main` ｜ `sub-<tool_use.id 后 12 字符>`（id 前缀 `toolu_01…` 低熵，尾部高熵）｜ fallback `sub-fp-<8位FNV指纹>`，并行同 prompt 无注册 id 时追加序号 `sub-fp-<fp>-<n>` ｜ `misc`（countTokens 等无对话归属）。**路径组件白名单 `[a-zA-Z0-9._-]`，超界字符替换为 `_`**（防注入，v1 先例 `interceptor.js:353`）。
 - `e<N>`：epoch 文件，N 从 0 起；main 对话在 /clear 边界 N+1（§9.4）；sub/misc 恒为 e0。
 - 目录创建：session/conv 首写前 `mkdirSync(recursive)` **同步**执行（异步 mkdir 会输给 write queue 的 microtask drain → ENOENT 被吞）。
 - 命名消歧：`workflow-live.js` 的 ultraAgent 运行日志也叫 `journal.jsonl`，位于完全不同的路径体系（session 传输目录），与本格式无关。
@@ -126,7 +126,7 @@ LOG_DIR/<project>/sessions/<session_id>/
 { "seq": 45, "rid": "…", "t": "ctl", "op": "compact", "keep": 2 }                          // v1 §3.5 /compact continuation 标记
 ```
 
-- **写侧判定规则（穷尽）**：设 conv 上一状态计数 P、末位指纹 F（进程内存态，进程重启后 P=0）：
+- **写侧判定规则（穷尽）**：设 conv 上一状态计数 P、末位指纹 F（进程内存态，进程重启后 P=0）。**判定指纹 = v1 的 `fingerprintMsg`（interceptor-core，对 tool_result 含 40 字符内容分量）**，与 v1 Plan C 完全同源——不用客户端共享的 `messageFingerprint`（其 tool_result 仅按 id，同 id 换内容不可见，评审已定级为双写分歧盲区）：
   - `len==P && tailFp==F` → 无事件（journal 仍记 req/done，`evt` 省略）
   - `len==P && tailFp!=F && P>0` → `ctl replace-tail`（v1 :802-808 同判定；实现另要求新旧 tailFp 均非空——空 fp 消息退化为 snapshot，安全偏差）
   - `len>P && messages[P-1] 指纹==F` → `append`（切片 `slice(P)`）
@@ -154,7 +154,7 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 
 | v1 § | 窗口 | v2 对策 |
 |---|---|---|
-| §3.1 | plan-mode 2-msg 短窗口（故意发） | 写侧落 `snapshot(short-window)`，读侧逆锚物化（共享 findReverseAnchor） |
+| §3.1 | plan-mode 2-msg 短窗口（故意发） | 写侧落 `snapshot(shrunk)`（不单列 short-window，见 §6 reason 语义），读侧逆锚物化（共享 findReverseAnchor） |
 | §3.2 | K 尾重叠+后段新增（故意发） | 同上：前缀测试不过 → snapshot，读侧解决 |
 | §3.3 | SUGGESTION MODE 末位替换 | 写侧同 v1 判定（len==P & fp 变）→ `ctl replace-tail`，携带新末位 msg |
 | §3.4 | /clear 首个 checkpoint | 共享谓词判 /clear → 新 epoch 文件，journal `boundary:clear` |
@@ -189,7 +189,7 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 | `mainAgent` | kind==main → true；teammate 条目按 v1 双标语义（re-join 时依 meta 复原） |
 | `teammate` / `teamName` | meta.leader 存在时打标 |
 | `_deltaFormat` / `_totalMessageCount` / `_conversationId` / `_isCheckpoint` | 合成 delta envelope：`_deltaFormat:1`、`_totalMessageCount`=物化计数、`_conversationId:'mainAgent'`、epoch 起点/物化重置点 `_isCheckpoint:true` |
-| `_seq` / `_seqEpoch` | journal seq / `v2:<sessionId>`（仅 main 非 teammate，同 v1 语义） |
+| `_seq` / `_seqEpoch` | journal seq / `v2:<sessionId>`（仅 main 非 teammate，同 v1 语义。注意此 `v2:` 前缀是客户端 seq 作用域的不透明串，与 §12 寻址串 `v2:<project>/<sid>` 是两个不同命名空间，勿混用） |
 | `_staleReorder` / `_reconstructBroken` | **绝不输出**（v2 源头无倒置；物化降级为内部态） |
 | `proxyProfile` / `proxyUrl` | journal req.proxy |
 | `ccvRotationContext` 哨兵 | 不再产生（无轮转）；`teammateNames` 等价信息由 re-join 元数据合成同形哨兵，保客户端零改动 |
@@ -202,7 +202,7 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 - `listLocalLogs`：v2 目录项 `{file:"v2:<project>/<sid>", kind:"v2", timestamp:meta.startTs, size:目录字节和, turns:journal main-done 计数, preview:首 user msg 截断, instanceId:meta.instanceId, archived:false}`；归属过滤用 meta.instanceId（替代 v1 文件名 pid 前缀）。
 - `downloadLog`：`format=rebuilt`（默认）→ 适配器合成 v1 形状 `.jsonl` 流式下载；`format=raw` → session 目录打 zip。
 - `workspace-registry.getWorkspaces` 计数：`*.jsonl` glob 之外累加 `sessions/*/journal.jsonl` 的存在与目录尺寸。
-- 归档：v2 session 目录整体 zip 为 `<sid>.v2.zip`（读取经 `resolveLogSource` 透明解压，沿 jsonl-archive 缓存机制）；merge 语义对 v2 不适用（session 天然独立），API 对 v2 项返回明确错误。
+- 归档：v1 的日志归档/合并功能已于 2026-07-14 整体移除（jsonl-archive 模块已删）。若未来需要 v2 session 目录打包（S6a raw 下载），压缩与缓存机制需另行设计,不再有可沿用的基座；merge 语义对 v2 不适用（session 天然独立）。
 
 ## §13 写路径时序（S3 接线规范）
 
@@ -213,6 +213,7 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 
 ## §14 读侧容错（对应 v1 §5）
 
+- **reader 版本门禁（任何未来格式演进的前置条款）**：写侧在 meta.json 与 journal 哨兵首行双处盖章 `wireFormat`（常量单一所有者 `layout.js WIRE_FORMAT_VERSION`）。读侧（`readSession`）必须校验两处（哨兵优先，逐文件自描述），版本未知/更高 → 整会话**拒读**：`readSession` 返回 `unsupported:true` + 空折叠，adapter 拒 yield + reportSwallowed，列表跳过该会话，verify 将其计入 `unsupportedSessions` 并使报告 FAILED（金门不允许带覆盖缺口通过）。版本字段缺失（创建撕裂）按当前版本容忍。理由：`isV2SessionDir` 只是存在性探针，若无本条款，未来 wireFormat:3 目录会被旧读路径当 v2 静默误读渲染垃圾。任何非增量格式变更必须先递增 `WIRE_FORMAT_VERSION`，且新 reader 必须先于（或随同）新 writer 发布。
 - journal 尾行截断：JSON.parse 失败即丢弃该行（pendingTail 思路，v1 同款）。
 - journal 行引用的 blob/conv 行暂缺（写序窗口内）：该 entry 暂标不完整，watcher 下一 tick 重试；持续缺失（孤儿引用，理论上仅目录被外部篡改）→ 跳过 + reportSwallowed。
 - conv 文件存在而 journal 无对应行（崩溃孤儿）：物化器忽略无 journal 佩戴的 conv 行。
@@ -236,4 +237,4 @@ S4 双写期以实测值替换本表并回填状态表。
 
 - **双写期**：v1 与 v2 副本并存（v2 增量 ≈ v1 的 4–6%，可接受）；任何工具不得自动删除任一侧。
 - **S9 切换后**：v1 存量文件与双写期 v1 副本的清理**由用户显式决策**，工具只提供辅助（`ccv convert` 完成校验后输出"可安全归档/删除"清单，实际删除走既有 UI 的软删回收站路径）；本重构不内置任何自动回收。
-- v1 读取能力（`.jsonl`/`.jsonl.zip`）长期保留，未转换的旧文件永远可浏览。
+- v1 `.jsonl` 读取能力长期保留，未转换的旧文件永远可浏览。历史 `.jsonl.zip` 归档已随归档功能移除（2026-07-14）不再支持读取——需手动解压回 `.jsonl` 方可浏览/迁移。

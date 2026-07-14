@@ -8,6 +8,17 @@
 import { mkdirSync, writeFileSync, renameSync, existsSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 
+// The wire-format version this build writes AND the only one it reads.
+// Stamped into meta.json and the journal sentinel at session creation; the
+// read side refuses sessions carrying any OTHER version (spec §14 reader
+// version gate) — a future wireFormat:3 dir must never be silently misread
+// as v2. A missing version (torn creation) is treated as the current one.
+export const WIRE_FORMAT_VERSION = 2;
+
+export function isSupportedWireFormat(v) {
+  return v == null || v === WIRE_FORMAT_VERSION;
+}
+
 // Path-component whitelist (spec §2): anything outside [a-zA-Z0-9._-] is replaced
 // with '_'; empty / dot-only results are rejected to '_'. Guards convKey /
 // sessionId derived from wire content against path injection (plan risk F14).
@@ -17,9 +28,12 @@ export function sanitizePathComponent(name) {
   return cleaned;
 }
 
-/** All absolute paths of one session directory, derived once and passed around. */
-export function sessionPaths(logDir, project, sessionId) {
-  const dir = join(logDir, sanitizePathComponent(project), 'sessions', sanitizePathComponent(sessionId));
+/** All absolute paths of one session directory, derived once and passed around.
+ *  `sessionsDirName` lets the offline converter target a sibling staging root
+ *  (`sessions-migrating`) with the exact same layout; live writers keep the
+ *  default and never pass it. */
+export function sessionPaths(logDir, project, sessionId, sessionsDirName = 'sessions') {
+  const dir = join(logDir, sanitizePathComponent(project), sanitizePathComponent(sessionsDirName), sanitizePathComponent(sessionId));
   return {
     dir,
     metaPath: join(dir, 'meta.json'),
@@ -71,8 +85,8 @@ export function writeFileAtomicSync(finalPath, data) {
  *         userIdEncoding, leader?, im? } — spec §3. Existing meta is never
  * rewritten here (later additive updates go through updateMetaSync).
  */
-export function ensureSessionDirSync(logDir, project, sessionId, meta = {}) {
-  const paths = sessionPaths(logDir, project, sessionId);
+export function ensureSessionDirSync(logDir, project, sessionId, meta = {}, sessionsDirName = 'sessions') {
+  const paths = sessionPaths(logDir, project, sessionId, sessionsDirName);
   mkdirSync(paths.conversationsDir, { recursive: true });
   mkdirSync(paths.blobsDir, { recursive: true });
   if (!existsSync(paths.metaPath)) {
@@ -80,7 +94,7 @@ export function ensureSessionDirSync(logDir, project, sessionId, meta = {}) {
     // passes overlapping keys (defensive — current callers pass none of them).
     const record = {
       ...meta,
-      wireFormat: 2,
+      wireFormat: WIRE_FORMAT_VERSION,
       sessionId,
       project,
       startTs: meta.startTs || new Date().toISOString(),
@@ -92,7 +106,7 @@ export function ensureSessionDirSync(logDir, project, sessionId, meta = {}) {
     // hazard as the v1 rotation sentinel: a watcher may read the file the
     // instant it appears). 'wx' create-exclusive keeps a concurrent creator
     // from double-writing the sentinel.
-    const sentinel = JSON.stringify({ ph: 'meta', wireFormat: 2, sessionId }) + '\n';
+    const sentinel = JSON.stringify({ ph: 'meta', wireFormat: WIRE_FORMAT_VERSION, sessionId }) + '\n';
     try {
       writeFileSync(paths.journalPath, sentinel, { flag: 'wx' });
     } catch (err) {

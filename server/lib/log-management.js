@@ -1,14 +1,51 @@
-import { existsSync, realpathSync, unlinkSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { readFile, writeFile, appendFile, stat, readdir } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
-import { renameSyncWithRetry } from './file-api.js';
+import { existsSync, realpathSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFile, stat, readdir } from 'node:fs/promises';
 import { join, sep, dirname, basename } from 'node:path';
 import { reconstructEntries } from './delta-reconstructor.js';
-import { streamReconstructedEntriesAsync } from './log-stream.js';
-import { archiveJsonl, resolveJsonlPath } from './jsonl-archive.js';
 import { logFileMatcher } from './interceptor-core.js';
+import { sanitizePathComponent } from './v2/layout.js';
+import { listV2Sessions } from './v2/adapter.js';
+
+// wire-v2 S5 addressing (spec §12): 'v2:<project>/<session_id>' in every
+// existing ?file= parameter slot. Components must survive the same whitelist
+// the writer used to create them — anything else (.., separators, empty) is
+// rejected before a single path join happens.
+export const V2_REF_RE = /^v2:([^/]+)\/([^/]+)$/;
+
+/** Parse a v2 addressing string → { project, sessionId } or null. */
+export function parseV2Ref(file) {
+  const m = typeof file === 'string' ? file.match(V2_REF_RE) : null;
+  if (!m) return null;
+  if (m[1] !== sanitizePathComponent(m[1]) || m[2] !== sanitizePathComponent(m[2])) return null;
+  return { project: m[1], sessionId: m[2] };
+}
 
 export function validateLogPath(logDir, file) {
+  // v2 branch: strip the prefix, then the realpath must land inside
+  // LOG_DIR/<project>/sessions/<session_id>/ (spec §12). Returns the absolute
+  // session DIRECTORY — log-stream's generators dispatch on it.
+  if (typeof file === 'string' && file.startsWith('v2:')) {
+    const ref = parseV2Ref(file);
+    if (!ref) {
+      const err = new Error('Invalid v2 log reference');
+      err.code = 'ACCESS_DENIED';
+      throw err;
+    }
+    const dir = join(logDir, ref.project, 'sessions', ref.sessionId);
+    if (!existsSync(join(dir, 'journal.jsonl'))) {
+      const err = new Error('File not found');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    const realPath = realpathSync(dir);
+    const realLogDir = realpathSync(logDir);
+    if (!realPath.startsWith(realLogDir + sep)) {
+      const err = new Error('Access denied');
+      err.code = 'ACCESS_DENIED';
+      throw err;
+    }
+    return realPath;
+  }
   const filePath = join(logDir, file);
   if (!existsSync(filePath)) {
     const err = new Error('File not found');
@@ -25,15 +62,15 @@ export function validateLogPath(logDir, file) {
   return realPath;
 }
 
-function isLogFileName(name) {
-  return name.endsWith('.jsonl') || name.endsWith('.jsonl.zip');
+export function isLogFileName(name) {
+  return name.endsWith('.jsonl');
 }
 
-// 解析日志文件名里的时间戳 `YYYYMMDD_HHMMSS`（带不带 `<pid>__` 前缀、归档与否都适用）。
+// 解析日志文件名里的时间戳 `YYYYMMDD_HHMMSS`（带不带 `<pid>__` 前缀都适用）。
 // 用于「按时间排序 / 判最新」——文件名整串排序会把 `<pid>__` 前缀（'1' < 'c'）的最新文件排到最底，
-// 必须按时间戳排。无法解析时返回 ''（排到最后）。listLocalLogs 与 archiveLogFiles 共用，防漂移。
-function parseLogTs(name) {
-  const m = name.match(/_(\d{8}_\d{6})\.jsonl(\.zip)?$/);
+// 必须按时间戳排。无法解析时返回 ''（排到最后）。listLocalLogs / v2 convert 共用，防漂移。
+export function parseLogTs(name) {
+  const m = name.match(/_(\d{8}_\d{6})\.jsonl$/);
   return m ? m[1] : '';
 }
 
@@ -64,10 +101,9 @@ export async function listLocalLogs(logDir, currentProjectName, { instanceId = n
       } catch { }
       for (const f of files) {
         if (!showAll && !owns(f)) continue;
-        const match = f.match(/^(.+?)_(\d{8}_\d{6})\.jsonl(\.zip)?$/);
+        const match = f.match(/^(.+?)_(\d{8}_\d{6})\.jsonl$/);
         if (!match) continue;
         const ts = match[2];
-        const archived = !!match[3];
         // 从前缀解析归属实例 id 用于行内 badge：`<pid>__<project>` → pid；`<project>` → 无（null）。
         // 项目名自身可含下划线，故用 endsWith('__'+project) 精确剥离，而非按 '__' split。
         const g1 = match[1];
@@ -78,10 +114,10 @@ export async function listLocalLogs(logDir, currentProjectName, { instanceId = n
         let size;
         try { size = (await stat(filePath)).size; } catch { continue; }
         if (size === 0) continue;
-        const stats = statsFiles?.[f] || (archived ? statsFiles?.[f.slice(0, -4)] : null);
+        const stats = statsFiles?.[f] || null;
         const turns = stats?.summary?.sessionCount || 0;
         if (!grouped[project]) grouped[project] = [];
-        grouped[project].push({ file: `${project}/${f}`, timestamp: ts, size, turns, preview: stats?.preview || [], archived, instanceId: fileInstanceId });
+        grouped[project].push({ file: `${project}/${f}`, timestamp: ts, size, turns, preview: stats?.preview || [], instanceId: fileInstanceId });
       }
       // 按时间戳降序（文件名降序兜底，处理同秒 tie，保证确定性）。
       // 不能再依赖文件名整串排序：`<pid>__` 前缀会把最新日志排到最底。
@@ -97,13 +133,65 @@ export async function listLocalLogs(logDir, currentProjectName, { instanceId = n
   return { ...grouped, _currentProject: currentProjectName || '' };
 }
 
+// meta.startTs (ISO) → the v1 list's compact local-time stamp 'YYYYMMDD_HHMMSS'
+// so formatTimestamp / the desc sort work on v2 items unchanged.
+function compactLocalTs(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * wire-v2 S5: the v2 counterpart of listLocalLogs — one item per session dir,
+ * addressed as `v2:<project>/<sid>` (spec §12), same grouped output shape so
+ * the frontend log table renders it unchanged. Ownership filtering uses
+ * meta.instanceId (the successor of the v1 `<pid>__` filename prefix): the
+ * default instance (null) owns untagged sessions, a --pid instance owns its
+ * own — exact parity with logFileMatcher semantics. Teammate sessions
+ * (meta.leader present) are NOT listed: the adapter re-joins them into their
+ * leader's stream, so a separate row would double-show that traffic.
+ */
+export function listV2Logs(logDir, currentProjectName, { instanceId = null, showAll = false } = {}) {
+  const grouped = {};
+  if (!existsSync(logDir)) return { ...grouped, _currentProject: currentProjectName || '' };
+  for (const entry of readdirSync(logDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const project = entry.name;
+    try {
+      for (const s of listV2Sessions(join(logDir, project))) {
+        if (s.leader) continue;
+        if (!showAll && (s.instanceId ?? null) !== (instanceId ?? null)) continue;
+        if (s.size === 0) continue;
+        if (!grouped[project]) grouped[project] = [];
+        grouped[project].push({
+          file: `v2:${project}/${s.sid}`,
+          kind: 'v2',
+          timestamp: compactLocalTs(s.startTs),
+          size: s.size,
+          turns: s.turns,
+          preview: s.preview ? [s.preview] : [],
+          instanceId: s.instanceId,
+        });
+      }
+      if (grouped[project]) {
+        grouped[project].sort((a, b) =>
+          b.timestamp.localeCompare(a.timestamp) || b.file.localeCompare(a.file));
+      }
+    } catch (err) {
+      console.error(`[CC Viewer] listV2Logs: 跳过无法读取的项目 ${project}:`, err?.message || err);
+      continue;
+    }
+  }
+  return { ...grouped, _currentProject: currentProjectName || '' };
+}
+
 /**
  * Locate the log segment immediately preceding currentFile in the same
  * directory, for the post-rotation teammate backfill. Ownership is enforced
  * via logFileMatcher(projectName, instanceId) — a naive "older file in the
  * same dir" scan would cross --pid instances and return another
- * conversation's log. Archived (.jsonl.zip) predecessors are valid results:
- * readers resolve them transparently via resolveJsonlPath. Returns the
+ * conversation's log. Returns the
  * absolute path, or null when there is no strictly-older owned segment.
  */
 export function findPreviousSegment(currentFile, projectName, instanceId = null) {
@@ -130,9 +218,16 @@ export function findPreviousSegment(currentFile, projectName, instanceId = null)
   }
 }
 
+// v1 `.jsonl` ONLY — a `v2:` ref would validate but then mis-join below;
+// v2 reads go through log-stream's session-dir dispatch, never this helper.
 export async function readLocalLog(logDir, file) {
-  validateLogPath(logDir, file);
-  const filePath = resolveJsonlPath(join(logDir, file));
+  const realPath = validateLogPath(logDir, file);
+  if (file.startsWith('v2:')) {
+    const err = new Error('readLocalLog does not support v2 refs');
+    err.code = 'INVALID_INPUT';
+    throw err;
+  }
+  const filePath = realPath;
   const content = await readFile(filePath, 'utf-8');
   const parsed = content.split('\n---\n').filter(line => line.trim()).map(entry => {
     try { return JSON.parse(entry); } catch { return null; }
@@ -171,183 +266,4 @@ export function deleteLogFiles(logDir, files) {
     }
   }
   return results;
-}
-
-export async function mergeLogFiles(logDir, files) {
-  if (!Array.isArray(files) || files.length < 2) {
-    const err = new Error('At least 2 files required');
-    err.code = 'INVALID_INPUT';
-    throw err;
-  }
-  for (const f of files) {
-    if (typeof f === 'string' && f.endsWith('.jsonl.zip')) {
-      const err = new Error('Cannot merge archived (.jsonl.zip) files');
-      err.code = 'INVALID_INPUT';
-      throw err;
-    }
-  }
-  const projects = new Set(files.map(f => f.split(/[\\/]/)[0]));
-  if (projects.size !== 1) {
-    const err = new Error('All files must belong to the same project');
-    err.code = 'INVALID_INPUT';
-    throw err;
-  }
-  for (const f of files) {
-    if (f.includes('..')) {
-      const err = new Error('Invalid file path');
-      err.code = 'INVALID_INPUT';
-      throw err;
-    }
-    if (!existsSync(join(logDir, f))) {
-      const err = new Error(`File not found: ${f}`);
-      err.code = 'NOT_FOUND';
-      throw err;
-    }
-  }
-  const MAX_MERGE_SIZE = 400 * 1024 * 1024;
-  let totalSize = 0;
-  for (const f of files) {
-    totalSize += (await stat(join(logDir, f))).size;
-  }
-  if (totalSize > MAX_MERGE_SIZE) {
-    const err = new Error(`Merged size (${(totalSize / 1024 / 1024).toFixed(1)}MB) exceeds ${MAX_MERGE_SIZE / 1024 / 1024}MB limit`);
-    err.code = 'INVALID_INPUT';
-    throw err;
-  }
-  const targetFile = files[0];
-  const targetPath = join(logDir, targetFile);
-  const tmpPath = `${targetPath}.merge-tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
-  await writeFile(tmpPath, '');
-  for (const f of files) {
-    const filePath = join(logDir, f);
-    await streamReconstructedEntriesAsync(filePath, async (segment) => {
-      let chunk = '';
-      for (const entry of segment) {
-        // Rotation-context sentinels describe a predecessor relationship that a
-        // merged file no longer has — drop them from the merge product.
-        if (entry.ccvRotationContext) continue;
-        // 乱序/断裂条目若未被补偿回填（messages 仍是裸 delta 切片），丢弃不写：
-        // 剥除 _deltaFormat 后它会伪装成旧格式全量条目，未来读取时把累积状态
-        // 重置成几条切片，比丢掉这条（内容已被更新条目取代）破坏大得多
-        if ((entry._staleReorder || entry._reconstructBroken) &&
-            entry._totalMessageCount && Array.isArray(entry.body?.messages) &&
-            entry.body.messages.length !== entry._totalMessageCount) {
-          continue;
-        }
-        delete entry._deltaFormat;
-        delete entry._totalMessageCount;
-        delete entry._conversationId;
-        delete entry._isCheckpoint;
-        // 信号对的另一半同剥：_isCheckpoint 已剥后，孤立的 _inPlaceReplaceDetected
-        // 永远无法触发双信号短路（applyInPlaceLastMsgReplace 要求两者同真），留着
-        // 只会误导未来读取；_eagerSnapshot 为已废弃字段（写入点已删），仅历史日志残留
-        delete entry._inPlaceReplaceDetected;
-        delete entry._eagerSnapshot;
-        // 完成序倒置守卫的内部字段不落盘：合并产物是已重建的全量条目，
-        // seq 序号与 stale/broken 标记只在重建期有意义，泄漏会让后续读取误判
-        delete entry._seq;
-        delete entry._seqEpoch;
-        delete entry._staleReorder;
-        delete entry._reconstructBroken;
-        chunk += JSON.stringify(entry) + '\n---\n';
-      }
-      await appendFile(tmpPath, chunk);
-    });
-  }
-  renameSyncWithRetry(tmpPath, targetPath);
-  for (let i = 1; i < files.length; i++) {
-    unlinkSync(join(logDir, files[i]));
-  }
-  return targetFile;
-}
-
-function migrateStatsCacheKey(projectDir, projectName, oldFileName, newFileName) {
-  const statsFile = join(projectDir, `${projectName}.json`);
-  if (!existsSync(statsFile)) return;
-  try {
-    const stats = JSON.parse(readFileSync(statsFile, 'utf-8'));
-    if (stats?.files?.[oldFileName]) {
-      const entry = stats.files[oldFileName];
-      try {
-        const zipStat = statSync(join(projectDir, newFileName));
-        entry.size = zipStat.size;
-        entry.lastModified = zipStat.mtime.toISOString();
-      } catch {}
-      stats.files[newFileName] = entry;
-      delete stats.files[oldFileName];
-      writeFileSync(statsFile, JSON.stringify(stats, null, 2));
-    }
-  } catch {}
-}
-
-export function archiveLogFiles(logDir, files) {
-  const archived = [];
-  const skipped = [];
-  const failed = [];
-
-  const byProject = new Map();
-  for (const f of files) {
-    if (!f || typeof f !== 'string' || f.includes('..') || !f.endsWith('.jsonl')) {
-      failed.push({ file: f, reason: 'Invalid file name' });
-      continue;
-    }
-    const parts = f.split(/[\\/]/);
-    if (parts.length < 2) {
-      failed.push({ file: f, reason: 'Invalid file path' });
-      continue;
-    }
-    const project = parts[0];
-    if (!byProject.has(project)) byProject.set(project, []);
-    byProject.get(project).push(f);
-  }
-
-  let realLogDir;
-  try { realLogDir = realpathSync(logDir); }
-  catch (err) { return { archived, skipped, failed: files.map(f => ({ file: f, reason: err.message })) }; }
-
-  for (const [project, projectFiles] of byProject) {
-    const projectDir = join(logDir, project);
-    let latest = null;
-    try {
-      // 「最新文件不允许归档」——按时间戳判最新（与 listLocalLogs 同口径），
-      // 否则文件名整串排序会把 `<pid>__` 前缀的最新活跃日志误判成非最新而放行归档。
-      const projectEntries = readdirSync(projectDir)
-        .filter(isLogFileName)
-        .sort((a, b) => parseLogTs(b).localeCompare(parseLogTs(a)) || b.localeCompare(a));
-      latest = projectEntries[0] || null;
-    } catch {}
-
-    for (const f of projectFiles) {
-      const fileName = f.split(/[\\/]/).slice(1).join('/');
-      if (latest && fileName === latest) {
-        skipped.push({ file: f, reason: 'latest-not-allowed' });
-        continue;
-      }
-      const filePath = join(logDir, f);
-      let realPath;
-      try {
-        if (!existsSync(filePath)) { failed.push({ file: f, reason: 'Not found' }); continue; }
-        realPath = realpathSync(filePath);
-        if (realPath !== realLogDir && !realPath.startsWith(realLogDir + sep)) {
-          failed.push({ file: f, reason: 'Access denied' });
-          continue;
-        }
-      } catch (err) {
-        failed.push({ file: f, reason: err.message });
-        continue;
-      }
-
-      const result = archiveJsonl(realPath);
-      if (result.ok) {
-        archived.push(f);
-        migrateStatsCacheKey(projectDir, project, fileName, fileName + '.zip');
-      } else if (result.skipped) {
-        skipped.push({ file: f, reason: result.skipped });
-      } else {
-        failed.push({ file: f, reason: result.error || 'archive failed' });
-      }
-    }
-  }
-
-  return { archived, skipped, failed };
 }

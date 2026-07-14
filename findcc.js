@@ -138,13 +138,13 @@ export let LOG_DIR = resolveLogDir();
  * will automatically see the updated value.
  */
 export function setLogDir(dir) {
-  if (!dir || typeof dir !== 'string') return;
+  if (!dir || typeof dir !== 'string') return false;
   const raw = dir.trim();
-  if (!raw) return;
+  if (!raw) return false;
   const resolved = resolve(raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw);
   // Security: restrict to home directory or /tmp to prevent writes to system directories
   const home = homedir();
-  if (!resolved.startsWith(home) && !resolved.startsWith('/tmp/')) return;
+  if (!resolved.startsWith(home) && !resolved.startsWith('/tmp/')) return false;
   LOG_DIR = resolved;
   // workspace registry file location changes with LOG_DIR; the allowlist cache (including
   // registered workspaces) must be invalidated. Lazy import to avoid circular dependency
@@ -152,6 +152,7 @@ export function setLogDir(dir) {
   import('./server/lib/file-access-policy.js')
     .then(m => m.bumpWorkspacesVersion?.())
     .catch(() => { /* CLI-only entry points may not have the policy module loaded; side-effect free */ });
+  return true;
 }
 
 // npm package name candidates (priority order)

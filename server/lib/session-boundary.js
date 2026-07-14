@@ -120,6 +120,46 @@ export function isSessionBoundary(entry, { prevCount, count, prevUserId, userId 
 }
 
 /**
+ * Equality normalization (wire-v2 S4 decision 2026-07-14): the CC client
+ * migrates ttl-based cache_control breakpoints onto OLD messages
+ * mid-conversation, rewriting string content in place into a block array
+ * carrying cache_control. v1's delta format cannot express an in-place
+ * old-message mutation, and no consumer depends on cache_control placement —
+ * so EQUALITY judgements (verify's messagesDigest, the converter's exactFps)
+ * normalize each message in two steps before comparing:
+ *   1. string content → [{type:'text',text}] (unified form, so
+ *      messageFingerprint's `s|` / `t|` markers no longer fork on migration);
+ *   2. strip cache_control from top-level content blocks.
+ * NEVER use this on the storage path — persisted events keep the wire verbatim.
+ */
+export function normalizeMsgForEquality(msg) {
+  try {
+    if (!msg || typeof msg !== 'object') return msg;
+    let c = msg.content;
+    if (typeof c === 'string') {
+      c = [{ type: 'text', text: c }];
+    } else if (Array.isArray(c)) {
+      let changed = false;
+      const out = c.map((b) => {
+        if (b && typeof b === 'object' && b.cache_control !== undefined) {
+          changed = true;
+          const { cache_control, ...rest } = b;
+          return rest;
+        }
+        return b;
+      });
+      if (!changed) return msg; // common path: no allocation
+      c = out;
+    } else {
+      return msg;
+    }
+    return { ...msg, content: c };
+  } catch {
+    return msg; // malicious getter etc.: fall back to the original, same policy as messageFingerprint
+  }
+}
+
+/**
  * 计算消息的轻量内容指纹，用于「反向锚点」对齐：以 `newMessages[0]` 的 fp 为锚，
  * 从 `curMsgs` 末尾向头部反向扫，配合多块连续等价校验决定 append / no-op / rebuild。
  *

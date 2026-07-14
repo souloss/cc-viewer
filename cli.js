@@ -649,9 +649,9 @@ const logDirIdx = args.indexOf('--log-dir');
 if (logDirIdx !== -1) {
   const logDirVal = args[logDirIdx + 1];
   if (logDirVal && !logDirVal.startsWith('-')) {
-    const prevDir = LOG_DIR;
-    setLogDir(logDirVal);
-    if (LOG_DIR === prevDir) {
+    // setLogDir returns false only on a rejected path; comparing LOG_DIR
+    // before/after mis-rejected a --log-dir equal to the current default.
+    if (!setLogDir(logDirVal)) {
       console.error(`Error: --log-dir path rejected (must be under home directory or /tmp/): ${logDirVal}`);
       process.exit(1);
     }
@@ -915,6 +915,70 @@ if (imPlatform) {
   // 独立 IM worker 模式
   runImMode(imPlatform).catch(err => {
     console.error('IM mode error:', err);
+    process.exit(1);
+  });
+} else if (args[0] === 'verify') {
+  // wire-v2 S4: dual-write consistency check (docs/refactor/WIRE_FORMAT_V2_PLAN.md S4)
+  // Usage: ccv verify <v1-log.jsonl> [more.jsonl ...] — compares each v1 file
+  // against its project's v2 session dirs; exit 0 = zero diffs.
+  (async () => {
+    const files = args.slice(1).filter(a => a.endsWith('.jsonl'));
+    if (files.length === 0) {
+      console.error('usage: ccv verify <v1-log.jsonl> [more.jsonl ...]');
+      process.exit(2);
+    }
+    const { verifyV1File, renderReport } = await import('./server/lib/v2/verify.js');
+    let allOk = true;
+    for (const f of files) {
+      const report = await verifyV1File(resolve(f));
+      console.log(renderReport(report));
+      if (!report.ok) allOk = false;
+    }
+    process.exit(allOk ? 0 : 1);
+  })().catch(err => {
+    console.error('verify error:', err);
+    process.exit(1);
+  });
+} else if (args[0] === 'convert') {
+  // wire-v2 S8: offline v1→v2 migration (docs/refactor/WIRE_FORMAT_V2_PLAN.md S8)
+  // Usage: ccv convert <project> [more-projects ...] | ccv convert --all
+  //        [--log-dir <dir>] — chronological per project, file-level resume,
+  // staging + golden verify + promote. Strictly additive: v1 files untouched.
+  (async () => {
+    const { convertProject, listConvertibleProjects } = await import('./server/lib/v2/convert.js');
+    const rest = args.slice(1);
+    const dirIdx = rest.indexOf('--log-dir');
+    let logDir = LOG_DIR;
+    if (dirIdx !== -1) {
+      logDir = resolve(rest[dirIdx + 1] || '');
+      rest.splice(dirIdx, 2);
+    }
+    const all = rest.includes('--all');
+    const projects = all ? listConvertibleProjects(logDir) : rest.filter(a => !a.startsWith('-'));
+    if (projects.length === 0) {
+      console.error('usage: ccv convert <project> [more-projects ...] | ccv convert --all  [--log-dir <dir>]');
+      process.exit(2);
+    }
+    let allOk = true;
+    for (const project of projects) {
+      console.error(`converting ${project} (${logDir}) ...`);
+      try {
+        const state = await convertProject(logDir, project, {
+          onProgress: (p) => {
+            if (p.phase === 'done') return;
+            console.error(`  [${p.phase}] ${p.file} (${p.fileIndex}/${p.filesTotal}) entries=${p.entries} sessions=${p.sessionsConverted} skipped=${p.sessionsSkipped}`);
+          },
+        });
+        console.error(`  ${project}: ${state.status} — ${state.sessionsConverted} sessions converted, ${state.sessionsSkipped} skipped, ${state.entries} entries`);
+        if (state.status !== 'done') allOk = false;
+      } catch (err) {
+        console.error(`  ${project}: FAILED — ${err.message}`);
+        allOk = false;
+      }
+    }
+    process.exit(allOk ? 0 : 1);
+  })().catch(err => {
+    console.error('convert error:', err);
     process.exit(1);
   });
 } else if (args[0] === 'run') {

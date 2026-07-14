@@ -38,19 +38,46 @@ export function parseUserId(userIdRaw) {
   return null;
 }
 
-/** First user message's prompt text (string or concatenated text blocks). */
+const REMINDER_OPEN = '<system-reminder>';
+const REMINDER_CLOSE = '</system-reminder>';
+
+/**
+ * Strip harness-injected <system-reminder>…</system-reminder> preambles from
+ * the head of a prompt. The harness prepends them to a subagent's first user
+ * message on the wire, but Agent/Task tool_use.input.prompt (the spawn-registry
+ * key) never contains them — without stripping, the prompt-prefix lookup gets
+ * 0 hits and every parallel sub shares one boilerplate fingerprint (real-data
+ * finding, plan "关键事实" 2026-07-14). Only leading reminders are removed:
+ * callers fingerprint the prompt START.
+ */
+function stripLeadingReminders(text) {
+  let t = text;
+  for (;;) {
+    const s = t.trimStart();
+    if (!s.startsWith(REMINDER_OPEN)) return s;
+    const end = s.indexOf(REMINDER_CLOSE);
+    if (end < 0) return ''; // unterminated reminder — no usable prompt text
+    t = s.slice(end + REMINDER_CLOSE.length);
+  }
+}
+
+/**
+ * First user message's prompt text (string or concatenated text blocks),
+ * with leading <system-reminder> preambles stripped and whitespace trimmed
+ * at the start.
+ */
 export function firstUserPromptText(messages) {
   if (!Array.isArray(messages)) return '';
   for (const m of messages) {
     if (!m || m.role !== 'user') continue;
     const c = m.content;
-    if (typeof c === 'string') return c;
+    if (typeof c === 'string') return stripLeadingReminders(c);
     if (Array.isArray(c)) {
       let text = '';
       for (const block of c) {
         if (block && block.type === 'text' && typeof block.text === 'string') text += block.text;
       }
-      return text;
+      return stripLeadingReminders(text);
     }
     return '';
   }

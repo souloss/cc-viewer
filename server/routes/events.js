@@ -1,7 +1,7 @@
 // SSE event stream + log-registration / resume / turn-end routes (moved verbatim from server.js).
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_FILE, _resumeState, resolveResumeChoice, _projectName } from '../interceptor.js';
+import { LOG_FILE, _resumeState, resolveResumeChoice, _projectName, _wireV2ReadEnabled } from '../interceptor.js';
 import { LOG_DIR } from '../../findcc.js';
 import { watchLogFile } from '../lib/log-watcher.js';
 import { countLogEntries, streamRawEntriesAsync, readPagedEntries } from '../lib/log-stream.js';
@@ -350,18 +350,25 @@ async function entriesPage(req, res, parsedUrl) {
   const file = parsedUrl.searchParams.get('file');
   let targetFile = LOG_FILE;
   if (file) {
-    if (file.includes('..') || (!file.endsWith('.jsonl') && !file.endsWith('.jsonl.zip'))) {
+    // wire-v2 S5: v2 addressing allowed under the read switch (spec §12);
+    // validateLogPath resolves it to the session dir the paging reader accepts.
+    const isV2Ref = file.startsWith('v2:');
+    if (isV2Ref && !_wireV2ReadEnabled) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'v2 read path is disabled' }));
+      return;
+    }
+    if (file.includes('..') || (!isV2Ref && !file.endsWith('.jsonl'))) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid file name' }));
       return;
     }
-    try { validateLogPath(LOG_DIR, file); } catch (e) {
+    try { targetFile = validateLogPath(LOG_DIR, file); } catch (e) {
       const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'ACCESS_DENIED' ? 403 : 400;
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
       return;
     }
-    targetFile = join(LOG_DIR, file);
   }
   try {
     const result = await readPagedEntries(targetFile, { before, limit: limitVal });

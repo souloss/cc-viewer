@@ -169,6 +169,17 @@ describe('ConversationStore event judgement', () => {
     assert.equal(lines[2].op, 'compact');
   });
 
+  it('tool_result tail with SAME tool_use_id but changed body → replace-tail detected (content-aware fp)', () => {
+    // Review P2: the client-shared messageFingerprint keys tool_result on id
+    // only — using it for the write-side judgement made same-id body edits
+    // invisible to v2 (and the verify digest is blind to that class). The
+    // judgement now uses v1's content-aware fingerprintMsg; this pins it.
+    const trMsg = (body) => ({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tr_1', content: body }] });
+    ingest([textMsg('assistant', 'q'), trMsg('first result')], 1);
+    const r = ingest([textMsg('assistant', 'q'), trMsg('EDITED result')], 2);
+    assert.equal(r.ctl, 'replace-tail', 'same-id tool_result body edit must produce a replace-tail event');
+  });
+
   it('same-length tail-content change → replace-tail ctl (spec §3.3)', () => {
     const base = [textMsg('user', 'q'), textMsg('assistant', 'draft answer')];
     ingest(base, 1);
@@ -180,6 +191,59 @@ describe('ConversationStore event judgement', () => {
     assert.equal(ctl.t, 'ctl');
     assert.equal(ctl.op, 'replace-tail');
     assert.equal(ctl.msg.content[0].text, 'REAL answer');
+  });
+
+  it('same-length but WHOLLY different wire (first message differs) → snapshot, not replace-tail', () => {
+    // Real-data class (2026-07-14): pre-flag proxy teammates interleave a
+    // second conversation into the leader's main stream; when the two streams
+    // happen to be equal-length, a tail-only patch would replay a franken-mix.
+    ingest([textMsg('user', 'conv A opening'), textMsg('assistant', 'A reply')], 1);
+    const r = ingest([textMsg('user', 'conv B opening'), textMsg('assistant', 'B reply')], 2);
+    assert.equal(r.ctl, null, 'must NOT be judged an in-place tail replace');
+    assert.equal(r.evt, 'snapshot');
+    const lines = readLines(convEpochPath(paths, 'main', 0));
+    assert.equal(lines[lines.length - 1].t, 'snapshot');
+    assert.equal(lines[lines.length - 1].reason, 'tail-mismatch');
+    assert.equal(lines[lines.length - 1].msgs[0].content[0].text, 'conv B opening', 'snapshot carries the full new wire');
+  });
+
+  it('exactFps mode distinguishes wires sharing an 80-char prefix (converter golden-gate grade)', () => {
+    const long = (suffix) => [textMsg('user', 'x'.repeat(120) + suffix)];
+    // Default (live) fingerprints truncate at 80 chars: same-prefix wires are "unchanged".
+    const rDefault = (() => {
+      const s = new ConversationStore(paths, queue);
+      s.ingest('main', long('AAA'), { seq: 1, rid: 'r1' });
+      return s.ingest('main', long('BBB'), { seq: 2, rid: 'r2' });
+    })();
+    assert.equal(rDefault.evt, null, 'cheap live fps cannot see past 80 chars (accepted)');
+    // Exact mode (offline converter) must snapshot the second wire.
+    const s2 = new ConversationStore(ensureSessionDirSync(dir, 'proj2', SID), queue, { exactFps: true });
+    s2.ingest('main', long('AAA'), { seq: 1, rid: 'r1' });
+    const rExact = s2.ingest('main', long('BBB'), { seq: 2, rid: 'r2' });
+    assert.equal(rExact.ctl, 'replace-tail', 'full-content hash sees the divergence (single-msg wire → tail swap, replay exact)');
+  });
+
+  it('exactFps judges cache_control migration onto an OLD message as append (S4 归一化决策 2026-07-14)', () => {
+    const p3 = ensureSessionDirSync(dir, 'proj3', SID);
+    const s = new ConversationStore(p3, queue, { exactFps: true });
+    const opening = 'hello world, a long opening prompt';
+    const a1 = textMsg('assistant', 'reply one');
+    s.ingest('main', [{ role: 'user', content: opening }, a1], { seq: 1, rid: 'r1' });
+
+    // The client migrates a cache_control breakpoint onto msg[0]: string
+    // content becomes a block array with cache_control — byte-different,
+    // semantically identical. Pre-normalization this failed the prefix test
+    // and snapshot-stormed every request of the conversation.
+    const migrated = { role: 'user', content: [{ type: 'text', text: opening, cache_control: { type: 'ephemeral', ttl: '1h' } }] };
+    const r = s.ingest('main', [migrated, a1, textMsg('user', 'turn 2')], { seq: 2, rid: 'r2' });
+    assert.equal(r.evt, 'append', 'cache_control/form migration must not fail the prefix test');
+    const lines = readLines(convEpochPath(p3, 'main', 0));
+    assert.deepEqual(lines[lines.length - 1].msgs.map((m) => m.content?.[0]?.text ?? m.content), ['turn 2'], 'only the new slice is stored');
+
+    // Control: a GENUINE content edit on the old message must still snapshot.
+    const edited = { role: 'user', content: opening + ' EDITED' };
+    const r2 = s.ingest('main', [edited, a1, textMsg('user', 'turn 2'), textMsg('user', 'turn 3')], { seq: 3, rid: 'r3' });
+    assert.equal(r2.evt, 'snapshot');
   });
 
   it('prefix-test failure without /clear (short window / overlap) → raw snapshot', () => {
@@ -243,6 +307,45 @@ describe('ConvResolver', () => {
     assert.equal(firstUserPromptText([{ role: 'user', content: 'plain' }]), 'plain');
     assert.equal(firstUserPromptText([textMsg('user', 'blocky')]), 'blocky');
     assert.equal(firstUserPromptText([]), '');
+  });
+
+  const REMINDER = '<system-reminder>\nAs you answer, use the following context:\n# claudeMd\nlots of boilerplate…\n</system-reminder>';
+
+  it('firstUserPromptText strips leading system-reminder preambles', () => {
+    // Harness shape observed in real wires: reminder is its own text block,
+    // the actual prompt is the next block (they concatenate before stripping).
+    const wireMsg = { role: 'user', content: [{ type: 'text', text: REMINDER }, { type: 'text', text: 'explore the code' }] };
+    assert.equal(firstUserPromptText([wireMsg]), 'explore the code');
+    // String content and stacked reminders strip the same way.
+    assert.equal(firstUserPromptText([{ role: 'user', content: `${REMINDER}\n${REMINDER}\n do it` }]), 'do it');
+    // Unterminated reminder → no usable prompt text.
+    assert.equal(firstUserPromptText([{ role: 'user', content: '<system-reminder>\nbroken' }]), '');
+    // TERMINATED reminder-only message (no prompt after) → also empty.
+    assert.equal(firstUserPromptText([{ role: 'user', content: REMINDER }]), '');
+    // Only LEADING reminders are stripped: a reminder AFTER the prompt stays
+    // in the text (pinned behavior — callers fingerprint the prompt START,
+    // and the harness shape observed in real wires is leading-only).
+    const trailing = firstUserPromptText([{ role: 'user', content: [{ type: 'text', text: 'short prompt' }, { type: 'text', text: REMINDER }] }]);
+    assert.ok(trailing.startsWith('short prompt'), 'prompt text survives');
+    assert.ok(trailing.includes('<system-reminder>'), 'trailing reminder is NOT stripped (leading-only contract)');
+  });
+
+  it('tool_use.id keying survives the harness reminder preamble (plan 关键事实 2026-07-14: 0-hit bug)', () => {
+    const r = new ConvResolver();
+    r.registerSpawns({ content: [{ type: 'tool_use', name: 'Agent', id: 'toolu_DDDDDDDDDDDD4', input: { prompt: 'explore the code' } }] });
+    const wire = [{ role: 'user', content: [{ type: 'text', text: REMINDER }, { type: 'text', text: 'explore the code' }] }];
+    const k = r.resolveSub(wire);
+    assert.equal(k.convKey, `sub-${'toolu_DDDDDDDDDDDD4'.slice(-12)}`, 'registry prefix must match the reminder-stripped wire prompt');
+  });
+
+  it('parallel subs with different prompts but identical reminder preamble get distinct keys', () => {
+    const r = new ConvResolver();
+    const a = r.resolveSub([{ role: 'user', content: [{ type: 'text', text: REMINDER }, { type: 'text', text: 'Angle A: line-by-line diff scan' }] }]);
+    const b = r.resolveSub([{ role: 'user', content: [{ type: 'text', text: REMINDER }, { type: 'text', text: 'Angle B: removed-behavior audit' }] }]);
+    // Pre-fix: the 200-char fp covered only reminder boilerplate → same fp →
+    // same-length continuity match interleaved both agents into one conv.
+    assert.notEqual(a.convKey, b.convKey);
+    assert.ok(a.isNew && b.isNew);
   });
 });
 
@@ -440,6 +543,19 @@ describe('V2Writer', () => {
     await w2.flush();
     const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath).filter(l => l.ph === 'req');
     assert.deepEqual(journal.map(l => l.seq), [1, 2]);
+  });
+
+  it('completion arriving AFTER resetSessions still lands its done/response lines (review P2)', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkEntry();
+    const h = w.ingestRequest(e, e.body.messages);
+    w.resetSessions(); // workspace switch while the request is in flight
+    w.ingestCompletion(h, { ...e, duration: 7, response: { status: 200, body: { usage: { input_tokens: 2 } } } });
+    await w.flush();
+    const paths = sessionPaths(dir, 'proj', SID);
+    const done = readLines(paths.journalPath).find(l => l.ph === 'done' && l.seq === h.seq);
+    assert.ok(done, 'done line written into the ORIGINAL session dir via the handle-carried session');
+    assert.equal(readLines(paths.responsesPath).length, 1, 'response line not dropped');
   });
 
   it('held request completing after the flush still gets its done line (late handle)', async () => {

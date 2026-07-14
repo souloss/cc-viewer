@@ -1,0 +1,301 @@
+/**
+ * wire-v2 S8 — offline v1→v2 converter unit tests (server/lib/v2/convert.js,
+ * convert-manager.js, convert-worker.js).
+ *
+ * Pure unit tier: mkdtemp dirs, no interceptor, no server. Coverage mandated
+ * by the plan's S8 row: golden round-trip (convert → verifyV1File zero diffs),
+ * cross-file session continuity, file-level resume, session-level skip
+ * (dual-write authority), dual-encoding user_id, .jsonl.zip archives,
+ * space assertion, path-injection rejection, doneTs/metaExtra seams,
+ * manager mutual exclusion.
+ */
+import { describe, it, beforeEach, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { convertProject, listV1Files, listConvertibleProjects, readConvertState, STAGING_DIR_NAME } from '../server/lib/v2/convert.js';
+import { startConvert, stopConvert, convertStatus, isConvertRunning } from '../server/lib/v2/convert-manager.js';
+import { verifyV1File } from '../server/lib/v2/verify.js';
+import { ensureSessionDirSync } from '../server/lib/v2/layout.js';
+import { _resetForTest } from '../server/lib/error-report.js';
+
+let logDir;
+const PROJECT = 'proj';
+beforeEach(() => { logDir = mkdtempSync(join(tmpdir(), 'ccv-v2cvt-')); mkdirSync(join(logDir, PROJECT)); _resetForTest(); });
+afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
+
+const SID = 'a9883ab8-0ab7-459a-bcfd-4c8950a14384';
+const SID2 = 'b1111111-2222-3333-4444-555566667777';
+const SID_LEGACY = 'c2222222-3333-4444-5555-666677778888';
+const SID_TM = 'd3333333-4444-5555-6666-777788889999';
+const jsonUid = (sid) => JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: sid });
+const legacyUid = (sid) => `user_deadbeef123_account__session_${sid}`;
+const textMsg = (role, text) => ({ role, content: [{ type: 'text', text }] });
+const clearMsg = () => textMsg('user', '<command-name>/clear</command-name>');
+
+const TOOLS = [{ name: 'Bash' }, { name: 'Read' }];
+const SYSTEM = [{ type: 'text', text: 'You are Claude Code test system.' }];
+let _tsCounter = 0;
+const nextTs = () => `2026-01-01T00:00:${String(_tsCounter++ % 60).padStart(2, '0')}.${String(_tsCounter).padStart(3, '0')}Z`;
+
+function entryOf({ messages, uid = jsonUid(SID), ts = nextTs(), mainAgent = true, extra = {}, duration = 1000 }) {
+  return {
+    timestamp: ts,
+    project: PROJECT,
+    url: 'https://api.anthropic.com/v1/messages?beta=true',
+    method: 'POST',
+    headers: { 'user-agent': 'test' },
+    body: {
+      model: 'claude-fable-5',
+      system: SYSTEM,
+      tools: TOOLS,
+      ...(uid && { metadata: { user_id: uid } }),
+      messages,
+    },
+    response: { status: 200, headers: {}, body: { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 2 }, stop_reason: 'end_turn' } },
+    duration,
+    isStream: false,
+    isHeartbeat: false,
+    isCountTokens: false,
+    mainAgent,
+    ...extra,
+  };
+}
+
+function writeV1(name, entries) {
+  writeFileSync(join(logDir, PROJECT, name), entries.map(e => JSON.stringify(e) + '\n---\n').join(''));
+}
+
+const sessionsDir = (sid) => join(logDir, PROJECT, 'sessions', sid);
+const readJournal = (sid) => readFileSync(join(sessionsDir(sid), 'journal.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+
+describe('listV1Files ordering and filtering', () => {
+  it('orders by filename timestamp, skips _temp and non-jsonl files (incl. legacy .jsonl.zip)', () => {
+    const p = join(logDir, PROJECT);
+    for (const n of ['proj_20260102_000000.jsonl', 'proj_20260101_000000.jsonl', '999__proj_20260101_120000.jsonl', 'proj_20260103_000000.jsonl.zip', 'proj_20260101_000000_temp.jsonl', 'notalog.txt']) {
+      writeFileSync(join(p, n), '');
+    }
+    assert.deepEqual(listV1Files(p), [
+      'proj_20260101_000000.jsonl',
+      '999__proj_20260101_120000.jsonl',
+      'proj_20260102_000000.jsonl',
+    ]);
+  });
+
+  it('listConvertibleProjects finds only project dirs with log files', () => {
+    mkdirSync(join(logDir, 'empty'));
+    writeFileSync(join(logDir, PROJECT, 'proj_20260101_000000.jsonl'), '');
+    writeFileSync(join(logDir, 'stray.jsonl'), ''); // files at root are not projects
+    assert.deepEqual(listConvertibleProjects(logDir), [PROJECT]);
+  });
+});
+
+describe('convertProject golden round-trip', () => {
+  it('converts a mixed v1 file and passes full golden verify', async () => {
+    const entries = [
+      // main conversation: full → delta chain → /clear epoch split
+      entryOf({ messages: [textMsg('user', 'u1')], extra: { _deltaFormat: true, _isCheckpoint: true, _seq: 1, _seqEpoch: 'ep1', _totalMessageCount: 1 } }),
+      entryOf({ messages: [textMsg('assistant', 'a1'), textMsg('user', 'u2')], extra: { _deltaFormat: true, _seq: 2, _seqEpoch: 'ep1', _totalMessageCount: 3 } }),
+      // placeholder frame (inProgress) must be skipped by the converter
+      { ...entryOf({ messages: [clearMsg()] }), inProgress: true, response: null },
+      // /clear checkpoint: shorter than previous state → epoch e1
+      entryOf({ messages: [clearMsg(), textMsg('assistant', 'cleared')], extra: { _deltaFormat: true, _isCheckpoint: true, _seq: 3, _seqEpoch: 'ep1', _totalMessageCount: 2 } }),
+      // subagent of the same session (no mainAgent flag)
+      entryOf({ messages: [textMsg('user', 'sub prompt')], mainAgent: false }),
+      // heartbeat without metadata → current-sid fallback
+      { ...entryOf({ messages: [], uid: null }), isHeartbeat: true, body: { model: 'claude-fable-5' } },
+      // teammate entry (own session, leader's file)
+      entryOf({ messages: [textMsg('user', 'tm')], uid: jsonUid(SID_TM), extra: { teammate: { agentName: 'tm1', teamName: 't' } } }),
+      // legacy user_id encoding session
+      entryOf({ messages: [textMsg('user', 'legacy hello')], uid: legacyUid(SID_LEGACY) }),
+    ];
+    writeV1('proj_20260101_000000.jsonl', entries);
+    // Finder-junk resilience: a .DS_Store inside staging must not survive the
+    // post-promote cleanup (real-data 2026-07-14: rmdirSync left the dir behind).
+    mkdirSync(join(logDir, PROJECT, STAGING_DIR_NAME), { recursive: true });
+    writeFileSync(join(logDir, PROJECT, STAGING_DIR_NAME, '.DS_Store'), 'finder junk');
+
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done');
+    assert.equal(state.sessionsSkipped, 0);
+    assert.equal(state.sessionsConverted, 3, 'SID + SID_TM + SID_LEGACY');
+    assert.ok(!existsSync(join(logDir, PROJECT, STAGING_DIR_NAME)), 'staging fully promoted and removed (incl. junk files)');
+
+    // Golden: the promoted tree verifies against the source with zero diffs.
+    const report = await verifyV1File(join(logDir, PROJECT, 'proj_20260101_000000.jsonl'));
+    assert.equal(report.ok, true, JSON.stringify(report.diffs.concat(report.integrity), null, 2));
+    assert.equal(report.counters.v1Only, 0, 'every completed v1 entry has a v2 twin');
+
+    // /clear split epochs: e0 + e1 under main
+    assert.ok(existsSync(join(sessionsDir(SID), 'conversations', 'main', 'e0.jsonl')));
+    assert.ok(existsSync(join(sessionsDir(SID), 'conversations', 'main', 'e1.jsonl')));
+
+    // doneTs seam: done line = request ts + duration, not wall clock
+    const j = readJournal(SID);
+    const req1 = j.find(l => l.ph === 'req' && l.seq === 1);
+    const done1 = j.find(l => l.ph === 'done' && l.seq === 1);
+    assert.equal(done1.ts, new Date(Date.parse(req1.ts) + 1000).toISOString());
+
+    // metaExtra + sources stamped
+    const meta = JSON.parse(readFileSync(join(sessionsDir(SID), 'meta.json'), 'utf8'));
+    assert.equal(meta.origin, 'convert');
+    assert.deepEqual(meta.sources, ['proj_20260101_000000.jsonl']);
+    // teammate session landed in its own dir
+    assert.ok(existsSync(sessionsDir(SID_TM)));
+    assert.ok(existsSync(sessionsDir(SID_LEGACY)));
+  });
+
+  it('converts sessions spanning rotation files with a continuous journal', async () => {
+    writeV1('proj_20260101_000000.jsonl', [
+      entryOf({ messages: [textMsg('user', 'u1')], uid: jsonUid(SID2) }),
+    ]);
+    // Post-rotation: v1 resets delta state → full checkpoint that prefix-extends.
+    writeV1('proj_20260102_000000.jsonl', [
+      entryOf({ messages: [textMsg('user', 'u1'), textMsg('assistant', 'a1'), textMsg('user', 'u2')], uid: jsonUid(SID2) }),
+    ]);
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done');
+    assert.equal(state.sessionsConverted, 1, 'one session across two files');
+
+    const seqs = readJournal(SID2).filter(l => l.ph === 'req').map(l => l.seq);
+    assert.deepEqual(seqs, [1, 2], 'journal seq continuous across the file boundary');
+    const events = readFileSync(join(sessionsDir(SID2), 'conversations', 'main', 'e0.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    assert.deepEqual(events.map(e => e.t), ['snapshot', 'append'], 'cross-file wire state prefix-extends');
+    const meta = JSON.parse(readFileSync(join(sessionsDir(SID2), 'meta.json'), 'utf8'));
+    assert.deepEqual(meta.sources, ['proj_20260101_000000.jsonl', 'proj_20260102_000000.jsonl']);
+  });
+});
+
+describe('legacy-format hardening (real-data classes, 2026-07-14)', () => {
+  it('old entries without requestId + same-ms countTokens burst + equal-length interleave pass golden verify', async () => {
+    const ts = '2026-01-01T00:00:00.100Z'; // deliberately reused: ts|url key collision
+    const ct = (text) => {
+      const e = entryOf({ messages: [textMsg('user', text)], uid: null, ts, mainAgent: false });
+      e.isCountTokens = true;
+      e.url = 'https://api.anthropic.com/v1/messages/count_tokens?beta=true';
+      delete e.body.tools; delete e.body.system;
+      return e;
+    };
+    const entries = [
+      // cold-start: metadata-less countTokens BEFORE any sid, same ts|url key,
+      // different payloads — held, then flushed into the first session.
+      ct('count A'), ct('count B'),
+      // equal-length wholly-different wires under one conv (pre-flag proxy
+      // teammate interleave shape) — must snapshot, not tail-patch.
+      entryOf({ messages: [textMsg('user', 'conv A opening'), textMsg('assistant', 'A reply')] }),
+      entryOf({ messages: [textMsg('user', 'conv B opening'), textMsg('assistant', 'B reply')] }),
+      entryOf({ messages: [textMsg('user', 'conv A opening'), textMsg('assistant', 'A reply'), textMsg('user', 'A u2')] }),
+    ];
+    for (const e of entries) delete e.requestId; // pre-requestId era
+    writeV1('proj_20260101_000000.jsonl', entries);
+
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done', 'golden verify must pass on legacy shapes');
+
+    const j = readJournal(SID);
+    const reqs = j.filter(l => l.ph === 'req');
+    const dones = j.filter(l => l.ph === 'done');
+    assert.equal(reqs.length, 5);
+    assert.equal(dones.length, 5, 'held cold-start entries must still get their done lines (synthetic rid)');
+    const report = await verifyV1File(join(logDir, PROJECT, 'proj_20260101_000000.jsonl'));
+    assert.equal(report.ok, true, JSON.stringify(report.diffs.concat(report.integrity), null, 2));
+    assert.equal(report.counters.v2ReqWithoutDone, 0);
+  });
+});
+
+describe('resume and skip semantics', () => {
+  it('stops at a file boundary and resumes without redoing done files', async () => {
+    writeV1('proj_20260101_000000.jsonl', [entryOf({ messages: [textMsg('user', 'u1')], uid: jsonUid(SID2) })]);
+    writeV1('proj_20260102_000000.jsonl', [entryOf({ messages: [textMsg('user', 'u1'), textMsg('assistant', 'a1'), textMsg('user', 'u2')], uid: jsonUid(SID2) })]);
+
+    let filesDone = 0;
+    const stopped = await convertProject(logDir, PROJECT, {
+      statfs: () => ({ bavail: 1e9, bsize: 4096 }),
+      onProgress: (p) => { if (p.phase === 'convert') filesDone++; },
+      shouldStop: () => filesDone >= 1, // stop at the boundary after file 1
+    });
+    assert.equal(stopped.status, 'stopped');
+    assert.deepEqual(stopped.files.map(f => f.done), [true, false]);
+    assert.ok(existsSync(join(logDir, PROJECT, STAGING_DIR_NAME, SID2)), 'staging kept for resume');
+    assert.ok(!existsSync(sessionsDir(SID2)), 'nothing promoted yet');
+
+    const resumed = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(resumed.status, 'done');
+    assert.equal(resumed.entries, 1, 'only the pending file was re-processed');
+    const seqs = readJournal(SID2).filter(l => l.ph === 'req').map(l => l.seq);
+    assert.deepEqual(seqs, [1, 2], 'journal seq seeded from staging — no collision across the resume');
+    const report = await verifyV1File(join(logDir, PROJECT, 'proj_20260102_000000.jsonl'));
+    assert.equal(report.ok, true, JSON.stringify(report.diffs, null, 2));
+    assert.equal(readConvertState(join(logDir, PROJECT)).status, 'done');
+  });
+
+  it('skips sessions that already have a real v2 dir (dual-write authority)', async () => {
+    ensureSessionDirSync(logDir, PROJECT, SID, { instanceId: 'live' });
+    const journalBefore = readFileSync(join(sessionsDir(SID), 'journal.jsonl'), 'utf8');
+    writeV1('proj_20260101_000000.jsonl', [
+      entryOf({ messages: [textMsg('user', 'u1')] }),               // SID — must be skipped
+      entryOf({ messages: [textMsg('user', 'x')], uid: jsonUid(SID2) }), // SID2 — converted
+    ]);
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done');
+    assert.equal(state.sessionsSkipped, 1);
+    assert.equal(state.sessionsConverted, 1);
+    assert.equal(readFileSync(join(sessionsDir(SID), 'journal.jsonl'), 'utf8'), journalBefore, 'live session untouched');
+    assert.ok(existsSync(sessionsDir(SID2)));
+  });
+});
+
+describe('archives, rejections, guards', () => {
+  it('ignores legacy .jsonl.zip archives (never a candidate, plain files still convert)', async () => {
+    // zip read support was removed with the archive feature — a leftover archive
+    // must be silently excluded from the candidate list, not read or crashed on.
+    writeFileSync(join(logDir, PROJECT, 'proj_20260101_000000.jsonl.zip'), 'legacy zip bytes');
+    writeV1('proj_20260102_000000.jsonl', [entryOf({ messages: [textMsg('user', 'plain hello')], uid: jsonUid(SID2) })]);
+    assert.deepEqual(listV1Files(join(logDir, PROJECT)), ['proj_20260102_000000.jsonl']);
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done');
+    assert.equal(state.entries, 1);
+    assert.deepEqual(state.files.map(f => f.name), ['proj_20260102_000000.jsonl'], 'zip never entered the file list');
+    assert.ok(existsSync(sessionsDir(SID2)));
+  });
+
+  it('rejects path-traversal project names', async () => {
+    await assert.rejects(() => convertProject(logDir, '../evil'), /invalid project name/);
+    await assert.rejects(() => convertProject(logDir, ''), /invalid project name/);
+  });
+
+  it('refuses to start without 2x free disk space and records the error', async () => {
+    writeV1('proj_20260101_000000.jsonl', [entryOf({ messages: [textMsg('user', 'u1')] })]);
+    await assert.rejects(
+      () => convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1, bsize: 1 }) }),
+      /insufficient disk space/,
+    );
+    assert.equal(readConvertState(join(logDir, PROJECT)).status, 'error');
+  });
+});
+
+describe('convert-manager', () => {
+  it('enforces single-flight and reaches done via the worker', async () => {
+    writeV1('proj_20260101_000000.jsonl', [entryOf({ messages: [textMsg('user', 'managed')], uid: jsonUid(SID2) })]);
+    const first = startConvert(logDir, PROJECT);
+    assert.equal(first.ok, true);
+    assert.equal(isConvertRunning(), true, '_running is set synchronously');
+    const second = startConvert(logDir, PROJECT);
+    assert.equal(second.ok, false);
+    assert.match(second.error, /already running/);
+
+    // Poll until the resident worker finishes (state file is the truth).
+    const deadline = Date.now() + 15000;
+    let status;
+    while (Date.now() < deadline) {
+      status = convertStatus(logDir, PROJECT);
+      if (!status.running && status.state && status.state.status === 'done') break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    assert.equal(status.state && status.state.status, 'done', JSON.stringify(status));
+    assert.ok(existsSync(sessionsDir(SID2)));
+    assert.equal(stopConvert().ok, false, 'nothing left to stop');
+  });
+});

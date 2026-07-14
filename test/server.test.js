@@ -269,25 +269,6 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     assert.equal(res.status, 400);
   });
 
-  // --- POST /api/merge-logs validation ---
-  it('POST /api/merge-logs rejects less than 2 files', async () => {
-    const res = await httpRequest(port, '/api/merge-logs', {
-      method: 'POST',
-      body: { files: ['one.jsonl'] },
-    });
-    assert.equal(res.status, 400);
-    assert.ok(res.json().error.includes('2 files'));
-  });
-
-  it('POST /api/merge-logs rejects files from different projects', async () => {
-    const res = await httpRequest(port, '/api/merge-logs', {
-      method: 'POST',
-      body: { files: ['projA/a.jsonl', 'projB/b.jsonl'] },
-    });
-    assert.equal(res.status, 400);
-    assert.ok(res.json().error.includes('same project'));
-  });
-
   // --- Static file / SPA fallback ---
   it('GET / returns HTML (SPA fallback)', async () => {
     const res = await httpRequest(port, '/');

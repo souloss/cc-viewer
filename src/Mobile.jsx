@@ -1,6 +1,6 @@
 import React from 'react';
 import { ConfigProvider, Spin, Button, Badge, Switch, Select, Modal, message, Radio, Tooltip } from 'antd';
-import { BranchesOutlined, DownloadOutlined, DeleteOutlined, RollbackOutlined, ReloadOutlined, UploadOutlined, FileZipOutlined, QuestionCircleOutlined } from '@ant-design/icons';
+import { BranchesOutlined, DownloadOutlined, DeleteOutlined, RollbackOutlined, ReloadOutlined, UploadOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import AppBase, { styles, OPTIMISTIC_CLEAR_PERCENT } from './AppBase';
 import { isIOS, isPad, setViewMode } from './env';
 import { isMainAgent, classifyUserContent, extractDisplayText } from './utils/contentFilter';
@@ -1015,24 +1015,6 @@ class Mobile extends AppBase {
               </button>
             </div>
             <div className={styles.mobileLogMgmtActions}>
-              <Button
-                size="small"
-                type={this.state.selectedLogs.size >= 2 && ![...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip')) ? 'primary' : 'default'}
-                disabled={this.state.selectedLogs.size < 2 || [...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip'))}
-                onClick={this.handleMergeLogs}
-                style={this.state.selectedLogs.size < 2 || [...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip')) ? { color: 'var(--text-muted)', borderColor: 'var(--border-light)' } : undefined}
-              >
-                {t('ui.mergeLogs')}
-              </Button>
-              <Button
-                size="small"
-                icon={<FileZipOutlined />}
-                disabled={![...this.state.selectedLogs].some(f => f.endsWith('.jsonl'))}
-                onClick={this.handleArchiveLogs}
-                style={![...this.state.selectedLogs].some(f => f.endsWith('.jsonl')) ? { color: 'var(--text-muted)', borderColor: 'var(--border-light)' } : undefined}
-              >
-                {t('ui.archiveLogs')}
-              </Button>
               <Button
                 size="small"
                 icon={<DeleteOutlined />}

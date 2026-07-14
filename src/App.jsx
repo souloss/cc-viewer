@@ -1,6 +1,6 @@
 import React from 'react';
-import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip } from 'antd';
-import { UploadOutlined, DeleteOutlined, ReloadOutlined, FileZipOutlined } from '@ant-design/icons';
+import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip, Switch, Popconfirm } from 'antd';
+import { UploadOutlined, DeleteOutlined, ReloadOutlined, SwapOutlined } from '@ant-design/icons';
 import AppBase, { styles } from './AppBase';
 import { isMobile, isElectron, setViewMode } from './env';
 import AppHeader from './components/dashboard/AppHeader';
@@ -587,24 +587,6 @@ class App extends AppBase {
             </Button>
             <Button
               size="small"
-              type={this.state.selectedLogs.size > 1 && ![...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip')) ? 'primary' : 'default'}
-              disabled={this.state.selectedLogs.size < 2 || [...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip'))}
-              onClick={this.handleMergeLogs}
-              className={styles.btnMarginLeft}
-            >
-              {t('ui.mergeLogs')}
-            </Button>
-            <Button
-              size="small"
-              icon={<FileZipOutlined />}
-              disabled={![...this.state.selectedLogs].some(f => f.endsWith('.jsonl'))}
-              onClick={this.handleArchiveLogs}
-              className={styles.btnMarginLeft}
-            >
-              {t('ui.archiveLogs')}
-            </Button>
-            <Button
-              size="small"
               danger
               icon={<DeleteOutlined />}
               disabled={this.state.selectedLogs.size === 0}
@@ -629,6 +611,116 @@ class App extends AppBase {
             >
               {t('ui.showAllInstanceLogs')}
             </Checkbox>
+            {this.state.wireV2 && (() => {
+              const w = this.state.wireV2;
+              // Honesty rules (review P1): under an env override the switch
+              // must show what the process is ACTUALLY running (the ignored
+              // config value would contradict reality); otherwise it shows the
+              // persisted choice, with a "pending restart" hint whenever the
+              // running process differs from that choice.
+              const writeModes = ['dual', 'dual-read'];
+              const checked = w.envOverride
+                ? writeModes.includes(w.effective && w.effective.mode)
+                : writeModes.includes(w.configMode);
+              const pending = !w.envOverride && w.running != null && w.running !== w.configMode;
+              // wire-v2 S5 read switch: second opt-in layered on dual-write;
+              // shown only once the write side is on ('dual-read' needs it) and
+              // the server understands the mode (unlocked list carries it).
+              const readUnlocked = Array.isArray(w.unlocked) && w.unlocked.includes('dual-read');
+              const readChecked = w.readEnvOverride
+                ? !!(w.readEffective && w.readEffective.enabled)
+                : w.configMode === 'dual-read';
+              const readPending = !w.readEnvOverride && w.readRunning != null && w.readRunning !== (w.configMode === 'dual-read');
+              return (
+                <>
+                  <Tooltip title={w.envOverride ? t('ui.wireV2EnvOverride') : t('ui.wireV2NextBoot')}>
+                    <span className={styles.btnMarginLeft}>
+                      <Switch
+                        size="small"
+                        checked={checked}
+                        disabled={w.envOverride}
+                        onChange={this.handleToggleWireV2}
+                      />
+                      {' '}{t('ui.wireV2Toggle')}
+                      {pending && <span className={styles.pendingHint}> ({t('ui.wireV2Pending')})</span>}
+                    </span>
+                  </Tooltip>
+                  {checked && readUnlocked && (
+                    <Tooltip title={w.readEnvOverride ? t('ui.wireV2ReadEnvOverride') : t('ui.wireV2NextBoot')}>
+                      <span className={styles.btnMarginLeft}>
+                        <Switch
+                          size="small"
+                          checked={readChecked}
+                          disabled={w.readEnvOverride}
+                          onChange={this.handleToggleWireV2Read}
+                        />
+                        {' '}{t('ui.wireV2ReadToggle')}
+                        {readPending && <span className={styles.pendingHint}> ({t('ui.wireV2Pending')})</span>}
+                      </span>
+                    </Tooltip>
+                  )}
+                  {/* wire-v2 S5: list-source switch — only when THIS process can
+                      actually serve v2 reads (readRunning is boot-time truth;
+                      a pending dual-read choice still needs a restart first). */}
+                  {w.readRunning === true && (
+                    <Tooltip title={t('ui.wireV2ListToggleHint')}>
+                      <span className={styles.btnMarginLeft}>
+                        <Switch
+                          size="small"
+                          checked={this.state.logListV2}
+                          onChange={this.handleToggleLogListV2}
+                        />
+                        {' '}{t('ui.wireV2ListToggle')}
+                      </span>
+                    </Tooltip>
+                  )}
+                </>
+              );
+            })()}
+            {/* wire-v2 S8: one-click v1→v2 migration — v1 list state only (the
+                v2 list is the migration's OUTPUT, offering it there is circular).
+                The task is resident server-side; this row is just its remote. */}
+            {!this.state.logListV2 && (() => {
+              const cv = this.state.wireV2Convert;
+              const st = cv && cv.state;
+              const active = !!(cv && (cv.running || (st && (st.status === 'running' || st.status === 'verifying'))));
+              if (active) {
+                const total = st && Array.isArray(st.files) ? st.files.length : 0;
+                const done = st && Array.isArray(st.files) ? st.files.filter(f => f.done).length : 0;
+                const label = st && st.status === 'verifying'
+                  ? t('ui.wireV2ConvertVerifying')
+                  : t('ui.wireV2ConvertProgress', { done, total, sessions: (st && st.sessionsConverted) || 0 });
+                return (
+                  <span className={styles.btnMarginLeft}>
+                    <Spin size="small" /> <span className={styles.pendingHint}>{label}</span>
+                    <Button size="small" className={styles.btnMarginLeft} onClick={this.handleStopWireV2Convert}>
+                      {t('ui.wireV2ConvertStop')}
+                    </Button>
+                  </span>
+                );
+              }
+              return (
+                <span className={styles.btnMarginLeft}>
+                  <Popconfirm
+                    title={t('ui.wireV2Convert')}
+                    description={t('ui.wireV2ConvertConfirm')}
+                    onConfirm={this.handleStartWireV2Convert}
+                    okText={t('ui.wireV2ConvertOk')}
+                    cancelText={t('ui.cancel')}
+                  >
+                    <Button size="small" icon={<SwapOutlined />}>{t('ui.wireV2Convert')}</Button>
+                  </Popconfirm>
+                  {st && st.status === 'done' && (
+                    <span className={styles.pendingHint}> {t('ui.wireV2ConvertDone', { sessions: st.sessionsConverted || 0, skipped: st.sessionsSkipped || 0 })}</span>
+                  )}
+                  {st && (st.status === 'error' || st.status === 'stopped') && (
+                    <Tooltip title={st.lastError || ''}>
+                      <span className={styles.pendingHint}> {t(st.status === 'error' ? 'ui.wireV2ConvertError' : 'ui.wireV2ConvertStopped')}</span>
+                    </Tooltip>
+                  )}
+                </span>
+              );
+            })()}
           </div>
           {this.state.localLogsLoading ? (
             <div className={styles.spinCenter}><Spin /></div>

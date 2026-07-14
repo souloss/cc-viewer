@@ -75,6 +75,7 @@ function execWithStdin(cmd, args, input, options) {
   });
 }
 import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
+import { maybeResumeConvert } from './lib/v2/convert-manager.js';
 import { recordInstance, listInstances } from './lib/instance-registry.js';
 import { LOG_DIR, setLogDir, getClaudeConfigDir, isBrowserOpenSuppressed } from '../findcc.js';
 import { t, getLang, setLang } from './i18n.js';
@@ -85,7 +86,6 @@ import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher
 import { watchLogFile, startWatching, unwatchAll, sendEventToClients, sendToClients } from './lib/log-watcher.js';
 import { createImLogWatcher } from './lib/im-log-watcher.js';
 import { unwatchAllWorkflows } from './lib/workflow-watcher.js';
-import { cleanupExtractCache } from './lib/jsonl-archive.js';
 import { backupConfigs } from './lib/config-backup.js';
 import { normalizeBasePath, validateBasePath, stripBasePath } from './lib/base-path.js';
 import { createHardenedCleanup } from './lib/term-signals.js';
@@ -308,6 +308,9 @@ export function initPostLaunch() {
   watchLogFile(_logWatcherOpts(LOG_FILE));
   if (!statsWorker) startStatsWorker();
   startStreamingStatusTimer();
+  // wire-v2 S8: a migration the previous process left unfinished resumes here
+  // (resident-until-done, user decision; file-level checkpoints make it cheap).
+  try { if (_projectName) maybeResumeConvert(LOG_DIR, _projectName); } catch (err) { console.error('[CC Viewer] wire-v2 convert resume failed:', err.message); }
 }
 
 // Global POST body size limit (10MB) to prevent OOM from malicious/buggy clients
@@ -855,9 +858,6 @@ export async function startViewer() {
   // 加载插件（需要在创建服务器之前，以便通过 hook 获取 HTTPS 证书）
   await loadPlugins();
 
-  // 清理过期解压缓存（fire-and-forget；任何错误吞掉）
-  setImmediate(() => { try { cleanupExtractCache(); } catch { /* ignore */ } });
-
   // 启动期配置备份:preferences/profile/workspaces → LOG_DIR 外的 cc-viewer-config-backups/
   // (滚动留 10 份)。2026-06-06 事故:配置随 LOG_DIR 整树丢失后无处可恢复。fire-and-forget。
   setImmediate(() => { try { backupConfigs(); } catch { /* ignore */ } });
@@ -1028,6 +1028,8 @@ export async function startViewer() {
             startWatching(_logWatcherOpts(LOG_FILE));
             startStatsWorker();
             startStreamingStatusTimer();
+            // wire-v2 S8: resume an unfinished migration (see initPostLaunch)
+            try { if (_projectName) maybeResumeConvert(LOG_DIR, _projectName); } catch (err) { console.error('[CC Viewer] wire-v2 convert resume failed:', err.message); }
           }
           // CLI 模式下启动 WebSocket 服务 (必须 await，否则插件 hook 拿不到 upgrade listeners)
           if (isCliMode) {

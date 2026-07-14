@@ -96,10 +96,13 @@ class AppBase extends React.Component {
       // 本实例 id（来自 ccv --pid），随 /api/project-name 拿回；null = 默认模式。仅用于标题 项目(id)。
       instanceId: null,
       importModalVisible: false,
+      wireV2: null, // {configMode, effective:{mode,source}, envOverride} — logs-modal startup-only switch (wire-v2 S4)
       localLogs: {},       // { projectName: [{file, timestamp, size}] }
       localLogsLoading: false,
       refreshingStats: false,
       logShowAllInstances: false, // 「显示全部实例」开关：true 时越过 --pid 硬隔离列出全部实例日志
+      logListV2: false, // wire-v2 S5「v2 会话列表」开关：true 时日志弹窗列 v2 会话（?v2=1），选中即走 v2 读取路径
+      wireV2Convert: null, // wire-v2 S8 迁移任务状态快照（GET /api/wire-v2-convert），弹窗打开期间轮询
       showAll: false,
       lang: getLang(),
       userProfile: null,    // { name, avatar }
@@ -996,6 +999,7 @@ class AppBase extends React.Component {
   }
 
   componentWillUnmount() {
+    this._stopWireV2ConvertPoll();
     window.removeEventListener('keydown', this._onScaleKeydown);
     if (Array.isArray(this._tabBridgeDisposers)) {
       for (const off of this._tabBridgeDisposers) {
@@ -2416,10 +2420,14 @@ class AppBase extends React.Component {
 
   // ─── 日志管理 ──────────────────────────────────────────
 
-  // 集中构造 /api/local-logs URL：「显示全部实例」开启时带 ?all=1。打开弹窗 / 刷新统计 /
-  // 合并·归档·删除后这几处 refetch 都经此 helper，开关一改即自动跟随（apiUrl 的 token 追加已正确处理已有 ?）。
+  // 集中构造 /api/local-logs URL：「显示全部实例」开启时带 ?all=1，「v2 会话列表」开启时带 ?v2=1。
+  // 打开弹窗 / 刷新统计 / 合并·归档·删除后这几处 refetch 都经此 helper，开关一改即自动跟随
+  // （apiUrl 的 token 追加已正确处理已有 ?）。
   _localLogsUrl() {
-    return apiUrl(this.state.logShowAllInstances ? '/api/local-logs?all=1' : '/api/local-logs');
+    const params = [];
+    if (this.state.logShowAllInstances) params.push('all=1');
+    if (this.state.logListV2) params.push('v2=1');
+    return apiUrl(`/api/local-logs${params.length ? `?${params.join('&')}` : ''}`);
   }
 
   handleImportLocalLogs = () => {
@@ -2433,6 +2441,109 @@ class AppBase extends React.Component {
       .catch(() => {
         this.setState({ localLogs: {}, localLogsLoading: false });
       });
+    // wire-v2 S4: startup-only mode switch state (best-effort — the toggle just
+    // hides when the endpoint is unavailable, e.g. an older server; a silent
+    // failure must not affect the log list itself).
+    fetch(apiUrl('/api/wire-v2-mode'))
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data) this.setState({ wireV2: data }); })
+      .catch(() => { });
+    this._startWireV2ConvertPoll();
+  };
+
+  // wire-v2 S8: poll the resident migration task while the modal is open. The
+  // task itself is server-side and survives the modal (and the browser); the
+  // poll is pure presentation. A done-transition refreshes the list once.
+  _fetchWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'))
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!data) return;
+        const prev = this.state.wireV2Convert;
+        const wasActive = !!(prev && (prev.running || (prev.state && (prev.state.status === 'running' || prev.state.status === 'verifying'))));
+        const isActive = !!(data.running || (data.state && (data.state.status === 'running' || data.state.status === 'verifying')));
+        this.setState({ wireV2Convert: data });
+        if (wasActive && !isActive && data.state && data.state.status === 'done' && this.state.importModalVisible) {
+          this.handleImportLocalLogs(); // migration finished while watching — show the result
+        }
+      })
+      .catch(() => { });
+  };
+
+  _startWireV2ConvertPoll = () => {
+    this._fetchWireV2Convert();
+    if (this._wireV2ConvertTimer) return;
+    this._wireV2ConvertTimer = setInterval(this._fetchWireV2Convert, 2000);
+  };
+
+  _stopWireV2ConvertPoll = () => {
+    if (this._wireV2ConvertTimer) {
+      clearInterval(this._wireV2ConvertTimer);
+      this._wireV2ConvertTimer = null;
+    }
+  };
+
+  handleStartWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.error) throw new Error(data.error);
+        message.success(t('ui.wireV2ConvertStarted'));
+        this._fetchWireV2Convert();
+      })
+      .catch((err) => {
+        reportSwallowed('fetch.wire-v2-convert', err);
+        message.error(String(err?.message || err));
+      });
+  };
+
+  handleStopWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop' }),
+    })
+      .then(res => res.json())
+      .then(() => this._fetchWireV2Convert())
+      .catch((err) => reportSwallowed('fetch.wire-v2-convert', err));
+  };
+
+  // wire-v2 S4: persist the mode to LOG_DIR/wire-v2.json; takes effect on the
+  // NEXT launch only (the interceptor reads it once at boot) — no hot switching
+  // of the running process by design (user decision: startup-only).
+  _postWireV2Mode = (mode) => {
+    fetch(apiUrl('/api/wire-v2-mode'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (!data.ok) throw new Error(data.error || 'switch failed');
+        this.setState(prev => ({ wireV2: { ...(prev.wireV2 || {}), configMode: mode, envOverride: data.envOverride } }));
+        message.success(t('ui.wireV2NextBoot'));
+      })
+      .catch((err) => {
+        reportSwallowed('fetch.wire-v2-mode', err);
+        message.error(String(err?.message || err));
+      });
+  };
+
+  handleToggleWireV2 = (checked) => {
+    // Turning dual-write ON always lands on plain 'dual' — the read layer is a
+    // deliberate second opt-in (wire-v2 S5), not something a write toggle drags
+    // back in; turning it OFF turns everything off (no off+read mode exists).
+    this._postWireV2Mode(checked ? 'dual' : 'off');
+  };
+
+  // wire-v2 S5: v2-backed read path (adapter). Only meaningful on top of
+  // dual-write, hence 'dual-read' ⇄ 'dual' — same startup-only semantics.
+  handleToggleWireV2Read = (checked) => {
+    this._postWireV2Mode(checked ? 'dual-read' : 'dual');
   };
 
   // 「显示全部实例」开关：翻转后用新 scope 重新拉取列表（开关状态持久，不随弹窗关闭重置）。
@@ -2440,7 +2551,17 @@ class AppBase extends React.Component {
     this.setState(prev => ({ logShowAllInstances: !prev.logShowAllInstances }), () => this.handleImportLocalLogs());
   };
 
+  // wire-v2 S5「v2 会话列表」开关：切换列表源（v1 文件 ⇄ v2 会话）并清空勾选——
+  // 勾选驱动的合并/归档/删除只对 v1 文件有意义，跨源残留会误伤。
+  handleToggleLogListV2 = () => {
+    this.setState(
+      prev => ({ logListV2: !prev.logListV2, selectedLogs: new Set() }),
+      () => this.handleImportLocalLogs(),
+    );
+  };
+
   handleCloseImportModal = () => {
+    this._stopWireV2ConvertPoll();
     this.setState({ importModalVisible: false, selectedLogs: new Set() });
   };
 
@@ -2483,94 +2604,6 @@ class AppBase extends React.Component {
       if (checked) selectedLogs.add(file);
       else selectedLogs.delete(file);
       return { selectedLogs };
-    });
-  };
-
-  handleMergeLogs = () => {
-    const { selectedLogs, localLogs, currentProject } = this.state;
-    if (selectedLogs.size < 2) return;
-
-    const logs = localLogs[currentProject];
-    if (!logs) return;
-
-    const indices = [];
-    logs.forEach((log, i) => {
-      if (selectedLogs.has(log.file)) indices.push(i);
-    });
-    indices.sort((a, b) => a - b);
-
-    if (selectedLogs.has(logs[0].file)) {
-      message.warning(t('ui.mergeLatestNotAllowed'));
-      return;
-    }
-
-    for (let i = 1; i < indices.length; i++) {
-      if (indices[i] - indices[i - 1] !== 1) {
-        message.warning(t('ui.mergeNotConsecutive'));
-        return;
-      }
-    }
-
-    const totalSize = indices.reduce((sum, i) => sum + logs[i].size, 0);
-    if (totalSize > 400 * 1024 * 1024) {
-      message.warning(t('ui.mergeTooLarge'));
-      return;
-    }
-
-    const files = indices.map(i => logs[i].file).reverse();
-
-    fetch(apiUrl('/api/merge-logs'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files }),
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.ok) {
-          message.success(t('ui.mergeSuccess'));
-          this.setState({ selectedLogs: new Set() });
-          this.handleImportLocalLogs();
-        } else {
-          message.error(data.error || 'Merge failed');
-        }
-      })
-      .catch(() => message.error('Merge failed'));
-  };
-
-  handleArchiveLogs = () => {
-    const { selectedLogs, localLogs, currentProject } = this.state;
-    if (selectedLogs.size === 0) return;
-    const logs = localLogs[currentProject];
-    if (!logs) return;
-    const latestFile = logs[0]?.file;
-    const candidates = [...selectedLogs].filter(f => f.endsWith('.jsonl') && f !== latestFile);
-    if (candidates.length === 0) {
-      message.warning(t('ui.mergeLatestNotAllowed'));
-      return;
-    }
-
-    Modal.confirm({
-      title: t('ui.archiveLogs'),
-      content: t('ui.archiveLogsConfirm', { count: candidates.length }),
-      okText: t('ui.archiveLogs'),
-      cancelText: t('ui.cancel'),
-      onOk: () => {
-        fetch(apiUrl('/api/archive-logs'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ files: candidates }),
-        })
-          .then(res => res.json())
-          .then(data => {
-            const archived = data.archived?.length || 0;
-            const failed = (data.failed?.length || 0) + (data.skipped?.length || 0);
-            if (archived > 0) message.success(t('ui.archiveSuccess', { count: archived }));
-            if (failed > 0) message.error(t('ui.archiveFailed', { count: failed }));
-            this.setState({ selectedLogs: new Set() });
-            this.handleImportLocalLogs();
-          })
-          .catch(() => message.error(t('ui.archiveFailed', { count: candidates.length })));
-      },
     });
   };
 

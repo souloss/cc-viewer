@@ -1000,6 +1000,12 @@
   margin-left: 8px;
 }
 
+/* wire-v2 mode switch: muted "pending restart" hint next to the toggle label */
+.pendingHint {
+  opacity: 0.65;
+  font-size: 12px;
+}
+
 .btnMarginRight {
   margin-right: 8px;
 }

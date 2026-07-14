@@ -18,6 +18,10 @@ process.env.CLAUDE_CONFIG_DIR = __isoDir;
 // 清掉可能从 `ccv --pid <id>` 父会话继承来的实例 id，确保 server 以默认实例(null)启动，
 // 否则 /api/local-logs 会按继承的 pid 过滤掉本测试的无标签夹具（与运行环境耦合）。
 delete process.env.CCV_INSTANCE_ID;
+// wire-v2 S5: this suite pins the read path's DISABLED default — a soak shell
+// exporting CCV_WIRE_V2_READ=1 must not leak in (server-v2-read.test.js owns
+// the enabled path).
+delete process.env.CCV_WIRE_V2_READ;
 process.env.CCV_START_PORT = '19750';
 process.env.CCV_MAX_PORT = '19759';
 process.env.CCV_WORKSPACE_MODE = '1';
@@ -127,6 +131,19 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
     }
   });
 
+  it('GET /api/local-log rejects v2 addressing while the read switch is off (S5 default)', async () => {
+    const res = await httpRequest(port, '/api/local-log?file=v2:proj/aaaa1111-2222-3333-4444-bbbb5555cccc');
+    assert.equal(res.status, 403);
+    assert.match(res.json().error, /v2 read path is disabled/);
+  });
+
+  it('GET /api/local-logs?v2=1 and v2 download are 403 while the read switch is off', async () => {
+    const list = await httpRequest(port, '/api/local-logs?v2=1');
+    assert.equal(list.status, 403);
+    const dl = await httpRequest(port, '/api/download-log?file=v2:proj/aaaa1111-2222-3333-4444-bbbb5555cccc');
+    assert.equal(dl.status, 403);
+  });
+
   it('GET /api/download-log rejects invalid file name', async () => {
     const res = await httpRequest(port, '/api/download-log?file=../../etc/passwd');
     assert.equal(res.status, 400);
@@ -206,5 +223,49 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
     assert.equal(data.entries.length, 0);
     assert.equal(data.hasMore, false);
     assert.equal(data.count, 0);
+  });
+
+  // ── wire-v2 S4: startup-only mode switch endpoints (review P2: HTTP-level
+  //    coverage per repo convention) ──────────────────────────────────────────
+  it('GET /api/wire-v2-mode returns config/running/effective shape', async () => {
+    const res = await httpRequest(port, '/api/wire-v2-mode');
+    assert.equal(res.status, 200);
+    const data = res.json();
+    assert.ok(['off', 'dual', 'dual-read'].includes(data.configMode));
+    assert.ok(['off', 'dual', 'dual-read'].includes(data.running), 'running = this process boot-time truth');
+    assert.ok(data.effective && ['env', 'config', 'default'].includes(data.effective.source));
+    assert.equal(typeof data.envOverride, 'boolean');
+    assert.deepEqual(data.unlocked, ['off', 'dual', 'dual-read']);
+    // wire-v2 S5: read-path state rides the same endpoint
+    assert.equal(data.readRunning, false, 'this suite pins the read-off default');
+    assert.ok(data.readEffective && ['env', 'config', 'default'].includes(data.readEffective.source));
+    assert.equal(typeof data.readEnvOverride, 'boolean');
+  });
+
+  it('POST /api/wire-v2-mode persists dual and GET reflects it (running unchanged)', async () => {
+    const post = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'dual' } });
+    assert.equal(post.status, 200);
+    assert.equal(post.json().ok, true);
+    const get = await httpRequest(port, '/api/wire-v2-mode');
+    assert.equal(get.json().configMode, 'dual');
+    assert.equal(get.json().running, 'off', 'running process must NOT hot-switch (startup-only contract)');
+    // restore
+    const off = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'off' } });
+    assert.equal(off.status, 200);
+  });
+
+  it('POST /api/wire-v2-mode accepts dual-read (S5) and rejects locked/unknown modes with 400', async () => {
+    // 'dual-read' unlocked since S5 — roundtrip then restore off.
+    const dualRead = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'dual-read' } });
+    assert.equal(dualRead.status, 200);
+    assert.equal((await httpRequest(port, '/api/wire-v2-mode')).json().configMode, 'dual-read');
+    assert.equal((await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'off' } })).status, 200);
+    const locked = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'v2' } });
+    assert.equal(locked.status, 400);
+    assert.match(locked.json().error, /not yet available/);
+    const unknown = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'bogus' } });
+    assert.equal(unknown.status, 400);
+    const badJson = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: '{not json' });
+    assert.equal(badJson.status, 400);
   });
 });

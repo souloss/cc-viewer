@@ -13,7 +13,7 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
 import { isCheckpointEntry, isDeltaEntry, reconstructSegment } from './delta-reconstructor.js';
-import { resolveJsonlPath } from './jsonl-archive.js';
+import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync } from './v2/adapter.js';
 
 const READ_CHUNK_SIZE = 1024 * 1024; // 1MB
 const SEPARATOR = '\n---\n';
@@ -23,7 +23,12 @@ const SEPARATOR = '\n---\n';
  * 内存 = 1MB buffer + pending。
  */
 function* iterateRawEntries(filePath) {
-  filePath = resolveJsonlPath(filePath);
+  // wire-v2 S5: a session DIRECTORY resolves to the v2→v1 adapter stream — the
+  // synthesized entries feed every downstream consumer unchanged (spec §11).
+  if (isV2SessionDir(filePath)) {
+    yield* iterateV2RawEntries(filePath);
+    return;
+  }
   const fileSize = statSync(filePath).size;
   if (fileSize === 0) return;
 
@@ -64,8 +69,17 @@ function* iterateRawEntries(filePath) {
  * @param {string} filePath
  * @param {{ startOffset?: number }} [opts] - startOffset>0 时从该偏移量开始读取并跳过首条（可能被截断）
  */
-async function* iterateRawEntriesAsync(filePath, { startOffset = 0 } = {}) {
-  filePath = resolveJsonlPath(filePath);
+// Exported since wire-v2 S4: the verify tool needs a SINGLE streaming pass —
+// streamRawEntriesAsync's dedup map (~half the file resident) plus its second
+// send pass are pure waste for a scan-only consumer (review P2).
+export async function* iterateRawEntriesAsync(filePath, { startOffset = 0 } = {}) {
+  // wire-v2 S5: adapter branch. startOffset is a BYTE offset into a physical
+  // file — meaningless for a synthesized stream, so v2 always reads in full
+  // (readTailEntries routes v2 through its full-read path for the same reason).
+  if (isV2SessionDir(filePath)) {
+    yield* iterateV2RawEntriesAsync(filePath);
+    return;
+  }
   let fh;
   try {
     const st = await fsStat(filePath);
@@ -109,7 +123,6 @@ async function* iterateRawEntriesAsync(filePath, { startOffset = 0 } = {}) {
  * 用于 SSE load_start 的 total 字段（进度显示）。
  */
 export async function countLogEntries(filePath) {
-  filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return 0;
   let count = 0;
   for await (const _ of iterateRawEntriesAsync(filePath)) { count++; }
@@ -149,11 +162,10 @@ function isSegmentBoundary(entry) {
 }
 
 // ============================================================================
-// 同步 API — 用于 mergeLogFiles（合并需要重建为全量格式写入磁盘）
+// 同步 API — 重建为全量格式的同步变体（当前无生产消费者，保留给测试与未来批处理；退役评估归 wire-v2 S6c）
 // ============================================================================
 
 export function streamReconstructedEntries(filePath, onSegment, opts = {}) {
-  filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return 0;
   const stat = statSync(filePath);
   if (stat.size === 0) return 0;
@@ -208,7 +220,6 @@ export function streamReconstructedEntries(filePath, onSegment, opts = {}) {
 }
 
 export async function streamReconstructedEntriesAsync(filePath, onSegment, opts = {}) {
-  filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return 0;
   try {
     const st = await fsStat(filePath);
@@ -289,11 +300,14 @@ export async function streamReconstructedEntriesAsync(filePath, onSegment, opts 
  * @returns {Promise<{sentCount: number, totalCount: number}>}
  */
 export async function streamRawEntriesAsync(filePath, onRawEntry, opts = {}) {
-  filePath = resolveJsonlPath(filePath);
   const empty = { sentCount: 0, totalCount: 0 };
   if (!existsSync(filePath)) { if (opts.onReady) opts.onReady({ totalCount: 0 }); return empty; }
-  const stat = statSync(filePath);
-  if (stat.size === 0) { if (opts.onReady) opts.onReady({ totalCount: 0 }); return empty; }
+  // v2 session dirs skip the size probe: a directory's st.size is 0 on some
+  // filesystems (Windows) and never reflects the synthesized stream anyway.
+  if (!isV2SessionDir(filePath)) {
+    const stat = statSync(filePath);
+    if (stat.size === 0) { if (opts.onReady) opts.onReady({ totalCount: 0 }); return empty; }
+  }
 
   const sinceFilter = opts.since || null;
   const onScan = opts.onScan || null;
@@ -418,9 +432,11 @@ function _sliceToCheckpoint(entries, limit) {
  * @returns {Promise<{ entries: string[], hasMore: boolean, oldestTimestamp: string, estimatedTotal: number }>}
  */
 export async function readTailEntries(filePath, { limit = 300 } = {}) {
-  filePath = resolveJsonlPath(filePath);
   const emptyResult = { entries: [], hasMore: false, oldestTimestamp: '', estimatedTotal: 0 };
   if (!existsSync(filePath)) return emptyResult;
+  // v2 session dirs have no byte-offset tail window — always full-read (the
+  // synthesized stream is a few % of the v1 volume, spec §15).
+  if (isV2SessionDir(filePath)) return _readTailFull(filePath, limit, 0);
   const st = statSync(filePath);
   if (st.size === 0) return emptyResult;
 
@@ -486,10 +502,11 @@ async function _readTailFull(filePath, limit, fileSize) {
  * @returns {{ entries: string[], hasMore: boolean, oldestTimestamp: string, count: number }}
  */
 export async function readPagedEntries(filePath, { before, limit }) {
-  filePath = resolveJsonlPath(filePath);
   if (!existsSync(filePath)) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
-  const stat = statSync(filePath);
-  if (stat.size === 0) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
+  if (!isV2SessionDir(filePath)) {
+    const stat = statSync(filePath);
+    if (stat.size === 0) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
+  }
 
   const dedup = await _collectDedup(iterateRawEntriesAsync(filePath));
 
