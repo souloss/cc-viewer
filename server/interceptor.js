@@ -17,6 +17,8 @@ import { LOG_DIR } from '../findcc.js';
 import { assembleStreamMessage, createStreamAssembler, isAnthropicApiPath, isMainAgentRequest, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs } from './lib/interceptor-core.js';
 import { V2Writer } from './lib/v2/v2-writer.js';
 import { reportSwallowed } from './lib/error-report.js';
+import { latestMainSessionDir, sessionHasMainTurn } from './lib/v2/session-select.js';
+import { sanitizePathComponent } from './lib/v2/layout.js';
 
 
 
@@ -272,9 +274,36 @@ export { _v2Writer };
 // S6b: the live read source — the current v2 session dir once the writer has
 // resolved a session; '' before the first request (readers treat a missing
 // path as an empty stream, same as v1's not-yet-created file did).
+//
+// Task B (2026-07-15): the [对话] panel must not cold-load empty. Two cases
+// produce an empty current session: (a) before the first request, currentSid is
+// null; (b) a session's sid resolved but it has NO main turn yet (`-c` startup
+// or a background sub/count_tokens request set _currentSid before the user sent
+// anything) — cold-loading THAT renders blank (the refresh bug: fresh load
+// shows data, a refresh once the empty current session exists shows nothing,
+// filling only after the user sends a request). So we serve the current session
+// ONLY when it has a main turn ("activated"); otherwise we fall back to the
+// newest MAIN session that does. Selection is idempotent across refreshes.
+//
+// The live feed still follows the ACTUAL written dir (it never reads this
+// function), so once the current session gets its first main turn, its entries
+// form a newer session the frontend auto-switches to. Selection rides the same
+// bounded cold-load window (DEFAULT_EVENTS_LIMIT) as any session — never
+// limit=0 — so it stays memory-safe (S10). All three cold-load consumers
+// (/events, /api/requests, workspace reload) route through here.
 export function getLiveLogSource() {
   const dir = _v2Writer.currentSessionDir();
-  return dir || '';
+  if (dir && sessionHasMainTurn(dir)) return dir; // activated current session
+  if (!_projectName) return ''; // no project bound yet (mirrors v2-writer's guard)
+  try {
+    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)));
+    // A current-but-empty session with nothing else on disk: '' (still empty,
+    // but the live feed fills it in place — no worse than before the fix).
+    return fallback || dir || '';
+  } catch (err) {
+    reportSwallowed('cold-load.fallback-select', err);
+    return dir || '';
+  }
 }
 
 // P2 (-c migration guidance): three detection channels, any one marks this

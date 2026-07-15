@@ -28,12 +28,34 @@ export function sanitizePathComponent(name) {
   return cleaned;
 }
 
+/** Session creation time (ISO) → a 14-digit LOCAL-time stamp `yyyymmddhhmmss`
+ *  for the session dir-name prefix (task C). Deliberately NO internal separator
+ *  (unlike log-management's `compactLocalTs`, which emits `YYYYMMDD_HHMMSS`) so
+ *  the dir name `<14digits>_<sessionId>` splits unambiguously on the first `_`.
+ *  Returns '' on an unparseable ts. */
+export function compactLocalTs14(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+// The `<project>/<SESSIONS_DIR_NAME>/<dirName>/` nesting is load-bearing: the
+// read adapter re-derives the project root as `dirname(dirname(sessionDir))`
+// (adapter.js/replay.js), so anything that materializes a session dir off the
+// hot path (e.g. the zip-upload extractor) MUST reuse this constant to stay in
+// sync — a divergent literal would silently synthesize zero entries.
+export const SESSIONS_DIR_NAME = 'sessions';
+
 /** All absolute paths of one session directory, derived once and passed around.
+ *  The 3rd arg is the DIR-NAME (path segment) — for live sessions that is now
+ *  `<ts>_<uuid>` (task C), for the converter a staged name, for legacy the bare
+ *  UUID. It is NOT the identity (the UUID lives in meta.sessionId).
  *  `sessionsDirName` lets the offline converter target a sibling staging root
  *  (`sessions-migrating`) with the exact same layout; live writers keep the
  *  default and never pass it. */
-export function sessionPaths(logDir, project, sessionId, sessionsDirName = 'sessions') {
-  const dir = join(logDir, sanitizePathComponent(project), sanitizePathComponent(sessionsDirName), sanitizePathComponent(sessionId));
+export function sessionPaths(logDir, project, dirName, sessionsDirName = SESSIONS_DIR_NAME) {
+  const dir = join(logDir, sanitizePathComponent(project), sanitizePathComponent(sessionsDirName), sanitizePathComponent(dirName));
   return {
     dir,
     metaPath: join(dir, 'meta.json'),
@@ -103,8 +125,11 @@ export function writeFileAtomicSync(finalPath, data) {
  *         userIdEncoding, leader?, im? } — spec §3. Existing meta is never
  * rewritten here (later additive updates go through updateMetaSync).
  */
-export function ensureSessionDirSync(logDir, project, sessionId, meta = {}, sessionsDirName = 'sessions') {
-  const paths = sessionPaths(logDir, project, sessionId, sessionsDirName);
+export function ensureSessionDirSync(logDir, project, sessionId, meta = {}, sessionsDirName = SESSIONS_DIR_NAME, dirName = sessionId) {
+  // Path uses dirName (`<ts>_<uuid>` for live, task C); IDENTITY (meta.sessionId
+  // + journal sentinel) stays the bare `sessionId` (UUID). Legacy callers omit
+  // dirName → it defaults to sessionId → old behavior (dir == UUID).
+  const paths = sessionPaths(logDir, project, dirName, sessionsDirName);
   mkdirSync(paths.conversationsDir, { recursive: true });
   mkdirSync(paths.blobsDir, { recursive: true });
   if (!existsSync(paths.metaPath)) {

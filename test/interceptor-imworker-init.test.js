@@ -9,7 +9,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -60,7 +60,9 @@ describe('IM worker 初始化（v2-only：与普通进程同一写路径）', ()
     });
     await mod._v2Writer.flush();
     const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-    const dir = join(logDir, project, 'sessions', SID);
+    // Task C: writer names the dir `<ts>_<uuid>`; resolve by UUID suffix.
+    const sroot = join(logDir, project, 'sessions');
+    const dir = join(sroot, readdirSync(sroot).find((n) => n === SID || n.endsWith('_' + SID)) || SID);
     assert.ok(existsSync(join(dir, 'journal.jsonl')), 'v2 session journal 应已写入');
     assert.equal(mod.getLiveLogSource(), dir, 'live source 指向 IM worker 自己的 v2 session dir');
   });

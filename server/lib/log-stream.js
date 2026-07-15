@@ -13,7 +13,7 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
 import { isCheckpointEntry, isDeltaEntry, reconstructSegment } from './delta-reconstructor.js';
-import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync, readV2WindowedEntries } from './v2/adapter.js';
+import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync, readV2WindowedEntries, streamV2WindowedEntries } from './v2/adapter.js';
 
 const READ_CHUNK_SIZE = 1024 * 1024; // 1MB
 const SEPARATOR = '\n---\n';
@@ -317,21 +317,25 @@ export async function streamRawEntriesAsync(filePath, onRawEntry, opts = {}) {
   // window start (synthesized checkpoint), which the byte-tail heuristics below
   // cannot — expand-to-checkpoint over adapter output could walk arbitrarily
   // far back on a session with sparse organic snapshots.
+  // S10a: streaming two-pass — `since` is pushed into window membership so the
+  // /events incremental reconnect path materializes only the entries it will
+  // send (the historical full materialization here was the primary OOM path).
+  // onScan is retired on this branch: the newest-mainAgent raws come back as
+  // `mainAgentRing` in the result instead (adapter P0-2).
   if (isV2SessionDir(filePath)) {
-    const win = await readV2WindowedEntries(filePath, { limit: opts.limit, onScan });
-    if (onReady) onReady({ totalCount: win.totalCount, hasMore: win.hasMore, oldestTs: win.oldestTimestamp || null });
-    let sent = 0;
-    for (const raw of win.entries) {
-      if (sinceFilter) {
-        const ts = extractTimestamp(raw);
-        if (ts && ts < sinceFilter) continue;
-      }
-      await onRawEntry(raw);
-      sent++;
-      if (sent % 20 === 0) await new Promise(resolve => setImmediate(resolve));
-    }
+    // cached defaults FALSE here: streamRawEntriesAsync serves the /events
+    // cold-load / live-attach and the workspaces live-source reload — these
+    // suppress the ≤ttl cache READ (they must not start from a stale window).
+    // Level-1 scan coalescing still collapses concurrent reconnects; the join
+    // staleness is bounded by one in-flight scan (not the ttl) — see
+    // singleflight.js cached=false note.
+    const res = await streamV2WindowedEntries(
+      filePath,
+      { limit: opts.limit, since: sinceFilter, onReady, cached: opts.cached === true },
+      onRawEntry,
+    );
     await new Promise(resolve => setImmediate(resolve));
-    return { sentCount: sent, totalCount: win.totalCount };
+    return { sentCount: res.sentCount, totalCount: res.totalCount, mainAgentRing: res.mainAgentRing };
   }
 
   // 第一遍：异步 generator 逐条读取 → dedup Map 存原始字符串（不 parse）
@@ -452,13 +456,15 @@ function _sliceToCheckpoint(entries, limit) {
  * @param {{ limit?: number }} opts
  * @returns {Promise<{ entries: string[], hasMore: boolean, oldestTimestamp: string, estimatedTotal: number }>}
  */
-export async function readTailEntries(filePath, { limit = 300 } = {}) {
+export async function readTailEntries(filePath, { limit = 300, cached = true } = {}) {
   const emptyResult = { entries: [], hasMore: false, oldestTimestamp: '', estimatedTotal: 0 };
   if (!existsSync(filePath)) return emptyResult;
   // v2 session dirs have no byte-offset tail window — the adapter windows by
   // entry count and synthesizes a baseline checkpoint at the window start.
+  // cached defaults TRUE: the /api/local-log tail + IM popup are historical
+  // read-only reads (S10b) and may consume a ≤ttl-stale window.
   if (isV2SessionDir(filePath)) {
-    const win = await readV2WindowedEntries(filePath, { limit });
+    const win = await readV2WindowedEntries(filePath, { limit, cached });
     return { entries: win.entries, hasMore: win.hasMore, oldestTimestamp: win.oldestTimestamp, estimatedTotal: win.totalCount };
   }
   const st = statSync(filePath);

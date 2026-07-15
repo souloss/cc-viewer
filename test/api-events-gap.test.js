@@ -226,8 +226,34 @@ describe('GET /events', () => {
     assert.equal(deps.clients.includes(res), false, 'res removed from clients on close');
   });
 
+  it('task B: with NO current session, cold-load falls back to the latest prior session', async () => {
+    // Seed a prior MAIN session, then reset so there is no current session
+    // (getLiveLogSource() → currentSessionDir()=null → picker). The /events
+    // cold-load must stream that prior session instead of an empty panel, and
+    // derive context_window from ITS mainAgent — not the file fallback.
+    await seedV2([
+      mainAgentEntry('2026-06-06T02:00:00.000Z', 777),
+      mainAgentEntry('2026-06-06T02:01:00.000Z', 888),
+    ]);
+    interceptor._v2Writer.resetSessions(); // dir persists on disk; _currentSid → null
+    assert.equal(interceptor._v2Writer.currentSessionDir(), null, 'no current session after reset');
+
+    const req = new EventEmitter(); req.headers = {};
+    const res = makeRes();
+    await events(req, res, url('/events'), true, eventsDeps());
+    const frames = parseFrames(bodyStr(res));
+    assert.equal(frames.filter((f) => f.event === 'load_chunk').length, 2, 'streams the prior session, not empty');
+    const cw = frames.find((f) => f.event === 'context_window');
+    assert.ok(cw, 'context_window from the fallback session mainAgent');
+    assert.equal(JSON.parse(cw.data).total_input_tokens, 888, 'newest mainAgent of the fallback session');
+  });
+
   it('falls back to context-window.json when the log has no MainAgent', async () => {
-    // Only a subagent entry → no real mainAgent → CONTEXT_WINDOW_FILE fallback
+    // Only a subagent entry → no real mainAgent → CONTEXT_WINDOW_FILE fallback.
+    // Clear prior on-disk sessions first: the sub-only current session has no
+    // main turn, so getLiveLogSource() would otherwise fall back to an earlier
+    // test's leftover main session (task B refresh fix) and read ITS mainAgent.
+    rmSync(join(tmpDir, 'evproj', 'sessions'), { recursive: true, force: true });
     await seedV2([subAgentEntry('2026-06-06T01:00:00.000Z', 333)]);
     const cwFile = join(tmpDir, 'context-window.json');
     writeFileSync(cwFile, JSON.stringify({

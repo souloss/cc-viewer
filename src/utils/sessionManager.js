@@ -245,11 +245,14 @@ export function applyBatchEntryTimestamps(st, entry) {
   // filter below), otherwise the first count=1 entry after a delta rebuild would
   // be swallowed and its _timestamp stolen by the next count>4 entry.
   const postClearCheckpoint = isPostClearCheckpoint(entry, prevCount);
-  const isNewSession = isSessionBoundary(entry, { prevCount, count, prevUserId: st.prevUserId, userId });
+  const epoch = entry._seqEpoch || null;
+  const epochChanged = !!(epoch && st.prevEpoch && epoch !== st.prevEpoch);
+  const isNewSession = isSessionBoundary(entry, { prevCount, count, prevUserId: st.prevUserId, userId, prevEpoch: st.prevEpoch, epoch });
   // Transient protection: very short entries (<=4 msgs) after a long conversation
   // are usually in-flight requests (request body only, no response yet) and must
-  // not reset the accumulated timestamps. Real /clear starts are exempt.
-  const isTransient = isNewSession && !postClearCheckpoint && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
+  // not reset the accumulated timestamps. Real /clear starts AND epoch changes
+  // (task B: a definitive new session, even when short) are exempt.
+  const isTransient = isNewSession && !postClearCheckpoint && !epochChanged && count <= 4 && prevCount > 4 && count < prevCount * 0.5;
   if (isNewSession && !isTransient) {
     st.currentSessionId = timestamp;
     st.timestamps = [];
@@ -287,6 +290,7 @@ export function applyBatchEntryTimestamps(st, entry) {
     }
   }
   st.prevUserId = userId;
+  st.prevEpoch = epoch; // carry v2 session epoch for the next entry's boundary check
   // Remember this entry's ts as the next entry's prevMainAgentTs.
   st.prevMainAgentTs = timestamp;
 }
@@ -439,6 +443,9 @@ export function applyInPlaceLastMsgReplace(prevSessions, entry, timestamp, isNew
     // with the "MainAgent" fallback. entry.response is guaranteed by the guard above, so
     // getEffectiveModel is authoritative here; fall back to the previous stamp.
     model: getEffectiveModel(entry) || lastSession.model || null,
+    // Preserve the v2 session epoch (task B) — this path clones the session, and
+    // dropping it would make the next entry's epoch-boundary check read undefined.
+    _seqEpoch: lastSession._seqEpoch,
   };
   // 末位替换：返回新 sessions 数组保持原顺序、prev 长度不变。
   // 下游 ChatView _sessionItemCache[last] 按 index 索引该 session，依赖 index 恒定不能错位。

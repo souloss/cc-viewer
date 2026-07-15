@@ -1,12 +1,24 @@
 // Local log management routes (moved verbatim from server.js handleRequest).
-import { existsSync, realpathSync, statSync, createReadStream } from 'node:fs';
+import { existsSync, realpathSync, statSync, createReadStream, mkdtempSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { tmpdir } from 'node:os';
+import AdmZip from 'adm-zip';
 import { LOG_DIR } from '../../findcc.js';
 import { _projectName, _v2Writer } from '../interceptor.js';
 import { listV2Logs, listLocalLogs, countListedV1Files, deleteLogFiles, validateLogPath } from '../lib/log-management.js';
 import { countLogEntries, streamRawEntriesAsync, readTailEntries } from '../lib/log-stream.js';
+import { dirSizeSync } from '../lib/v2/layout.js';
+import { extractV2Zip } from '../lib/log-zip.js';
 import { startConvert, stopConvert, convertStatus } from '../lib/v2/convert-manager.js';
 import { migrationStatus } from '../lib/v2/migrate-prompt.js';
+
+// Cap for the in-memory zip build (adm-zip toBuffer holds the whole archive in
+// heap) and the upload accumulation — the repo has an OOM history, so both the
+// zipped source folder and the uploaded archive are bounded before buffering.
+const MAX_UPLOAD = 300 * 1024 * 1024;
+// Download-zip source cap; read per-request so CCV_MAX_ZIP_SOURCE is an ops
+// tunable (and a test seam) without a restart.
+const maxZipSource = () => Number(process.env.CCV_MAX_ZIP_SOURCE) || 300 * 1024 * 1024;
 
 async function localLogs(req, res, parsedUrl, isLocal, deps) {
   try {
@@ -45,11 +57,42 @@ async function downloadLog(req, res, parsedUrl) {
     return;
   }
   // wire-v2 S5: rebuilt download for v2 sessions — the adapter stream as a v1
-  // `.jsonl`. `format=raw` (session-dir zip) is the S6a half of the S0 contract.
+  // `.jsonl`. `format=raw` (session-dir zip) is the S6a half of the S0 contract:
+  // a lossless zip of the whole session folder, the transport for round-tripping
+  // a v2 session (folder) back through the upload-and-parse flow.
   if (file.startsWith('v2:')) {
     if (parsedUrl.searchParams.get('format') === 'raw') {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'raw (zip) download for v2 sessions is not available yet' }));
+      try {
+        const sessionDir = validateLogPath(LOG_DIR, file);
+        if (dirSizeSync(sessionDir) > maxZipSource()) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session too large to zip', code: 'TOO_LARGE' }));
+          return;
+        }
+        const dirName = basename(sessionDir);
+        const zip = new AdmZip();
+        // Wrap the folder under `<dirName>/` and skip dotfiles (.DS_Store etc.).
+        // adm-zip passes the zip-internal path (incl. the `<dirName>/` root) to
+        // the filter, so match on any path segment starting with a dot.
+        zip.addLocalFolder(sessionDir, dirName, (n) => !/(^|\/)\./.test(n.replace(/\\/g, '/')));
+        const buf = zip.toBuffer();
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(`${dirName}.zip`)}"`,
+          'Content-Length': buf.length,
+        });
+        res.end(buf);
+      } catch (err) {
+        if (!res.headersSent) {
+          const status = err.code === 'NOT_FOUND' ? 404 : err.code === 'ACCESS_DENIED' ? 403 : 500;
+          // Don't leak internal messages (may contain absolute paths) on 500 —
+          // genericize like the upload handler does.
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: status >= 500 ? 'server_error' : err.message }));
+        } else {
+          res.end();
+        }
+      }
       return;
     }
     try {
@@ -247,6 +290,73 @@ function postWireV2Convert(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// wire-v2 S6a: upload a v2-session zip (produced by `?format=raw` download),
+// extract it to a temp dir, synthesize + stream it back as v1-shaped `\n---\n`
+// raw entries for ephemeral viewing, then delete the temp dir. Nothing is
+// written into LOG_DIR — view-only, parity with the legacy client-side `.jsonl`
+// upload. Raw `application/zip` body (no multipart); uses its own MAX_UPLOAD
+// cap, NOT deps.MAX_POST_BODY (which is ~10MB and would reject any real zip).
+function uploadLogZip(req, res) {
+  const contentLength = parseInt(req.headers['content-length'] || '0', 10);
+  if (contentLength > MAX_UPLOAD) {
+    res.writeHead(413, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'File too large', code: 'TOO_LARGE' }));
+    return;
+  }
+  let chunks = [];
+  let totalSize = 0;
+  let aborted = false;
+  // A large remote upload can reset mid-flight; without an 'error' listener the
+  // socket error would crash the process (unhandled 'error' event).
+  req.on('error', () => { aborted = true; chunks = []; });
+  req.on('data', (chunk) => {
+    if (aborted) return;
+    totalSize += chunk.length;
+    if (totalSize > MAX_UPLOAD) {
+      aborted = true;
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'File too large', code: 'TOO_LARGE' }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', async () => {
+    if (aborted) return;
+    let tmpDir = null;
+    try {
+      tmpDir = mkdtempSync(join(tmpdir(), 'ccv-upload-'));
+      const buf = Buffer.concat(chunks);
+      chunks = []; // free the per-chunk copies; adm-zip holds `buf` from here
+      const sessionDir = extractV2Zip(buf, tmpDir);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Transfer-Encoding': 'chunked',
+      });
+      await streamRawEntriesAsync(sessionDir, (raw) => {
+        res.write(raw);
+        res.write('\n---\n');
+      });
+      res.end();
+    } catch (err) {
+      const status = err?.status || 500;
+      if (status >= 500) console.error('[api/upload-log-zip]', err);
+      if (!res.headersSent) {
+        const safeError = status >= 500 ? 'server_error' : (err?.message || 'error');
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: safeError, code: err?.code || 'unknown' }));
+      } else {
+        res.end();
+      }
+    } finally {
+      // Always reclaim the temp dir. The adapter has finished all reads by the
+      // time the await settles (cold v2 reads are bounded), so this is race-free
+      // even when the client disconnected mid-stream.
+      if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+    }
+  });
+}
+
 export const logsRoutes = [
   { method: 'GET', match: 'exact', path: '/api/local-logs', handler: localLogs },
   { method: 'GET', match: 'exact', path: '/api/wire-v2-convert', handler: getWireV2Convert },
@@ -254,4 +364,5 @@ export const logsRoutes = [
   { method: 'GET', match: 'exact', path: '/api/download-log', handler: downloadLog },
   { method: 'GET', match: 'exact', path: '/api/local-log', handler: localLog },
   { method: 'POST', match: 'exact', path: '/api/delete-logs', handler: deleteLogs },
+  { method: 'POST', match: 'exact', path: '/api/upload-log-zip', handler: uploadLogZip },
 ];

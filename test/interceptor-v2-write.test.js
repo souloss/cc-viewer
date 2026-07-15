@@ -57,7 +57,11 @@ function projectDir() {
 }
 
 function sessionDir() {
-  return join(projectDir(), 'sessions', SID);
+  // Task C: the writer names dirs `<ts>_<uuid>`; resolve by UUID suffix.
+  const sroot = join(projectDir(), 'sessions');
+  let name = SID;
+  try { name = readdirSync(sroot).find((n) => n === SID || n.endsWith('_' + SID)) || SID; } catch { /* not created yet */ }
+  return join(sroot, name);
 }
 
 function readJsonl(path) {

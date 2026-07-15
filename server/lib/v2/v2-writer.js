@@ -16,10 +16,12 @@
 // (spec §14, pendingTail-style retry), so this is defense-in-depth, not a
 // correctness dependency.
 
-import { statfsSync } from 'node:fs';
+import { statfsSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { AsyncWriteQueue } from '../async-write-queue.js';
 import { reportSwallowed } from '../error-report.js';
-import { ensureSessionDirSync } from './layout.js';
+import { ensureSessionDirSync, compactLocalTs14, sanitizePathComponent } from './layout.js';
+import { resolveSessionDirName } from './session-select.js';
 import { BlobStore } from './blob-store.js';
 import { Journal } from './journal.js';
 import { ConversationStore } from './conversation-store.js';
@@ -97,17 +99,32 @@ export class V2Writer {
    *  writer exists (module init order), so the nudge callback arrives here. */
   setOnActivity(fn) { this._onActivity = typeof fn === 'function' ? fn : null; }
 
-  _session(sessionId, userIdRaw, encoding, project) {
+  _session(sessionId, userIdRaw, encoding, project, startTsIso) {
     let s = this._sessions.get(sessionId);
-    if (s) return s;
+    if (s) return s; // hot path: map hit is O(1), the scan below only runs on miss
+
+    // Task C: the dir name carries a creation-time prefix `<ts>_<uuid>`. On a
+    // map MISS (cold start / restart / `-c` re-attach) the same session must
+    // REUSE its existing dir, not mint a `<now>_<uuid>` sibling (which would
+    // split the conversation + reset seq + flip _seqEpoch). Scan for an existing
+    // dir by UUID; only when none exists create a new ts-prefixed one. The
+    // identity written into meta.sessionId / journal sentinel stays the UUID.
+    const startTs = startTsIso || new Date().toISOString();
     const meta = {
       pid: process.pid,
+      startTs,
       ...(userIdRaw && { userIdRaw }),
       ...(encoding && { userIdEncoding: encoding }),
       ...(this._leader && { leader: this._leader }),
       ...(this._metaExtra || {}),
     };
-    const paths = ensureSessionDirSync(this._logDir, project, sessionId, meta, this._sessionsDirName);
+    const projectDir = join(this._logDir, sanitizePathComponent(project));
+    let dirName = resolveSessionDirName(projectDir, sessionId, this._sessionsDirName);
+    if (!dirName) {
+      const ts = compactLocalTs14(startTs) || compactLocalTs14(new Date().toISOString());
+      dirName = `${ts}_${sessionId}`;
+    }
+    const paths = ensureSessionDirSync(this._logDir, project, sessionId, meta, this._sessionsDirName, dirName);
     s = {
       paths,
       blobs: new BlobStore(paths),
@@ -176,7 +193,11 @@ export class V2Writer {
         this._currentSid = sid;
       }
 
-      const s = this._session(sid, parsed && entry.body.metadata.user_id, parsed && parsed.encoding, project);
+      // entry.timestamp = this session's first-request time → meta.startTs +
+      // the dir-name ts prefix (task C). First-write-wins: meta is only written
+      // when the dir is first created, so this is the session's creation time
+      // (live ≈ now; convert = the historical first-entry ts).
+      const s = this._session(sid, parsed && entry.body.metadata.user_id, parsed && parsed.encoding, project, entry.timestamp);
 
       // Flush requests that arrived before the first sid (they belong here).
       // Their handles are parked in _lateHandles so a completion that arrives

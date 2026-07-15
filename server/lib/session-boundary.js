@@ -96,6 +96,11 @@ export function isCompactContinuation(entry) {
  *      (entry-slim.js) and we trust that flag here.
  *   3. user_id change with an established previous session (prevCount > 0) →
  *      boundary (different device/account writing into the same log).
+ *   4. (task B) v2 `_seqEpoch` change → boundary. A different session id is a
+ *      definitive boundary the count/user heuristics miss when a SHORT prior
+ *      session precedes the current one (cold-load fallback → live supersede).
+ *      Three-part guard: only when BOTH sides carry an epoch and they differ,
+ *      so v1 leftovers (no epoch) and epoch-less entries fall through unchanged.
  *
  * KEEP IN SYNC: the bigDrop formula (rule 2, minus the compact exclusion) is
  * mirrored in entry-slim.js's three slimmer predicates (process/finalize/
@@ -108,10 +113,14 @@ export function isCompactContinuation(entry) {
  * @param {number} ctx.count - this entry's message count
  * @param {string|null} ctx.prevUserId - user_id of the previous entry/session
  * @param {string|null} ctx.userId - this entry's user_id
+ * @param {string|null} [ctx.prevEpoch] - _seqEpoch of the previous session
+ * @param {string|null} [ctx.epoch] - this entry's _seqEpoch
  * @returns {boolean}
  */
-export function isSessionBoundary(entry, { prevCount, count, prevUserId, userId }) {
+export function isSessionBoundary(entry, { prevCount, count, prevUserId, userId, prevEpoch, epoch }) {
   if (isPostClearCheckpoint(entry, prevCount)) return true;
+  // Epoch change is a definitive boundary (bypasses count/user heuristics).
+  if (epoch && prevEpoch && epoch !== prevEpoch) return true;
   const bigDrop = prevCount > 0 && count < prevCount * 0.5 && (prevCount - count) > 4;
   const compactLike = (entry && entry._compactContinuation === true) || isCompactContinuation(entry);
   if (bigDrop && !compactLike) return true;

@@ -206,12 +206,14 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
     assert.equal(missing.status, 404);
   });
 
-  it('GET /api/download-log serves the rebuilt v2 stream; raw zip is still 400', async () => {
+  it('GET /api/download-log serves the rebuilt v2 stream; raw is the session zip (S6a)', async () => {
     const dl = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(`v2:${projectName}/${SID}`)}`);
     assert.equal(dl.status, 200);
     assert.ok(dl.body.includes('q-first prompt'));
     const raw = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(`v2:${projectName}/${SID}`)}&format=raw`);
-    assert.equal(raw.status, 400);
+    assert.equal(raw.status, 200);
+    assert.equal(raw.headers['content-type'], 'application/zip');
+    assert.ok(raw.body.startsWith('PK'), 'raw body is a zip archive');
   });
 
   it('GET /api/download-log rejects invalid file name', async () => {

@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { sanitizePathComponent, sessionPaths, ensureSessionDirSync, convEpochPath, writeFileAtomicSync } from '../server/lib/v2/layout.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { parseUserId, ConvResolver, classifyKind, firstUserPromptText } from '../server/lib/v2/identity.js';
 import { BlobStore } from '../server/lib/v2/blob-store.js';
 import { ConversationStore } from '../server/lib/v2/conversation-store.js';
@@ -35,6 +36,10 @@ const clearMsg = () => textMsg('user', '<command-name>/clear</command-name>');
 function readLines(path) {
   return readFileSync(path, 'utf8').trim().split('\n').map(l => JSON.parse(l));
 }
+
+// Task C: the V2Writer now names dirs `<ts>_<uuid>`; resolve the real dir by
+// UUID (falls back to the bare id for direct ensureSessionDirSync fixtures).
+const sp = (project, sid) => sessionPaths(dir, project, resolveSessionDirName(join(dir, project), sid) || sid);
 
 // ─── identity: dual-encoding user_id (spec §8) ──────────────────────────────
 describe('parseUserId dual encoding', () => {
@@ -461,7 +466,7 @@ describe('V2Writer', () => {
     w.ingestCompletion(h2, { ...e2, duration: 99, response: { status: 200, body: { usage: {}, content: [] } } });
     await w.flush();
 
-    const paths = sessionPaths(dir, 'proj', SID);
+    const paths = sp('proj', SID);
     const journal = readLines(paths.journalPath);
     const reqs = journal.filter(l => l.ph === 'req');
     assert.equal(reqs.length, 2);
@@ -493,7 +498,7 @@ describe('V2Writer', () => {
     const h = w.ingestRequest(e, e.body.messages);
     assert.ok(h);
     await w.flush();
-    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const journal = readLines(sp('proj', SID).journalPath);
     const kinds = journal.filter(l => l.ph === 'req').map(l => l.kind);
     assert.deepEqual(kinds, ['heartbeat', 'main'], 'held heartbeat flushed into the resolved session first');
 
@@ -502,7 +507,7 @@ describe('V2Writer', () => {
     const hct = w.ingestRequest(ct, ct.body.messages);
     assert.ok(hct && hct.sid === SID);
     await w.flush();
-    const journal2 = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const journal2 = readLines(sp('proj', SID).journalPath);
     const ctReq = journal2.find(l => l.ph === 'req' && l.kind === 'countTokens');
     assert.equal(ctReq.conv, 'misc', 'countTokens keeps wire fidelity under misc');
   });
@@ -523,7 +528,7 @@ describe('V2Writer', () => {
     w.ingestRequest(e2, e2.body.messages); // append slice = [assistant hi, user second question]
     await w.flush();
 
-    const paths = sessionPaths(dir, 'proj', SID);
+    const paths = sp('proj', SID);
     const lines = readLines(paths.promptsPath);
     assert.equal(lines.length, 2);
     assert.deepEqual(lines[0].texts, ['hello']);
@@ -544,7 +549,7 @@ describe('V2Writer', () => {
     w.ingestRequest(e3, e3.body.messages);
     await w.flush();
 
-    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    const lines = readLines(sp('proj', SID).promptsPath);
     const all = lines.flatMap(l => l.texts);
     assert.equal(all.length, 1, 'only the real prompt recorded');
     assert.ok(!all[0].includes('\n') && all[0].length === 100, 'flattened + 100-char cap');
@@ -566,7 +571,7 @@ describe('V2Writer', () => {
     w2.ingestRequest(e2, e2.body.messages);
     await w2.flush();
 
-    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    const lines = readLines(sp('proj', SID).promptsPath);
     assert.deepEqual(lines.flatMap(l => l.texts), ['q1', 'q2'], 'no duplicate q1 after restart');
   });
 
@@ -582,7 +587,7 @@ describe('V2Writer', () => {
     e3.body.messages = [textMsg('user', 'q1'), textMsg('assistant', 'draft'), textMsg('user', 'the real followup')];
     w.ingestRequest(e3, e3.body.messages);
     await w.flush();
-    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    const lines = readLines(sp('proj', SID).promptsPath);
     assert.deepEqual(lines.flatMap(l => l.texts), ['q1', 'the real followup'],
       'replace-tail arm captures the real prompt that supplanted the probe');
   });
@@ -594,7 +599,7 @@ describe('V2Writer', () => {
     const ct = { timestamp: 't2', url: 'https://api/v1/messages/count_tokens', method: 'POST', isCountTokens: true, requestId: 'ct1', body: { messages: [textMsg('user', 'count me')] } };
     w.ingestRequest(ct, ct.body.messages);
     await w.flush();
-    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    const lines = readLines(sp('proj', SID).promptsPath);
     assert.deepEqual(lines.flatMap(l => l.texts), ['hello'], 'misc conv (countTokens) contributed nothing');
   });
 
@@ -629,7 +634,7 @@ describe('V2Writer', () => {
     const h = w.ingestRequest(e, e.body.messages);
     assert.ok(h);
     await w.flush();
-    const paths = sessionPaths(dir, 'proj', SID);
+    const paths = sp('proj', SID);
     const meta = JSON.parse(readFileSync(paths.metaPath, 'utf8'));
     assert.equal(meta.leader.agentName, 'cr-product');
     const req = readLines(paths.journalPath).find(l => l.ph === 'req');
@@ -650,7 +655,7 @@ describe('V2Writer', () => {
     const hs = w.ingestRequest(sub, sub.body.messages);
     assert.ok(hs);
     await w.flush();
-    const paths = sessionPaths(dir, 'proj', SID);
+    const paths = sp('proj', SID);
     const req = readLines(paths.journalPath).find(l => l.rid === 'req_sub');
     assert.equal(req.kind, 'sub');
     assert.equal(req.conv, 'sub-' + 'toolu_ZZZZZZZZZZZZ9'.slice(-12), 'conv key derives from the spawning tool_use.id');
@@ -671,7 +676,7 @@ describe('V2Writer', () => {
     const h2 = w2.ingestRequest(e2, e2.body.messages);
     assert.equal(h2.seq, 2, 'seq seeded from the existing journal, no collision');
     await w2.flush();
-    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath).filter(l => l.ph === 'req');
+    const journal = readLines(sp('proj', SID).journalPath).filter(l => l.ph === 'req');
     assert.deepEqual(journal.map(l => l.seq), [1, 2]);
   });
 
@@ -682,7 +687,7 @@ describe('V2Writer', () => {
     w.resetSessions(); // workspace switch while the request is in flight
     w.ingestCompletion(h, { ...e, duration: 7, response: { status: 200, body: { usage: { input_tokens: 2 } } } });
     await w.flush();
-    const paths = sessionPaths(dir, 'proj', SID);
+    const paths = sp('proj', SID);
     const done = readLines(paths.journalPath).find(l => l.ph === 'done' && l.seq === h.seq);
     assert.ok(done, 'done line written into the ORIGINAL session dir via the handle-carried session');
     assert.equal(readLines(paths.responsesPath).length, 1, 'response line not dropped');
@@ -696,7 +701,7 @@ describe('V2Writer', () => {
     w.ingestRequest(e, e.body.messages); // flushes the held request
     w.ingestCompletion(null, { ...held, duration: 5, response: { status: 200, body: { usage: {} } } });
     await w.flush();
-    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const journal = readLines(sp('proj', SID).journalPath);
     const heldReq = journal.find(l => l.ph === 'req' && l.rid === 'ct-late');
     const heldDone = journal.find(l => l.ph === 'done' && l.rid === 'ct-late');
     assert.ok(heldReq, 'held req line exists');
@@ -714,7 +719,7 @@ describe('V2Writer', () => {
     const h2 = w.ingestRequest(e2, e2.body.messages);
     assert.equal(h2.seq, 2, 'journal seq survives the reset');
     await w.flush();
-    const conv = readLines(convEpochPath(sessionPaths(dir, 'proj', SID), 'main', 0));
+    const conv = readLines(convEpochPath(sp('proj', SID), 'main', 0));
     assert.deepEqual(conv.map(l => l.t), ['snapshot', 'snapshot'], 'post-reset ingest re-snapshots');
   });
 });
@@ -737,7 +742,7 @@ describe('concurrent ingest', () => {
       w.ingestCompletion(handles[i], { ...mk(i), duration: i, response: { status: 200, body: { content: [], usage: {} } } });
     }
     await w.flush();
-    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath).filter(l => l.ph !== 'meta');
+    const journal = readLines(sp('proj', SID).journalPath).filter(l => l.ph !== 'meta');
     const reqs = journal.filter(l => l.ph === 'req');
     const dones = journal.filter(l => l.ph === 'done');
     assert.equal(reqs.length, N, 'no dropped req lines');
@@ -812,9 +817,9 @@ describe('write-order protocol', () => {
     };
     assert.ok(w.ingestRequest(e, e.body.messages));
     await w.flush();
-    const journal = readLines(sessionPaths(dir, 'proj', SID).journalPath);
+    const journal = readLines(sp('proj', SID).journalPath);
     const kinds = journal.filter(l => l.ph === 'req').map(l => l.kind);
     assert.deepEqual(kinds, ['countTokens', 'main'], 'held request journals first, in one batch');
-    assert.ok(existsSync(convEpochPath(sessionPaths(dir, 'proj', SID), 'misc', 0)), 'held conv content still lands');
+    assert.ok(existsSync(convEpochPath(sp('proj', SID), 'misc', 0)), 'held conv content still lands');
   });
 });

@@ -29,6 +29,7 @@ import { SessionSynthesizer, iterateV2RawEntries, readV2WindowedEntries, findTea
 import { readTailEntries } from '../server/lib/log-stream.js';
 import { reconstructEntries } from '../server/lib/delta-reconstructor.js';
 import { _resetForTest } from '../server/lib/error-report.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ccv-v2inc-')); _resetForTest(); });
@@ -80,7 +81,7 @@ function fire(w, entry, { complete = true } = {}) {
   return h;
 }
 
-const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', sid);
+const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', resolveSessionDirName(join(dir, 'proj'), sid) || sid);
 
 /** Parse a session dir's files into feedable line streams (file order). */
 function sessionLines(sessionDir) {

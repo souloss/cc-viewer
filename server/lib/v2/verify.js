@@ -58,7 +58,9 @@ export async function verifyV1File(v1File, opts = {}) {
   // this build can't read means the gate has a coverage hole — FAIL, don't skip.
   for (const sid of listSessionIds(projectDir, sessionsDirName)) {
     const session = readSession(projectDir, sid, sessionsDirName);
-    v2Sessions.push(sid);
+    // Report the session IDENTITY (UUID from meta), not the dir name — the dir
+    // is `<ts>_<uuid>` post task C; falls back to the dir name on torn meta.
+    v2Sessions.push((session.meta && session.meta.sessionId) || sid);
     if (session.unsupported) {
       unsupportedSessions.push({ sessionId: sid, wireFormat: session.wireFormat });
       continue;

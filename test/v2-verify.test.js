@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { convertProject } from '../server/lib/v2/convert.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { verifyV1File } from '../server/lib/v2/verify.js';
 import * as replay from '../server/lib/v2/replay.js';
 import { _resetForTest } from '../server/lib/error-report.js';
@@ -142,7 +143,7 @@ describe('verifier end-to-end over converted sessions (migration golden gate)', 
   it('tampered v2 conversation file → digest diff reported (verifier has teeth)', async () => {
     writeV1(standardEntries());
     await convertAll();
-    const convFile = join(logDir, PROJECT, 'sessions', SID, 'conversations', 'main', 'e0.jsonl');
+    const convFile = join(logDir, PROJECT, 'sessions', resolveSessionDirName(join(logDir, PROJECT), SID) || SID, 'conversations', 'main', 'e0.jsonl');
     const original = readFileSync(convFile, 'utf-8');
     try {
       appendFileSync(convFile, JSON.stringify({ seq: 3, rid: 'tamper', t: 'ctl', op: 'replace-tail', msg: textMsg('user', 'TAMPERED') }) + '\n');
@@ -159,7 +160,7 @@ describe('verifier end-to-end over converted sessions (migration golden gate)', 
   it('tampered blob ref → tools-ref diff reported', async () => {
     writeV1(standardEntries());
     await convertAll();
-    const journalFile = join(logDir, PROJECT, 'sessions', SID, 'journal.jsonl');
+    const journalFile = join(logDir, PROJECT, 'sessions', resolveSessionDirName(join(logDir, PROJECT), SID) || SID, 'journal.jsonl');
     const original = readFileSync(journalFile, 'utf-8');
     try {
       const lines = original.trim().split('\n');

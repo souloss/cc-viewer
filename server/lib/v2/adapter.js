@@ -34,6 +34,7 @@ import { isMainAgentRequest } from '../interceptor-core.js';
 import { readPromptsHead, collectPromptsFromEvents } from '../user-prompt-extract.js';
 import { readSession, readJsonlTolerant, listSessionIds } from './replay.js';
 import { blobPath, isSupportedWireFormat, dirSizeSync } from './layout.js';
+import { SingleFlight } from './singleflight.js';
 
 // Same stamping rules as the v1 interceptor (KEEP IN SYNC: server/interceptor.js
 // requestEntry construction) — recomputed from the journal's url, not from kind,
@@ -94,6 +95,15 @@ function makeBlobLoader(paths, sessionId) {
   };
 }
 
+/** Whether an applied event set makes its request a v1 CHECKPOINT (vs a delta):
+ *  an applied snapshot or a ctl replace-tail is present; an append-only or
+ *  wire-unchanged (empty) event set is a delta. Single predicate shared by the
+ *  descriptor Pass A and the full envelope branch in _emit so they cannot drift
+ *  (KEEP the envelope's `_isCheckpoint` assignment routed through this). */
+function appliedIsCheckpoint(applied) {
+  return applied.some((e) => e.t === 'snapshot' || (e.t === 'ctl' && e.op === 'replace-tail'));
+}
+
 /**
  * Incremental per-event synthesis engine — the single synthesis path shared by
  * the cold generators and the live feed.
@@ -106,14 +116,16 @@ function makeBlobLoader(paths, sessionId) {
  *   ingestResponseLine(rawLine)     — responses.jsonl lines (raw strings)
  * Synthesized items accumulate internally; callers collect them via drain().
  *
- * Item shape: { ts, sessionId, seq, phase: 'placeholder'|'completed',
- *               entry, isMain, stateRef }
+ * Item shape (full synthesis): { ts, sessionId, seq, phase:
+ *               'placeholder'|'completed', entry, isMain, stateRef }
  * `entry` is the v1-shape object (stringify on receipt: a live placeholder's
  * entry object is MUTATED in place into its completed form when the done
  * arrives, exactly so both stringify byte-identical to a cold read).
  * `stateRef` is the conversation state array as of this seq (immutably
  * replaced by the replay, so the reference stays valid) — used by the window
  * mode to synthesize a baseline checkpoint at an arbitrary start seq.
+ * Descriptor mode (S10a Pass A, opts.descriptorOnly) instead emits the light
+ * shape { ts, sessionId, seq, url, isMain, isMainDelta } — no entry/stateRef.
  *
  * Live-mode ordering hazards handled here (S6b review):
  * - A journal req line can land before its own conversation event line
@@ -138,16 +150,33 @@ export class SessionSynthesizer {
    *   conversation event (or a done whose response line) has not landed yet.
    *   0 = cold semantics: skip immediately, next full read self-heals.
    * @param {Function} [opts.now] - clock injection (tests)
+   * @param {boolean} [opts.descriptorOnly] - S10a window Pass A: emit light
+   *   descriptors ({ts,sessionId,seq,url,isMain,isMainDelta}) under the SAME
+   *   pump/gate/replay semantics, skipping blob backfill / message assembly /
+   *   entry construction. Membership decisions (crash-orphan skips, msgTo
+   *   gates) are replay-dependent, so a journal-only scan would diverge.
+   * @param {(sessionId:string, seq:number)=>boolean} [opts.materialize]
+   *   S10a window Pass B: predicate deciding whether a request is synthesized
+   *   at all. Falsy → state still advances (in _pumpConv) but no entry is
+   *   built or retained. Baseline promotion happens on the CONSUMER side over
+   *   item.stateRef, so the ring keeps the un-promoted raw (onScan parity).
    */
   constructor(sessionDir, opts = {}) {
     this.sessionDir = sessionDir;
     this.projectDir = dirname(dirname(sessionDir));
-    this.sessionId = basename(sessionDir);
     this._deferMs = typeof opts.deferMs === 'number' ? opts.deferMs : 0;
     this._now = opts.now || Date.now;
+    this._descriptorOnly = !!opts.descriptorOnly;
+    this._materialize = typeof opts.materialize === 'function' ? opts.materialize : null;
     let meta = null;
     try { meta = JSON.parse(readFileSync(join(sessionDir, 'meta.json'), 'utf-8')); } catch { /* tolerated — journal is self-describing */ }
     this._meta = meta || {};
+    // Task C: session IDENTITY = meta.sessionId (the UUID), NOT the dir basename
+    // (which is now `<ts>_<uuid>`). This feeds _seqEpoch, k-way tie-break and
+    // item dedup — all of which must stay stable across the dir rename and match
+    // the wire UUID (teammate parentSessionId). basename is a path token only.
+    // Fallback to basename on a torn/missing meta (self-consistent within a load).
+    this.sessionId = (meta && meta.sessionId) || basename(sessionDir);
     this._leader = opts.teammateOf || this._meta.leader || null;
     this._loadBlob = makeBlobLoader({ blobsDir: join(sessionDir, 'blobs') }, this.sessionId);
     this.unsupported = false;
@@ -344,6 +373,31 @@ export class SessionSynthesizer {
     const seq = req.seq;
     const meta = this._meta;
     const leader = this._leader;
+    const isTeammate = !!leader;
+    const isMain = req.kind === 'main' && !isTeammate;
+    // Single source for the checkpoint/delta decision — consumed by BOTH the
+    // descriptor Pass A (below) and the full envelope branch, so the two can
+    // never drift (adding a checkpoint-triggering event type updates one place).
+    const isCheckpoint = appliedIsCheckpoint(applied);
+
+    // ---- S10a window passes ------------------------------------------------
+    // Pass A (descriptor): same gates/replay as full synthesis, no entry build.
+    if (this._descriptorOnly) {
+      this._out.push({
+        ts: req.ts || '',
+        sessionId: this.sessionId,
+        seq,
+        url: req.url,
+        isMain,
+        isMainDelta: isMain && !!conv && !isCheckpoint,
+      });
+      return;
+    }
+    // Pass B (materialize gate): conversation state was already advanced by
+    // _pumpConv, so skipping here skips ONLY blob backfill + entry build +
+    // retention — exactly the per-request memory cost the window excludes.
+    const mat = this._materialize ? this._materialize(this.sessionId, seq) : true;
+    if (!mat) return;
 
     // ---- body (blob backfill is per-request by journal ref — never carried) --
     const tools = this._loadBlob(req.blobs && req.blobs.tools);
@@ -355,8 +409,8 @@ export class SessionSynthesizer {
       ...(meta.userIdRaw && { metadata: { user_id: meta.userIdRaw } }),
     };
 
-    const isTeammateEntry = !!leader;
-    const isMainKind = req.kind === 'main' && !isTeammateEntry;
+    const isTeammateEntry = isTeammate;
+    const isMainKind = isMain;
     const entry = {
       timestamp: req.ts,
       project: meta.project || basename(this.projectDir),
@@ -388,7 +442,7 @@ export class SessionSynthesizer {
         const replaceTail = applied.find((e) => e.t === 'ctl' && e.op === 'replace-tail');
         const append = applied.find((e) => e.t === 'append');
         if (snapshot || replaceTail || !append) {
-          entry._isCheckpoint = !!(snapshot || replaceTail);
+          entry._isCheckpoint = isCheckpoint; // = !!(snapshot||replaceTail); empty-wire delta is false
           if (replaceTail && !snapshot) {
             entry._isCheckpoint = true;
             // Paired signal (KEEP IN SYNC: src/utils/sessionManager.js
@@ -495,7 +549,12 @@ function* iterateSessionItems(sessionDir, opts = {}) {
     reportSwallowed('v2-read.unsupported-wire-format', new Error(`${sessionId}: wireFormat=${session.wireFormat}`));
     return;
   }
-  const synth = new SessionSynthesizer(sessionDir, { teammateOf: opts.teammateOf, deferMs: 0 });
+  const synth = new SessionSynthesizer(sessionDir, {
+    teammateOf: opts.teammateOf,
+    deferMs: 0,
+    descriptorOnly: opts.descriptorOnly,
+    materialize: opts.materialize,
+  });
   if (synth.unsupported) return; // meta gate already reported by the constructor
   // Eager seed: all conversation events, responses, and done lines are known
   // before any req is pumped — every gate then resolves exactly like the
@@ -517,9 +576,19 @@ function* iterateSessionItems(sessionDir, opts = {}) {
  *  carries no sid. Those sessions are attributed to the leader session that was
  *  most recently started at (or before) the teammate's own start — the exact
  *  semantics of v1's findRecentLog ("append to the newest leader log"). */
-export function findTeammateSessionDirs(sessionDir) {
+export function findTeammateSessionDirs(sessionDir, leaderUuid) {
   const sessionsRoot = dirname(sessionDir);
-  const leaderSid = basename(sessionDir);
+  const leaderSid = basename(sessionDir); // dir NAME — for the self-skip + leaderless tie-break
+  // Task C: teammates record the leader's UUID in meta.leader.parentSessionId
+  // (from the CLI `--parent-session-id`, immutable). Since the leader dir is now
+  // `<ts>_<uuid>`, we match against the leader's meta.sessionId (the UUID), NOT
+  // basename. Read it ONCE up-front (callers pass it; fall back to a direct
+  // read) — a mid-loop capture would miss when readdir visits a teammate before
+  // the leader's own dir.
+  if (!leaderUuid) {
+    try { leaderUuid = JSON.parse(readFileSync(join(sessionDir, 'meta.json'), 'utf-8')).sessionId || leaderSid; }
+    catch { leaderUuid = leaderSid; }
+  }
   const out = [];
   let names = [];
   try {
@@ -544,8 +613,9 @@ export function findTeammateSessionDirs(sessionDir) {
         continue;
       }
       // The writer records parentSessionId (interceptor.js); tolerate the spec's
-      // original sessionId spelling for hand-built or future dirs.
-      if (l.parentSessionId === leaderSid || l.sessionId === leaderSid) {
+      // original sessionId spelling for hand-built or future dirs. Match the
+      // leader's UUID (meta.sessionId), not its dir name (task C).
+      if (l.parentSessionId === leaderUuid || l.sessionId === leaderUuid) {
         out.push({ dir, leader: l });
       } else if (!l.parentSessionId && !l.sessionId) {
         orphans.push({ dir, leader: l, startTs: (meta && meta.startTs) || '' });
@@ -576,16 +646,16 @@ export function findTeammateSessionDirs(sessionDir) {
  * Item-level iteration of one v2 session with teammate re-join — the shared
  * core of the raw-string generators and the window reader below.
  */
-function* iterateV2Items(sessionDir) {
-  const streams = [iterateSessionItems(sessionDir)];
+function* iterateV2Items(sessionDir, opts = {}) {
+  const streams = [iterateSessionItems(sessionDir, opts)];
   const ownMeta = (() => {
     try { return JSON.parse(readFileSync(join(sessionDir, 'meta.json'), 'utf-8')); } catch { return null; }
   })();
   // A teammate session read directly renders itself (tagged via its own meta.
   // leader inside iterateSessionItems); only a LEADER pulls in siblings.
   if (!ownMeta || !ownMeta.leader) {
-    for (const tm of findTeammateSessionDirs(sessionDir)) {
-      streams.push(iterateSessionItems(tm.dir, { teammateOf: tm.leader }));
+    for (const tm of findTeammateSessionDirs(sessionDir, ownMeta && ownMeta.sessionId)) {
+      streams.push(iterateSessionItems(tm.dir, { ...opts, teammateOf: tm.leader }));
     }
   }
   if (streams.length === 1) {
@@ -633,46 +703,75 @@ export async function* iterateV2RawEntriesAsync(sessionDir) {
   }
 }
 
+// Depth of the newest-mainAgent ring folded into window results (S10a). The
+// /events kv-cache/context-window scan consumed every raw via onScan before;
+// the two-pass window no longer stringifies out-of-window entries, so Pass A
+// tracks the newest ≤3 main descriptors and Pass B force-materializes them.
+// KEEP IN SYNC: server/routes/events.js MAINAGENT_SCAN_RING.
+const MAINAGENT_RING_DEPTH = 3;
+
+/** Window pass key: seqs are unique per session (journal folds duplicates),
+ *  so (sessionId, seq) identifies one synthesized item across the k-way merge. */
+const itemKey = (sessionId, seq) => `${sessionId}\x00${seq}`;
+
+// S10b: two-level in-flight coalescing (spec §14.1). Level 1 shares the Pass A
+// descriptor scan per sessionDir (reconnect storms are all the same dir);
+// level 2 shares the full-window Pass B materialization per (dir,limit,before)
+// — since-bearing (incremental) callers stream their own cheap Pass B instead.
+const _scanFlight = new SingleFlight({ ttlMs: 500 });
+const _windowFlight = new SingleFlight({ ttlMs: 500 });
+const _windowStats = { scanRuns: 0, materializeRuns: 0 };
+export function _v2WindowStatsForTest(reset = false) {
+  const snap = { ..._windowStats };
+  if (reset) { _windowStats.scanRuns = 0; _windowStats.materializeRuns = 0; }
+  return snap;
+}
+
 /**
- * Windowed read of a v2 session: dedup (timestamp|url, last wins), optional
- * `before` filter, tail-`limit` slice — and a BASELINE GUARANTEE the byte-tail
- * heuristics of v1 files cannot give: when the window starts on a main-
- * conversation delta, that entry is re-synthesized as a checkpoint carrying
- * the full replayed state at its seq (the adapter holds it for free), so a
- * window is always reconstructable regardless of how sparse the session's
- * organic snapshots are (S6b review P1: expand-to-checkpoint over adapter
- * output could otherwise walk arbitrarily far back or truncate history).
- *
- * @param {string} sessionDir
- * @param {{limit?: number, before?: string|null, onScan?: (raw:string)=>void}} [opts]
- * @returns {Promise<{entries: string[], hasMore: boolean, oldestTimestamp: string, totalCount: number}>}
+ * S10a Pass A: descriptor scan — runs the SAME synthesis gates as Pass B
+ * (a journal-only scan would count crash-orphans the synthesizer skips, P0-1)
+ * but builds no entries, loads no blobs, stringifies nothing: memory is
+ * O(request count) light records + the replayed conversation event lines.
+ * The result is IMMUTABLE and shared across coalesced callers — window
+ * selection must not mutate `recs`/`ring`.
  */
-export async function readV2WindowedEntries(sessionDir, opts = {}) {
-  const limit = opts.limit || 0;
-  const before = opts.before || null;
-  const onScan = opts.onScan || null;
-  const dedup = new Map(); // key → rec
+async function scanV2Descriptors(sessionDir) {
+  _windowStats.scanRuns++;
+  const dedup = new Map(); // key → descriptor (insertion order = output order)
+  const ring = []; // newest ≤3 isMain descriptors, pre-dedup iteration order
   let nokey = 0;
   let n = 0;
-  for (const item of iterateV2Items(sessionDir)) {
-    const e = item.entry;
-    const raw = JSON.stringify(e);
-    if (onScan) onScan(raw);
-    const key = e.timestamp && e.url ? `${e.timestamp}|${e.url}` : `__nokey_${nokey++}`;
-    const isMainDelta = item.isMain && e._deltaFormat === 1 && e._isCheckpoint === false;
-    dedup.set(key, {
-      raw,
-      ts: e.timestamp || '',
-      isMain: item.isMain,
-      isMainDelta,
-      // Rebuild inputs kept ONLY for delta candidates (checkpoints already
-      // carry their state; non-main entries need no baseline).
-      ...(isMainDelta && { entry: e, stateRef: item.stateRef }),
-    });
-    if (++n % 20 === 0) await new Promise((resolve) => setImmediate(resolve));
+  for (const d of iterateV2Items(sessionDir, { descriptorOnly: true })) {
+    const key = d.ts && d.url ? `${d.ts}|${d.url}` : `__nokey_${nokey++}`;
+    dedup.set(key, d);
+    // Ring criterion is item.isMain (kind==='main' on a non-teammate session):
+    // the old substring filter (`"mainAgent":true` && !`"teammate"`) also
+    // admitted sub/misc entries whose backfilled body LOOKED main-agent; the
+    // isMain ring drops those — intentional, more-correct behavior (pinned in
+    // test/v2-window-two-pass.test.js). Teammate-session main entries are
+    // excluded by both (they carry the teammate tag / isMain=false).
+    if (d.isMain) {
+      ring.push(d);
+      if (ring.length > MAINAGENT_RING_DEPTH) ring.shift();
+    }
+    if (++n % 50 === 0) await new Promise((resolve) => setImmediate(resolve));
   }
+  return { recs: [...dedup.values()], ring };
+}
 
-  let recs = [...dedup.values()];
+/**
+ * Window selection over a (possibly shared) descriptor scan — cheap array ops,
+ * run per caller. Filter order matches the historical single pass: dedup →
+ * `before` → tail-`limit` → `since` (emission filter, applied to membership so
+ * excluded entries are never materialized). The baseline candidate is decided
+ * on the post-limit window start; `since` may then drop it — exactly like the
+ * old emission-time since filter did.
+ */
+function selectV2Window(scan, opts = {}) {
+  const limit = opts.limit || 0;
+  const before = opts.before || null;
+  const since = opts.since || null;
+  let recs = scan.recs;
   if (before) recs = recs.filter((r) => r.ts && r.ts < before);
   const totalCount = recs.length;
   let hasMore = false;
@@ -680,23 +779,189 @@ export async function readV2WindowedEntries(sessionDir, opts = {}) {
     hasMore = true;
     recs = recs.slice(recs.length - limit);
   }
+  const oldestTimestamp = recs.length > 0 ? recs[0].ts : '';
   // Baseline: if the first main-conversation record in the window is a delta,
-  // promote it to a synthesized checkpoint over its replayed state.
+  // Pass B promotes it to a synthesized checkpoint over its replayed state.
   const firstMainIdx = recs.findIndex((r) => r.isMain);
+  let baselineKey = null;
   if (firstMainIdx >= 0 && recs[firstMainIdx].isMainDelta) {
-    const src = recs[firstMainIdx];
-    const state = src.stateRef || [];
-    const rebuilt = { ...src.entry, body: { ...src.entry.body, messages: state } };
-    rebuilt._isCheckpoint = true;
-    rebuilt._totalMessageCount = state.length;
-    recs[firstMainIdx] = { ...src, raw: JSON.stringify(rebuilt) };
+    baselineKey = itemKey(recs[firstMainIdx].sessionId, recs[firstMainIdx].seq);
   }
-  return {
-    entries: recs.map((r) => r.raw),
-    hasMore,
-    oldestTimestamp: recs.length > 0 ? recs[0].ts : '',
-    totalCount,
+  if (since) recs = recs.filter((r) => !(r.ts && r.ts < since));
+  if (baselineKey && !recs.some((r) => itemKey(r.sessionId, r.seq) === baselineKey)) {
+    baselineKey = null; // baseline fell below `since` — incremental clients rely on their cached state
+  }
+  return { members: recs, totalCount, hasMore, oldestTimestamp, baselineKey, ring: scan.ring };
+}
+
+/** Level-1 shared Pass A + per-caller selection. `cached` gates the TTL
+ *  micro-cache read (F5b: /events live-attach must never consume it). */
+async function computeV2Window(sessionDir, opts = {}) {
+  const scan = await _scanFlight.run(`scan:${sessionDir}`, () => scanV2Descriptors(sessionDir), { cached: !!opts.cached });
+  return selectV2Window(scan, opts);
+}
+
+/**
+ * S10a Pass B: re-synthesize the session, materializing ONLY window members
+ * (plus the mainAgent ring). Out-of-window requests advance conversation state
+ * without building entries/loading blobs/stringifying — peak memory is
+ * O(window raws) + one live conversation state + window-member blobs.
+ *
+ * `onEntry` (streaming mode) receives members in synthesis (seq) order — when
+ * duplicate timestamp|url keys exist this can differ from the historical
+ * dedup-map order, but clients re-dedup on the same key so the final state is
+ * equivalent (algorithm review F6). `collect` mode fills a slot array in
+ * Pass A output order instead: byte-identical to the historical single pass.
+ */
+async function materializeV2Window(sessionDir, win, { collect = false, onEntry = null } = {}) {
+  const memberIdx = new Map();
+  win.members.forEach((d, i) => memberIdx.set(itemKey(d.sessionId, d.seq), i));
+  const ringKeys = new Set(win.ring.map((d) => itemKey(d.sessionId, d.seq)));
+  const slots = collect ? new Array(win.members.length) : null;
+  const ringRaws = new Map();
+  const materialize = (sessionId, seq) => {
+    const k = itemKey(sessionId, seq);
+    return memberIdx.has(k) || ringKeys.has(k);
   };
+  let sentCount = 0;
+  let n = 0;
+  for (const item of iterateV2Items(sessionDir, { materialize })) {
+    const k = itemKey(item.sessionId, item.seq);
+    let raw = JSON.stringify(item.entry);
+    // The ring keeps the UN-promoted raw — parity with the old onScan hook,
+    // which saw every entry before the baseline rebuild.
+    if (ringKeys.has(k)) ringRaws.set(k, raw);
+    const idx = memberIdx.get(k);
+    if (idx !== undefined) {
+      // Baseline: promote the window-start main delta to a checkpoint over its
+      // replayed state (item.stateRef aliases the live conversation state at
+      // this seq — used transiently, never retained). Same construction as the
+      // historical end-of-window rebuild, byte-for-byte.
+      if (k === win.baselineKey) {
+        const state = item.stateRef || [];
+        const rebuilt = { ...item.entry, body: { ...item.entry.body, messages: state } };
+        rebuilt._isCheckpoint = true;
+        rebuilt._totalMessageCount = state.length;
+        raw = JSON.stringify(rebuilt);
+      }
+      if (collect) {
+        slots[idx] = raw;
+      } else if (onEntry) {
+        await onEntry(raw);
+      }
+      sentCount++;
+    }
+    if (++n % 20 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  const mainAgentRing = win.ring
+    .map((d) => ringRaws.get(itemKey(d.sessionId, d.seq)))
+    .filter(Boolean);
+  return { slots, sentCount, mainAgentRing };
+}
+
+/**
+ * Windowed read of a v2 session: dedup (timestamp|url, last wins), optional
+ * `before` filter, tail-`limit` slice — and a BASELINE GUARANTEE the byte-tail
+ * heuristics of v1 files cannot give: when the window starts on a main-
+ * conversation delta, that entry is synthesized as a checkpoint carrying the
+ * full replayed state at its seq, so a window is always reconstructable
+ * regardless of how sparse the session's organic snapshots are.
+ *
+ * S10a: two-pass. The historical single pass stringified and RETAINED every
+ * entry (~10x on-disk expansion resident per load — the 2026-07-15 OOM);
+ * now Pass A selects the window over light descriptors and Pass B
+ * materializes only its members. Output is byte-identical to the single pass.
+ * The onScan option is retired on this path — consumers use `mainAgentRing`
+ * from the result instead (P0-2).
+ *
+ * S10b: level-2 coalescing — a whole window result keyed (dir,limit,before) is
+ * shared across concurrent callers and TTL-cached for the read-only historical
+ * surfaces. `since` is NOT in the key (it filters emission over the same
+ * window), so this array path does not take `since`; the /events incremental
+ * path uses streamV2WindowedEntries with its own per-caller Pass B.
+ *
+ * IMMUTABILITY: the returned object (incl. `entries` and `mainAgentRing`) may
+ * be shared by reference across coalesced + TTL-cached callers — treat it as
+ * READ-ONLY. An in-place mutation (sort/reverse/push) would corrupt the shared
+ * cache for concurrent readers; copy first if you must mutate.
+ *
+ * @param {string} sessionDir
+ * @param {{limit?: number, before?: string|null, cached?: boolean}} [opts]
+ * @returns {Promise<{entries: string[], hasMore: boolean, oldestTimestamp: string, totalCount: number, mainAgentRing: string[]}>}
+ */
+export async function readV2WindowedEntries(sessionDir, opts = {}) {
+  const cached = !!opts.cached;
+  const key = `win:${sessionDir}|${opts.limit || 0}|${opts.before || ''}`;
+  return _windowFlight.run(key, async () => {
+    _windowStats.materializeRuns++;
+    const win = await computeV2Window(sessionDir, opts);
+    const { slots, mainAgentRing } = await materializeV2Window(sessionDir, win, { collect: true });
+    const entries = [];
+    for (let i = 0; i < slots.length; i++) {
+      if (slots[i] !== undefined) {
+        entries.push(slots[i]);
+      } else {
+        // Pass B synthesized a different member set than Pass A — both passes
+        // run the same gates, so a hole means the session changed between
+        // passes (live append) or a synthesis bug. Surface it; entry dropped.
+        reportSwallowed('v2-read.window-pass-divergence', new Error(`${basename(sessionDir)}: window slot ${i} not materialized`));
+      }
+    }
+    return {
+      entries,
+      hasMore: win.hasMore,
+      oldestTimestamp: win.oldestTimestamp,
+      totalCount: win.totalCount,
+      mainAgentRing,
+    };
+  }, { cached });
+}
+
+/**
+ * Streaming window read (S10a): same selection semantics as
+ * readV2WindowedEntries but entries are delivered one at a time via `onEntry`
+ * and never accumulated — the limit=0 full-session and `/events` incremental
+ * (`since`) paths stay O(one entry) resident instead of materializing the
+ * whole expanded session (the pre-S10a reconnect-storm OOM path).
+ *
+ * @param {string} sessionDir
+ * @param {{limit?: number, before?: string|null, since?: string|null,
+ *          onReady?: (info:{totalCount:number, hasMore:boolean, oldestTs:string|null})=>void}} opts
+ * @param {(raw: string) => void|Promise<void>} onEntry
+ * @returns {Promise<{sentCount: number, totalCount: number, mainAgentRing: string[]}>}
+ */
+export async function streamV2WindowedEntries(sessionDir, opts, onEntry) {
+  const win = await computeV2Window(sessionDir, opts);
+  if (opts.onReady) opts.onReady({ totalCount: win.totalCount, hasMore: win.hasMore, oldestTs: win.oldestTimestamp || null });
+  // Bounded window (limit>0): collect into slots and emit in Pass A output
+  // order — byte-order parity with the historical single pass. Unbounded paths
+  // (limit=0: /api/requests, workspaces reload, explicit ?limit=0) stream in
+  // synthesis (seq) order without retention. ACCEPTED ORDER CHANGE: when two
+  // entries share timestamp|url (e.g. same-ms countTokens bursts), the dedup
+  // survivor emits at its later seq position instead of the first-occurrence
+  // slot. Safe because the client re-dedups by the same key and main deltas
+  // reconstruct via _seq/_seqEpoch (not array index) — final state is
+  // order-independent; the default /events cold-load is bounded and unaffected.
+  if (opts.limit > 0) {
+    const { slots, mainAgentRing } = await materializeV2Window(sessionDir, win, { collect: true });
+    let sentCount = 0;
+    for (let i = 0; i < slots.length; i++) {
+      if (slots[i] === undefined) {
+        // Pass A selected a member Pass B didn't materialize (a live append
+        // between passes / a synthesis bug). Same invariant break the array
+        // reader reports — surface it here too rather than dropping silently
+        // (this streaming path is the /events live source, where it's most
+        // likely). The entry is omitted; the client's next `since` read heals.
+        reportSwallowed('v2-read.window-pass-divergence', new Error(`${basename(sessionDir)}: window slot ${i} not materialized (stream)`));
+        continue;
+      }
+      await onEntry(slots[i]);
+      if (++sentCount % 20 === 0) await new Promise((resolve) => setImmediate(resolve));
+    }
+    return { sentCount, totalCount: win.totalCount, mainAgentRing };
+  }
+  const { sentCount, mainAgentRing } = await materializeV2Window(sessionDir, win, { onEntry });
+  return { sentCount, totalCount: win.totalCount, mainAgentRing };
 }
 
 // ─── session listing (spec §12, list entry pulled forward from S6a) ─────────

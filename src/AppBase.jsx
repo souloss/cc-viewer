@@ -545,6 +545,7 @@ class AppBase extends React.Component {
       generatedTimestamps: [],   // 跟 timestamps 平行：position → _generatedTs（assistant 才有）
       prevMainAgentTs: null,      // 上一次 mainAgent entry 的 ts，给本次新增 assistant msg 赋
       prevUserId: null,
+      prevEpoch: null,            // task B: 上一条 mainAgent 的 _seqEpoch，epoch 变化=确定性会话边界
       sessions: [],
       filtered: [],
       currentSessionId: null,
@@ -1643,6 +1644,10 @@ class AppBase extends React.Component {
             count: messages.length,
             prevUserId: lastSession ? lastSession.userId : null,
             userId,
+            // task B: v2 session epoch change is a definitive boundary — split
+            // even a short prior session (cold-load fallback → live supersede).
+            prevEpoch: lastSession ? lastSession._seqEpoch : null,
+            epoch: entry._seqEpoch || null,
           });
 
           // SSE 实时流每条 entry 都是完整 request+response，不存在"中间态"；
@@ -2269,7 +2274,10 @@ class AppBase extends React.Component {
   };
 
   handleDownloadLogFile = (file) => {
-    const url = apiUrl(`/api/download-log?file=${encodeURIComponent(file)}`);
+    // v2 sessions are folders → download the lossless session-dir zip
+    // (`format=raw`). v1 `.jsonl` keeps the rebuilt-stream default unchanged.
+    const raw = file.startsWith('v2:') ? '&format=raw' : '';
+    const url = apiUrl(`/api/download-log?file=${encodeURIComponent(file)}${raw}`);
     const a = document.createElement('a');
     a.href = url;
     a.download = '';

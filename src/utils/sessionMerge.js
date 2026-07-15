@@ -52,6 +52,13 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
   const newMessages = entry.body.messages;
   const newResponse = entry.response;
   const userId = entry.body.metadata?.user_id || null;
+  // Task B — v2 session identity. `_seqEpoch` = "v2:<sid>" (adapter, main
+  // entries only). When it changes, this is unambiguously a DIFFERENT session,
+  // regardless of user_id or message count — a definitive boundary that the
+  // heuristics below (same-user merge, transient filter) would otherwise miss
+  // when a short prior session precedes the current one (the cold-load
+  // fallback → live supersede case). null-safe: v1 leftovers have no epoch.
+  const seqEpoch = entry._seqEpoch || null;
 
   const entryTimestamp = entry.timestamp || null;
   // Session-level model identity: ChatView falls back to it when per-message producer resolution
@@ -61,7 +68,7 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
   const entryModel = getEffectiveModel(entry);
 
   if (prevSessions.length === 0) {
-    return [{ userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
+    return [{ userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel, _seqEpoch: seqEpoch }];
   }
 
   const lastSession = prevSessions[prevSessions.length - 1];
@@ -69,15 +76,21 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
   const prevMsgCount = lastSession.messages ? lastSession.messages.length : 0;
   const isNewConversation = prevMsgCount > 0 && newMessages.length < prevMsgCount * 0.5 && (prevMsgCount - newMessages.length) > 4;
   const sameUser = userId !== null && userId === lastSession.userId;
+  // Three-part guard (NEVER two-part): only split when BOTH sides carry an
+  // epoch and they differ — `undefined !== "v2:x"` would wrongly split a v1
+  // leftover or a main-looking sub that lacks _seqEpoch.
+  const epochChanged = !!(seqEpoch && lastSession._seqEpoch && seqEpoch !== lastSession._seqEpoch);
 
   // /clear 后的首个 checkpoint：始终是新会话起点。
   // 同 device 下 sameUser 永远 true，否则会被下面的 same-session 分支吞掉；
   // 也不能被 transient 过滤掉（即便 newMessages.length === 1）。
-  if (isPostClearCheckpoint(entry, prevMsgCount)) {
+  // epoch 变化语义等同 post-clear（确定性会话边界），走同一 append 分支且绕过
+  // 下方 transient 过滤（短的新会话也不能被丢弃，否则与 batch 腿分歧）。
+  if (isPostClearCheckpoint(entry, prevMsgCount) || epochChanged) {
     for (let i = 0; i < newMessages.length; i++) {
       if (!newMessages[i]._timestamp) newMessages[i]._timestamp = entryTimestamp;
     }
-    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
+    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel, _seqEpoch: seqEpoch }];
   }
 
   if (!options.skipTransientFilter && isNewConversation && newMessages.length <= 4 && prevMsgCount > 4) {
@@ -162,6 +175,6 @@ export function mergeMainAgentSessions(prevSessions, entry, options = {}) {
     if (entryModel) lastSession.model = entryModel; // latest wins; model-less entries keep the stamp
     return [...prevSessions];
   } else {
-    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel }];
+    return [...prevSessions, { userId, messages: newMessages, response: newResponse, entryTimestamp, model: entryModel, _seqEpoch: seqEpoch }];
   }
 }

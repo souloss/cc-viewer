@@ -34,6 +34,7 @@ import { verifyV1File } from './verify.js';
 import { parseUserId } from './identity.js';
 import { sanitizePathComponent, writeFileAtomicSync, sessionPaths } from './layout.js';
 import { listSessionIds } from './replay.js';
+import { resolveSessionDirName } from './session-select.js';
 
 export const STAGING_DIR_NAME = 'sessions-migrating';
 export const STATE_FILE_NAME = 'wire-v2-convert-state.json';
@@ -218,7 +219,9 @@ export async function convertProject(logDir, project, opts = {}) {
         if (sid) {
           if (!seenSids.has(sid)) {
             seenSids.add(sid);
-            if (existsSync(sessionPaths(logDir, project, sid).dir)) {
+            // Task C: a live dual-written session's dir is `<ts>_<uuid>`, so
+            // match by UUID (resolve-by-scan), not a bare `sessions/<uuid>` path.
+            if (resolveSessionDirName(projectDir, sid)) {
               skipSids.add(sid);
               state.sessionsSkipped++;
             } else {
@@ -288,13 +291,19 @@ export async function convertProject(logDir, project, opts = {}) {
     }
     for (const sid of listSessionIds(projectDir, STAGING_DIR_NAME)) {
       const staged = join(stagingRoot, sid);
-      const target = sessionPaths(logDir, project, sid).dir;
-      if (existsSync(target)) {
-        // A dual-write session appeared for this sid mid-conversion — live data wins.
+      // Task C: `sid` is the staged dir name `<ts>_<uuid>`. A LIVE dual-write dir
+      // for the same UUID may carry a DIFFERENT ts prefix, so detect the
+      // collision by UUID (from the staged meta.sessionId), not the exact name.
+      let stagedUuid = sid;
+      try { stagedUuid = JSON.parse(readFileSync(join(staged, 'meta.json'), 'utf-8')).sessionId || sid; } catch { /* fall back to name */ }
+      if (resolveSessionDirName(projectDir, stagedUuid)) {
+        // A dual-write session appeared for this uuid mid-conversion — live data wins.
         rmSync(staged, { recursive: true, force: true });
         continue;
       }
-      const src = sidSources.get(sid);
+      const target = sessionPaths(logDir, project, sid).dir;
+      // sidSources is keyed by the UUID (ingest time), not the staged dir name.
+      const src = sidSources.get(stagedUuid);
       if (src && src.size > 0) {
         try {
           const metaPath = join(staged, 'meta.json');

@@ -19,6 +19,7 @@ import { convertProject, listV1Files, listConvertibleProjects, readConvertState,
 import { startConvert, stopConvert, convertStatus, isConvertRunning } from '../server/lib/v2/convert-manager.js';
 import { verifyV1File } from '../server/lib/v2/verify.js';
 import { ensureSessionDirSync } from '../server/lib/v2/layout.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { _resetForTest } from '../server/lib/error-report.js';
 
 let logDir;
@@ -68,7 +69,9 @@ function writeV1(name, entries) {
   writeFileSync(join(logDir, PROJECT, name), entries.map(e => JSON.stringify(e) + '\n---\n').join(''));
 }
 
-const sessionsDir = (sid) => join(logDir, PROJECT, 'sessions', sid);
+// Task C: converted session dirs are `<ts>_<uuid>`; resolve by UUID (falls back
+// to the bare id for direct ensureSessionDirSync fixtures / not-yet-created).
+const sessionsDir = (sid) => join(logDir, PROJECT, 'sessions', resolveSessionDirName(join(logDir, PROJECT), sid) || sid);
 const readJournal = (sid) => readFileSync(join(sessionsDir(sid), 'journal.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
 
 describe('listV1Files ordering and filtering', () => {
@@ -225,8 +228,9 @@ describe('resume and skip semantics', () => {
     });
     assert.equal(stopped.status, 'stopped');
     assert.deepEqual(stopped.files.map(f => f.done), [true, false]);
-    assert.ok(existsSync(join(logDir, PROJECT, STAGING_DIR_NAME, SID2)), 'staging kept for resume');
-    assert.ok(!existsSync(sessionsDir(SID2)), 'nothing promoted yet');
+    // Task C: staged dir is `<ts>_<uuid>` too — resolve by UUID under staging.
+    assert.ok(resolveSessionDirName(join(logDir, PROJECT), SID2, STAGING_DIR_NAME), 'staging kept for resume');
+    assert.ok(!resolveSessionDirName(join(logDir, PROJECT), SID2), 'nothing promoted yet');
 
     const resumed = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
     assert.equal(resumed.status, 'done');

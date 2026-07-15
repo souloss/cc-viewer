@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -374,6 +375,8 @@ describe('stats-worker v2: V2Writer round-trip format pin', () => {
     assert.equal(stats.summary.cache_read_input_tokens, 33);
     assert.equal(stats.summary.cache_creation_input_tokens, 44);
     assert.equal(stats.models['claude-fable-5'], 1);
-    assert.deepEqual(stats.files[`sessions/${SID}`].preview, ['real writer prompt']);
+    // Task C: the writer names the dir `<ts>_<uuid>`; the stats unit key follows.
+    const dirName = resolveSessionDirName(join(logDir, 'proj'), SID) || SID;
+    assert.deepEqual(stats.files[`sessions/${dirName}`].preview, ['real writer prompt']);
   });
 });

@@ -21,6 +21,7 @@ import { V2LiveFeed } from '../server/lib/v2/live-feed.js';
 import { iterateV2RawEntries } from '../server/lib/v2/adapter.js';
 import { reconstructEntries } from '../server/lib/delta-reconstructor.js';
 import { _resetForTest } from '../server/lib/error-report.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ccv-v2feed-')); _resetForTest(); });
@@ -70,7 +71,7 @@ function fire(w, entry, { complete = true } = {}) {
 }
 
 const projectDirOf = () => join(dir, 'proj');
-const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', sid);
+const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', resolveSessionDirName(join(dir, 'proj'), sid) || sid);
 
 /** Fake SSE client capturing everything written to it. */
 function fakeClient() {

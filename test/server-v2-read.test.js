@@ -20,6 +20,7 @@ process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
 
 const { LOG_DIR } = await import('../findcc.js');
+const { resolveSessionDirName } = await import('../server/lib/v2/session-select.js');
 
 const SID = 'c1d2e3f4-1111-2222-3333-444455556666';
 const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
@@ -63,7 +64,9 @@ function parseSseEntries(body) {
 describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
   let stopViewer, port;
   const projectName = `projV2_${Date.now()}`;
-  const v2Ref = `v2:${projectName}/${SID}`;
+  // Task C: the writer names the dir `<ts>_<uuid>`; resolve the real ref after
+  // the session is built (in before()).
+  let v2Ref = `v2:${projectName}/${SID}`;
 
   before(async () => {
     // Build a real v2 session with the real writer BEFORE the server boots.
@@ -88,6 +91,7 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
       w.ingestCompletion(h, { ...entry, response: { status: 200, headers: {}, body: { content: [], usage: {} } }, duration: 9 });
     });
     await w.flush();
+    v2Ref = `v2:${projectName}/${resolveSessionDirName(join(LOG_DIR, projectName), SID) || SID}`;
 
     const mod = await import('../server/server.js');
     stopViewer = mod.stopViewer;
@@ -135,14 +139,17 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
     assert.match(item.preview[0], /^turn 1/);
   });
 
-  it('GET /api/download-log streams the rebuilt v1-shape jsonl for a v2 ref; raw is 400', async () => {
+  it('GET /api/download-log streams the rebuilt v1-shape jsonl for a v2 ref; raw is a session zip', async () => {
     const res = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(v2Ref)}`);
     assert.equal(res.status, 200);
     const frames = res.body.split('\n---\n').filter((s) => s.trim());
     assert.equal(frames.length, 2);
     assert.equal(JSON.parse(frames[0])._isCheckpoint, true);
+    // S6a: raw is now the lossless session-dir zip (the `PK` local-file magic
+    // is ASCII and survives the string body accumulation).
     const raw = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(v2Ref)}&format=raw`);
-    assert.equal(raw.status, 400, 'raw zip export lands in S6a');
+    assert.equal(raw.status, 200, 'raw is the session zip (S6a)');
+    assert.ok(raw.body.startsWith('PK'), 'raw body is a zip archive');
   });
 
   it('reader version gate over HTTP: an unsupported-wireFormat session is unlisted and streams empty (spec §14)', async () => {
@@ -165,7 +172,10 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
     await w.flush();
 
     const { readFileSync, writeFileSync } = await import('node:fs');
-    const sdir = join(LOG_DIR, projectName, 'sessions', sid3);
+    // Task C: writer-created dir is `<ts>_<uuid>`; resolve it.
+    const dir3 = resolveSessionDirName(join(LOG_DIR, projectName), sid3) || sid3;
+    const ref3 = `v2:${projectName}/${dir3}`;
+    const sdir = join(LOG_DIR, projectName, 'sessions', dir3);
     const meta = JSON.parse(readFileSync(join(sdir, 'meta.json'), 'utf-8'));
     writeFileSync(join(sdir, 'meta.json'), JSON.stringify({ ...meta, wireFormat: 3 }));
     const jPath = join(sdir, 'journal.jsonl');
@@ -176,10 +186,10 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
     const list = await httpRequest(port, '/api/local-logs?v2=1&all=1');
     assert.equal(list.status, 200);
     const items = list.json()[projectName] || [];
-    assert.ok(!items.find((it) => it.file === `v2:${projectName}/${sid3}`), 'unsupported session must not be listed');
+    assert.ok(!items.find((it) => it.file === ref3), 'unsupported session must not be listed');
     assert.ok(items.find((it) => it.file === v2Ref), 'supported sibling still listed');
 
-    const stream = await httpRequest(port, `/api/local-log?file=${encodeURIComponent(`v2:${projectName}/${sid3}`)}`);
+    const stream = await httpRequest(port, `/api/local-log?file=${encodeURIComponent(ref3)}`);
     assert.equal(stream.status, 200, 'stream opens (dir exists) …');
     assert.deepEqual(parseSseEntries(stream.body), [], '… but yields ZERO entries — never partial garbage');
 

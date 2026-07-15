@@ -138,12 +138,15 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   // ring=3 的容错意义：团队会话末尾常有连续 teammate 伪 mainAgent 条目，单记忆位会被
   // 挤掉真实 mainAgent；子串预过滤的理论误伤（键/值恰为 "teammate" 的真实条目）也由
   // 环内更早候选兜底。
+  // KEEP IN SYNC: server/lib/v2/adapter.js MAINAGENT_RING_DEPTH — on the v2 path
+  // the adapter's mainAgentRing (that depth) wholesale REPLACES this ring, so a
+  // mismatch would silently give v1 and v2 sessions different candidate depths.
   const MAINAGENT_SCAN_RING = 3;
   const mainAgentRawRing = [];
 
   // S6b: the cold-load source is the current v2 session dir when the v2
   // writer is active (adapter stream), else the v1 file.
-  await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
+  const coldLoadResult = await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
     // 直接发送原始 JSON 字符串，不做 parse/reconstruct/stringify
     // ExitPlanMode V2 空 input 的条目按需补全 plan / planFilePath，其它原样透传
     if (res.destroyed || !res.writable) return;
@@ -192,6 +195,14 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   });
 
   res.write(`event: load_end\ndata: {}\n\n`);
+
+  // S10a: v2 sources no longer invoke onScan (the two-pass window never
+  // stringifies out-of-window entries) — the adapter returns the newest-main
+  // raws as `mainAgentRing` instead. v1 sources still fill the ring via onScan.
+  if (Array.isArray(coldLoadResult?.mainAgentRing) && coldLoadResult.mainAgentRing.length > 0) {
+    mainAgentRawRing.length = 0;
+    mainAgentRawRing.push(...coldLoadResult.mainAgentRing);
+  }
 
   // Pass 1 入环的候选 newest-first 校验 + parse（≤K 次）。kv_cache 与 context_window
   // 各自取"最新一条能提供该值的真实 mainAgent"—— 与旧版逐条覆盖语义等价（环深度内）。

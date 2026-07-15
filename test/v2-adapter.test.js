@@ -25,6 +25,7 @@ import { isPostClearCheckpoint, normalizeMsgForEquality } from '../server/lib/se
 import { validateLogPath, parseV2Ref, listV2Logs } from '../server/lib/log-management.js';
 import { countLogEntries, readTailEntries, streamRawEntriesAsync } from '../server/lib/log-stream.js';
 import { _resetForTest } from '../server/lib/error-report.js';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ccv-v2adp-')); _resetForTest(); });
@@ -88,7 +89,10 @@ function fire(w, entry, { complete = true } = {}) {
   return h;
 }
 
-const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', sid);
+const sessionDirOf = (sid) => join(dir, 'proj', 'sessions', resolveSessionDirName(join(dir, 'proj'), sid) || sid);
+// Task C: the addressing sid is the real dir basename (`<ts>_<uuid>`), not the UUID.
+const dirNameOf = (project, sid) => resolveSessionDirName(join(dir, project), sid) || sid;
+const refOf = (project, sid) => `v2:${project}/${dirNameOf(project, sid)}`;
 const readAdapted = (sessionDir) => [...iterateV2RawEntries(sessionDir)].map((raw) => JSON.parse(raw));
 
 // ─── envelope synthesis round-trip (spec §11) ────────────────────────────────
@@ -340,7 +344,7 @@ describe('log-stream dispatch over a v2 session dir', () => {
     const def = listV2Logs(dir, 'proj');
     assert.ok(Array.isArray(def.proj));
     assert.equal(def.proj.length, 2, 'teammate folded into leader; every main session listed');
-    const item = def.proj.find((x) => x.file === `v2:proj/${SID}`);
+    const item = def.proj.find((x) => x.file === refOf('proj', SID));
     assert.ok(item, 'leader session listed');
     assert.equal(item.kind, 'v2');
     assert.match(item.timestamp, /^\d{8}_\d{6}$/, 'compact ts for formatTimestamp/sort');
@@ -349,7 +353,7 @@ describe('log-stream dispatch over a v2 session dir', () => {
     assert.equal(item.archived, undefined, 'archive semantics removed 2026-07-14 — no dead field');
     assert.ok(!('instanceId' in item), 'instance concept removed — field no longer emitted');
     assert.match(item.preview[0], /^the leader opening prompt/);
-    assert.ok(def.proj.some((x) => x.file === `v2:proj/${OTHER_SID}`), 'second session listed too');
+    assert.ok(def.proj.some((x) => x.file === refOf('proj', OTHER_SID)), 'second session listed too');
   });
 
   it('preview lists ALL user prompts from the prompts.jsonl cache (deduped, in order)', async () => {
@@ -361,7 +365,7 @@ describe('log-stream dispatch over a v2 session dir', () => {
       textMsg('assistant', 'a2'), textMsg('user', 'third question'),
     ]));
     await w.flush();
-    const s = listV2Sessions(join(dir, 'proj')).find((x) => x.sid === SID);
+    const s = listV2Sessions(join(dir, 'proj')).find((x) => x.sid === dirNameOf('proj', SID));
     assert.deepEqual(s.preview, ['first question', 'second question', 'third question']);
   });
 
@@ -393,7 +397,7 @@ describe('log-stream dispatch over a v2 session dir', () => {
     assert.equal(parseV2Ref('v2:proj/a/b'), null, 'extra separators rejected');
     assert.equal(parseV2Ref('proj.jsonl'), null);
 
-    const resolved = validateLogPath(dir, `v2:proj/${SID}`);
+    const resolved = validateLogPath(dir, refOf('proj', SID));
     assert.ok(isV2SessionDir(resolved));
     assert.throws(() => validateLogPath(dir, `v2:proj/${SID_TM}`), /File not found/);
     assert.throws(() => validateLogPath(dir, 'v2:proj/..'), /Invalid v2 log reference/);
@@ -417,7 +421,7 @@ describe('reader version gate (spec §14)', () => {
     const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
     writeFileSync(metaPath, JSON.stringify({ ...meta, wireFormat: 3 }));
 
-    const session = readSession(projDir(), SID);
+    const session = readSession(projDir(), dirNameOf('proj', SID));
     assert.equal(session.unsupported, true);
     assert.equal(session.wireFormat, 3);
     assert.equal(session.reqs.size, 0, 'empty folds — nothing interpreted');
@@ -432,7 +436,7 @@ describe('reader version gate (spec §14)', () => {
     lines[0] = JSON.stringify({ ph: 'meta', wireFormat: 99, sessionId: SID });
     writeFileSync(jPath, lines.join('\n'));
 
-    const session = readSession(projDir(), SID);
+    const session = readSession(projDir(), dirNameOf('proj', SID));
     assert.equal(session.unsupported, true);
     assert.equal(session.wireFormat, 99);
     assert.deepEqual(readAdapted(sdir), [], 'meta says 2 but the per-file sentinel wins');
@@ -449,7 +453,7 @@ describe('reader version gate (spec §14)', () => {
     const kept = readFileSync(jPath, 'utf-8').split('\n').filter((l) => l && !l.includes('"ph":"meta"'));
     writeFileSync(jPath, kept.join('\n') + '\n');
 
-    const session = readSession(projDir(), SID);
+    const session = readSession(projDir(), dirNameOf('proj', SID));
     assert.equal(session.unsupported, undefined);
     assert.equal(readAdapted(sdir).length, 1, 'still readable');
   });

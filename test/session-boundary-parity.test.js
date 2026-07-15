@@ -55,11 +55,12 @@ function conv(n, { firstText, seed = '' } = {}) {
   return out;
 }
 
-function entryOf(messages, ts, userId = 'u1') {
+function entryOf(messages, ts, userId = 'u1', seqEpoch = null) {
   return {
     timestamp: ts,
     mainAgent: true,
     url: 'https://api.anthropic.com/v1/messages',
+    ...(seqEpoch && { _seqEpoch: seqEpoch }),
     body: { messages, metadata: { user_id: userId } },
     response: { status: 200, body: { content: [{ type: 'text', text: 'resp' }] } },
   };
@@ -80,7 +81,7 @@ function runBatchLeg(fileEntries) {
   }
   slimmer.finalize(acc);
 
-  const st = { timestamps: [], generatedTimestamps: [], currentSessionId: null, prevUserId: null, prevMainAgentTs: null, sessions: [] };
+  const st = { timestamps: [], generatedTimestamps: [], currentSessionId: null, prevUserId: null, prevEpoch: null, prevMainAgentTs: null, sessions: [] };
   for (const entry of acc) {
     if (!(entry.mainAgent && entry.body && Array.isArray(entry.body.messages))) continue;
     applyBatchEntryTimestamps(st, entry);
@@ -111,6 +112,8 @@ function runLiveLeg(fileEntries) {
       count: messages.length,
       prevUserId: lastSession ? lastSession.userId : null,
       userId,
+      prevEpoch: lastSession ? lastSession._seqEpoch : null,
+      epoch: entry._seqEpoch || null,
     });
     if (isNewSession) prevMainAgentTs = null;
 
@@ -297,5 +300,52 @@ describe('session-boundary parity — session.model stamp', () => {
       assert.equal(sessions[0].model, 'claude-fable-5');
       assert.equal(sessions[1].model, 'claude-opus-4-8');
     }
+  });
+});
+
+describe('session-boundary parity — task B: _seqEpoch change (short prior session, same user)', () => {
+  // The H5 case the cold-load fallback creates: a SHORT prior session A
+  // (cold-loaded) followed by the live current session B, same user_id, B's
+  // opening count NOT a >50% drop from A (A is short) → without the epoch
+  // signal neither the bigDrop nor user_id rule fires and B would merge INTO
+  // A. The _seqEpoch change forces a definitive boundary in BOTH legs.
+  const EA = 'v2:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const EB = 'v2:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const shortA = conv(2, { seed: 'a-' });        // 2 msgs
+  const bStart = conv(3, { seed: 'b-' });         // 3 msgs — no >50% drop from 2
+  const entries = [
+    entryOf(shortA, T1, 'u1', EA),
+    entryOf(bStart, T2, 'u1', EB),
+    entryOf([...bStart.map(deepCopy), msg(3, 'user', 'more'), msg(4, 'assistant', 'ok')], T3, 'u1', EB),
+  ];
+
+  it('batch and live agree: two sessions, B is not swallowed by short A', () => {
+    const { batch, live } = assertParity(entries, 'epoch-change');
+    assert.equal(batch.length, 2, 'A and B are distinct despite same user + no bigDrop');
+    assert.deepEqual(stableIds(batch), [T1, T2]);
+    assert.deepEqual(stableIds(live), [T1, T2]);
+  });
+
+  it('null-safe: without _seqEpoch the same short-B WOULD merge (proves epoch is what splits)', () => {
+    // Same shapes, epoch stripped → the heuristics can't split → one blended
+    // session. Confirms the new split is driven by epoch, not a side effect.
+    const noEpoch = [
+      entryOf(shortA, T1, 'u1'),
+      entryOf(bStart, T2, 'u1'),
+      entryOf([...bStart.map(deepCopy), msg(3, 'user', 'more'), msg(4, 'assistant', 'ok')], T3, 'u1'),
+    ];
+    const { batch, live } = assertParity(noEpoch, 'epoch-absent');
+    assert.equal(batch.length, 1, 'without epoch, short B merges into A (the H5 bug)');
+    assert.equal(live.length, 1);
+  });
+
+  it('same epoch does not split (no-op when the session id is unchanged)', () => {
+    const sameEpoch = [
+      entryOf(conv(6, { seed: 's-' }), T1, 'u1', EA),
+      entryOf([...conv(6, { seed: 's-' }), msg(6, 'user', 'q'), msg(7, 'assistant', 'a')], T2, 'u1', EA),
+    ];
+    const { batch, live } = assertParity(sameEpoch, 'epoch-same');
+    assert.equal(batch.length, 1);
+    assert.equal(live.length, 1);
   });
 });

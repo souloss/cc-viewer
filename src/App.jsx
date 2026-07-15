@@ -15,6 +15,7 @@ import CountryFlag from './components/common/CountryFlag';
 import UsageWindowPill from './components/dashboard/UsageWindowPill';
 import { extractLatestPlanUsage } from './utils/rateLimitParser';
 import { t } from './i18n';
+import { reportSwallowed } from './utils/errorReport';
 import { filterRelevantRequests, visibleRequests, findPrevMainAgentTimestamp } from './utils/helpers';
 import { formatSize } from './utils/formatters';
 import { isMainAgent } from './utils/contentFilter';
@@ -261,7 +262,10 @@ class App extends AppBase {
   handleLoadLocalJsonlFile = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.jsonl';
+    // v2 sessions are folders; a `.zip` round-trips through the server (which
+    // unpacks + rebuilds it), while a legacy `.jsonl` stays on the pure
+    // client-side path as the v1 escape hatch.
+    input.accept = '.zip,.jsonl';
     input.multiple = true;
     input.onchange = (e) => {
       const files = Array.from(e.target.files);
@@ -272,26 +276,94 @@ class App extends AppBase {
         return;
       }
       this.setState({ fileLoading: true, fileLoadingCount: 0 });
-      let readCount = 0;
-      const allEntries = [];
-      const fileNames = [];
-      files.forEach(file => {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          try {
-            const content = ev.target.result;
-            const entries = content.split('\n---\n').filter(line => line.trim()).map(entry => {
-              try { return JSON.parse(entry); } catch { return null; }
-            }).filter(Boolean);
-            allEntries.push(...entries);
-            fileNames.push(file.name);
-          } catch {}
-          readCount++;
-          if (readCount === files.length) {
-            this._finishLocalLoad(allEntries, fileNames);
+
+      // Both a legacy .jsonl file and the server's rebuilt v2 stream use the
+      // same `\n---\n`-delimited raw-entry wire format.
+      const parseRawStream = (text) => text.split('\n---\n')
+        .filter(line => line.trim())
+        .map(entry => { try { return JSON.parse(entry); } catch { return null; } })
+        .filter(Boolean);
+
+      // Incrementally parse the '\n---\n' rebuild off res.body so a large session
+      // (the server may rebuild a v2 folder into a multi-GB v1 stream) never has
+      // to fit in one JS string — `await res.text()` throws RangeError past V8's
+      // ~512MB string cap, exactly for the big sessions this transport targets.
+      const parseReadableStream = async (res) => {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const entries = [];
+        let buf = '';
+        const drain = (last) => {
+          let idx;
+          while ((idx = buf.indexOf('\n---\n')) !== -1) {
+            const piece = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 5);
+            if (piece) { try { entries.push(JSON.parse(piece)); } catch { /* skip malformed */ } }
           }
+          if (last) { const tail = buf.trim(); if (tail) { try { entries.push(JSON.parse(tail)); } catch { /* skip */ } } }
         };
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          drain(false);
+        }
+        buf += decoder.decode();
+        drain(true);
+        return entries;
+      };
+
+      const loadZip = (file) => fetch(apiUrl('/api/upload-log-zip'), { method: 'POST', body: file })
+        .then(async (res) => {
+          if (!res.ok) {
+            let code = '';
+            try { code = (await res.json())?.code || ''; } catch { /* non-JSON error body */ }
+            const err = new Error(`upload-log-zip ${res.status} ${code}`);
+            err.httpStatus = res.status;
+            err.serverCode = code; // TOO_LARGE / ZIP_BOMB / INVALID_ZIP / NOT_V2
+            throw err;
+          }
+          // Prefer streaming; fall back to text() where res.body is unavailable.
+          return res.body ? parseReadableStream(res) : parseRawStream(await res.text());
+        });
+
+      // Promisified FileReader so the legacy path can be awaited alongside the
+      // async zip uploads under one completion gate (the old readCount barrier
+      // only counted FileReader.onload — a zip-only pick would hang forever).
+      const loadJsonl = (file) => new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => { try { resolve(parseRawStream(ev.target.result)); } catch (err) { reportSwallowed('upload.jsonl.parse', err); resolve([]); } };
+        reader.onerror = () => { reportSwallowed('upload.jsonl.read', reader.error); resolve([]); };
         reader.readAsText(file);
+      });
+
+      let hadError = false;
+      Promise.all(files.map((file) => {
+        const isZip = /\.zip$/i.test(file.name);
+        return (isZip ? loadZip(file) : loadJsonl(file))
+          .then((entries) => ({ name: file.name, entries }))
+          .catch((err) => {
+            hadError = true;
+            reportSwallowed('upload.zip', err);
+            // A ZIP_BOMB (valid session, too big when expanded) and a hard 413
+            // are both "too large"; other 400s are malformed/not-a-v2-session.
+            const tooLarge = err?.httpStatus === 413 || err?.serverCode === 'TOO_LARGE' || err?.serverCode === 'ZIP_BOMB';
+            const key = tooLarge ? 'ui.uploadZipTooLarge'
+              : err?.httpStatus === 400 ? 'ui.uploadZipInvalid'
+              : 'ui.uploadZipFailed';
+            message.error(t(key, { name: file.name }));
+            return { name: file.name, entries: [] };
+          });
+      })).then((results) => {
+        const allEntries = [];
+        const fileNames = [];
+        for (const r of results) {
+          if (r.entries.length) { allEntries.push(...r.entries); fileNames.push(r.name); }
+        }
+        // When everything failed we already showed a per-file error toast; skip
+        // _finishLocalLoad's redundant "no logs" toast and just reset the state.
+        if (!allEntries.length && hadError) { this.setState({ fileLoading: false, fileLoadingCount: 0 }); return; }
+        this._finishLocalLoad(allEntries, fileNames);
       });
     };
     input.click();

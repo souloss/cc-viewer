@@ -13,7 +13,7 @@
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -34,7 +34,11 @@ let iterateV2RawEntries;
 
 function sessionDir() {
   const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-  return join(__isoDir, project, 'sessions', SID);
+  // Task C: writer names the dir `<ts>_<uuid>`; resolve by UUID suffix.
+  const sroot = join(__isoDir, project, 'sessions');
+  let name = SID;
+  try { name = readdirSync(sroot).find((n) => n === SID || n.endsWith('_' + SID)) || SID; } catch { /* not created yet */ }
+  return join(sroot, name);
 }
 
 function readEntries() {
