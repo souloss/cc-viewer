@@ -13,14 +13,14 @@
 | S1 | 共享边界+逆锚模块（clearCheckpoint 迁移 + findReverseAnchor 抽取） | ✅ | 2026-07-13 | 9f44715 | 实际只改 2 个消费方（shell 使 contentFilter/entry-slim/sessionManager 免改，属计划预期内收窄）。评审 P2 backlog：docs/WIRE_FORMAT.md:46/:170、sessionManager.js:552/:555、test/entry-slim.test.js:906、test/session-boundary-parity.test.js:12 的"函数老家"注释应改指 session-boundary.js；WIRE_FORMAT.md §6 维护责任补 canonical home——并入 S2 或 S9 文档轮 |
 | S2 | v2 核心库 server/lib/v2/*（纯新增不接线） | ✅ | 2026-07-13 | 074a2c2 | errorReport 移至 server/lib（src 不发布）；2 个评审 agent 报告在 S3 期间跟进整合 |
 | S3 | 双写接入（writeEntry seam + CCV_WIRE_V2，默认关） | ✅ | 2026-07-13 | 42fbc40 | 2 个 S2 评审 + QA 评审全部整合（seq 播种/response headers/late-handle 等）。回滚=CCV_WIRE_V2=0。soak 人工闸门跨入 S4：`export CCV_WIRE_V2=1` 后正常使用 ccv。s3-review 报告未回收，若有发现随 S4 整合 |
-| S4 | 一致性校验工具（ccv verify）+ ≥5 活跃日双写验证（人工闸门） | 🔄 | 2026-07-13 | d42b94a | 代码已提交（与 S5/S8 合并提交,文件级 hunk 交叠无法拆分）。digest 归一化已拍板落地（见下表 2026-07-13 行）→ **soak 计日现在可以开始**;需先重启常驻 ccv 使 live 双写吃到新代码。脱敏真实 fixture 在 soak 期采集提交 |
-| S5 | v2→v1 适配读层（CCV_WIRE_V2_READ，默认关） | 🔄 | 2026-07-13 | d42b94a | 代码+自动化测试完成并已提交（合并提交）（adapter.js 机械 replay + 信封合成、log-stream isV2SessionDir 分派、v2: 寻址、mode 解锁 dual-read、日志弹窗「v2 读取」开关、§14 读侧容忍 4 例、round-trip golden、HTTP 级 server-v2-read 套件）。**S6a 列表选择部分按用户要求提前并入本步**：弹窗第三开关「v2 会话列表」（`/api/local-logs?v2=1`）+ listV2Sessions/listV2Logs（meta.instanceId 归属过滤、teammate 会话折叠进 leader 不单列）+ LogTable v2 行（v2 tag、不可勾选、開啟走既有 ?logfile= 流）+ download rebuilt（raw zip 仍留 S6a）。合成数据端到端浏览器冒烟已通过（列表→開啟→完整渲染含 Context 工具/系统回填）。**待办**：① 真实双写数据上的 soak 期日常使用验证（人工闸门，与 S4 soak 同期进行）；② 与 S4 一并提交（用户已选暂不提交）。计划偏差记录：resolveLogSource 泛化实际落在 log-stream 的 isV2SessionDir 分派（jsonl-archive 零改动，validateLogPath 承担 v2 寻址校验）。注意：S5 与 soak 并行开工（用户决策 2026-07-13），S4 soak 闸门仍未开始计日 |
-| S6a | 列表/管理/寻址切换（listLocalLogs、workspace-registry、download 契约） | ⬜ | | | |
-| S6b | live watcher + IM 接入（最高风险，单列） | ⬜ | | | v1 watcher 并行保留 |
-| S6c | 统计与残余（stats-worker 重键、死代码退役） | ⬜ | | | |
-| S7 | 客户端原生 v2（7a 数据通道 / 7b 复杂度收敛） | ⬜ | | | IndexedDB 新 object store |
+| S4 | 一致性校验工具（ccv verify）+ ≥5 活跃日双写验证（人工闸门） | ✅（闸门被 1.7.0 决策取代） | 2026-07-14 | (1.7.0) | 代码已提交（与 S5/S8 合并提交,文件级 hunk 交叠无法拆分）。digest 归一化已拍板落地（见下表 2026-07-13 行）→ **soak 计日现在可以开始**;需先重启常驻 ccv 使 live 双写吃到新代码。脱敏真实 fixture 在 soak 期采集提交 |
+| S5 | v2→v1 适配读层（CCV_WIRE_V2_READ，默认关） | ✅（1.7.0 起无条件生效，开关移除） | 2026-07-14 | (1.7.0) | 代码+自动化测试完成并已提交（合并提交）（adapter.js 机械 replay + 信封合成、log-stream isV2SessionDir 分派、v2: 寻址、mode 解锁 dual-read、日志弹窗「v2 读取」开关、§14 读侧容忍 4 例、round-trip golden、HTTP 级 server-v2-read 套件）。**S6a 列表选择部分按用户要求提前并入本步**：弹窗第三开关「v2 会话列表」（`/api/local-logs?v2=1`）+ listV2Sessions/listV2Logs（meta.instanceId 归属过滤、teammate 会话折叠进 leader 不单列）+ LogTable v2 行（v2 tag、不可勾选、開啟走既有 ?logfile= 流）+ download rebuilt（raw zip 仍留 S6a）。合成数据端到端浏览器冒烟已通过（列表→開啟→完整渲染含 Context 工具/系统回填）。**待办**：① 真实双写数据上的 soak 期日常使用验证（人工闸门，与 S4 soak 同期进行）；② 与 S4 一并提交（用户已选暂不提交）。计划偏差记录：resolveLogSource 泛化实际落在 log-stream 的 isV2SessionDir 分派（jsonl-archive 零改动，validateLogPath 承担 v2 寻址校验）。注意：S5 与 soak 并行开工（用户决策 2026-07-13），S4 soak 闸门仍未开始计日 |
+| S6a | 列表/管理/寻址切换（listLocalLogs、workspace-registry、download 契约） | ✅（1.7.0：列表恒 v2；软删除落地；raw zip 延后） | 2026-07-14 | (1.7.0) | raw zip 下载仍 400（backlog） |
+| S6b | live watcher + IM 接入（最高风险，单列） | ✅（1.7.0：live-feed.js 两级 watcher + SessionSynthesizer 单一合成路径；IM 同步接入；v1 tail 移除前通过 v1/v2 live A/B parity 闸） | 2026-07-14 | (1.7.0) | — |
+| S6c | 统计与残余（stats-worker 重键、死代码退役） | ✅（1.7.0：stats v9 直解 journal+conv 事件；死代码清单全退役） | 2026-07-14 | (1.7.0) | v1 文件不再计入统计（迁移后恢复） |
+| S7 | 客户端原生 v2（7a 数据通道 / 7b 复杂度收敛） | ⬜（1.7.0 决策：不做——adapter 长期供给 v1 形状；原 7a 拟复用的 loadColdSession/loadMoreHistory 已随「仅当前会话唯一模式」删除，S7a 设想作废） | | | |
 | S8 | v1→v2 转换工具（ccv convert，存量 4.2GB，严格只增） | 🔄 | 2026-07-14 | d42b94a | 主项目（cc-viewer）已重转完成并提交；其余项目（cx-viewer/sam3/sky/test）待用户择机用按钮或 CLI 转换。**按用户要求提前实现（顺序偏差：先于 S6/S7）**。已落地：`server/lib/v2/convert.js`（升序逐文件、暂存区 sessions-migrating、全量 golden 校验后 promote、文件级断点续传、session 级跳过双写权威数据、空间断言）+ convert-worker/convert-manager（server 内常驻，重启自动续传——计划外新增面，用户决策）+ 弹窗 v1 列表「日志一键迁移」按钮（POST/GET /api/wire-v2-convert，2s 轮询进度）+ `ccv convert <project…>|--all`。原「默认 dry-run」被「暂存+校验+promote」取代（同等安全性，一键化）。测试：test/v2-convert.test.js 10 项 + server-v2-read HTTP 契约（用户决策 2026-07-14：以单元测试保障为准，免真实数据交互演练）。**2026-07-14 真实数据首跑修复**（用户按钮实测 golden FAILED 于最老文件,根因三连）：① ConversationStore 判定从「只看尾指纹」升级为**逐消息指纹数组+全前缀校验**（老日志同 sid 交错流共享前缀/尾部而中段不同,§3.7 L104 形态,尾检误判 unchanged/replace-tail → replay 拼接怪）,前缀失配一律回退 snapshot;另加 **exactFps 模式（转换器专用）**——fingerprintMsg 80 字符截断分辨不了长同前缀 wire,离线判定追加全文 FNV-1a,golden 门按构造字节忠实,live 请求路径保持廉价默认；② 老条目无 requestId + 冷启动 hold 的 completion 先于 flush 到达 → convert 合成 rid + pendingDone 缓冲重放;③ verify 的 ts|url 键在同毫秒 countTokens 突发下不唯一 → indexSession/verify 改多候选匹配（digest 优先配对,轮转孪生计 v1DuplicateKey 不判失败,P3「重复 completed 双计」就此解决）。**2026-07-14 JSONL/去重审计 → 全量重转完成**：多 agent 审计量化首轮迁移产物（45 会话 2.0GiB）~62% 字节为 snapshot 逐字节重录，联合根因 = identity 键控 bug（见「关键事实」已修复项）× exactFps 对 cache_control 迁移敏感（见 S4 表已拍板项）。两修复落地后：首轮产物软删至 `sessions-removed-20260714/`（state 文件同移，可整体移回回滚）→ `ccv convert` 全量重跑,golden 全过 → **转换产物 2.0GiB→387MiB（−80%,≈v1 源的 9%,达成总验证 #4「体积比 ≤10%」）**；sub 会话事件从 6,574 snapshot/0 append 变为 923/5,662,tool_use.id 键控命中 0→71。同轮落地：§14 **reader 版本门禁**（`layout.js WIRE_FORMAT_VERSION` 单一所有者,readSession 拒读未知版本,adapter/列表拒渲染,verify 计 unsupportedSessions 判 FAILED——任何未来格式演进的前置）；cli `--log-dir` 与默认值相同时误拒的 bug（setLogDir 改返回布尔）。审计其余结论（标记文件/SSE 化驳回、方案 C snapshot 后向引用留作 live 残余类演进、方案 E journal headers href、S6b 三条约束）见审计报告（会话 scratchpad,未落仓库） |
-| S9 | v1 写入下线 + 收尾 + 一次性发版 | ⬜ | | | publish 前征询用户 |
+| S9 | v1 写入下线 + 收尾 + 一次性发版 | ✅（1.7.0：v1 写全链下线、开关移除、启动迁移引导 + -c 三路检测、软删、版本 1.7.0；与原计划的偏差：S4 soak 闸门未走满 5 活跃日即切换——用户知情决策，缓解=v1 文件永不删除 + 转换 golden 门 + v1/v2 live A/B parity 测试；publish 仍待用户验收） | 2026-07-14 | (1.7.0) | publish 前征询用户 |
 
 **恢复协议**：新 session 开始 → 读记忆 `wire-format-v2-progress.md` 指针 → 读本表找到第一个非 ✅ 步骤 → **先跑上一完成步的 named tests 确认仍绿** → 再开工。步骤内中断：状态记 🔄 + 在"下一步动作备注"写明断点。
 
@@ -38,6 +38,37 @@
 - P3 verify digest 对同 id tool_result 体编辑盲区的边界钉死测试（写侧已检测,读侧 digest 结构性盲,已文档化;可加"故意不报"钉防边界悄然扩大）。
 - P3 `/api/wire-v2-convert` 无 isLocal 门（LAN 可达触发重转换,DoS-only,与既有姿态一致——存档）。
 - P3 升级瞬间活跃 sub 会话因 fp 派生变化分键（内存态,重启 snapshot(first) 兜底,verify 可见;已被本轮重转缓解——存档）。
+
+**2026-07-14 1.7.0 五人团评审 backlog（P0 无;已当轮采纳:migrate_prompt 一次性守卫〔SSE 重连重弹+continued 绕过 dismissed,rev-correct P1〕、EPERM 判活、Linux birthtime≤0 视为新目录、SessionSynthesizer 完成后释放 responses/dones/events 前缀、live-feed per-session reconstructor、teammate 孤儿归属 sid 平局决胜、死代码补删 teammate-detect/collectFilteredRawEntriesAsync/migrateConversationContext〔含 6 例僵尸测试〕、files-fs 死三元、若干陈旧注释）**：
+- P2 live-feed seed 抑制窗口：seed 期 parked 的历史条目在 suppress 清除后可能作为"新条目"晚到广播（尤其 _rebuildCursor 全量重放后）——改为 seed 后 `hasPending()` 清空才解除 suppress,或给 seed 期 seq 打标丢弃。
+- P2 done 3s deadline 后 responses 迟到被永久丢弃(live 视图 response 空至冷加载)→ 迟到 responses 对已完成 seq 触发重发完成条目。
+- P2 findTeammateSessionDirs:leader meta 不可读时其孤儿 teammate 会被错误重指到别的 leader（平局双归属已修）。
+- ~~P2 (rev-quality) interceptor-core 的 rotateLogFile/parseRotationContextHead 退役~~ ✅ 2026-07-14 收尾三修 Part C 完成(连测试一并删;claimUntaggedLog/cleanupTempFiles 随实例移除删除,logFilePrefix/logFileMatcher/findRecentLog 降为 project-only 保留——im.js 依赖);streamReconstructedEntries(Async) 仍零生产消费,退役评估(其注释自述归 S6c)。
+- P3 fetch abort/错误路径不写 done 行 → journal 留永久 in-flight;可补 status:'aborted' done。
+- P3 stats-worker 项目清空后旧 stats 文件残留(早退不写)→ 写空 v9 对象;journal req 缺 epoch 时 sessionCount 低估。
+- P3 live-feed 根 watcher 事件推进 _seenDirs 导致 resumed 会话再挂延迟一拍。
+- P3 readV2WindowedEntries 跨 leader/teammate 合并后 ts|url 撞键窗口变宽 → key 可并入 _seqEpoch;另:每个 main delta 的 stateRef 全程驻留(仅窗首用到)→ 可二遍法省内存。
+- P3 live-feed seed 期间落盘的新 append 在同一 do-while 里被一并抑制(既不在冷快照也不广播)→ 记录 seed 截止 offset,只抑制其之前的内容。
+- P3 (rev-compat) entryCache 旧浏览器残留孤儿 sessions store(DB_VERSION 未升)→ 升 3 + deleteObjectStore 回收;concepts/*/GlobalSettings.md 各语言仍记载 resumeAutoChoice 行。
+- P3 `ui.allConversationsLoaded` 键疑似失去消费者;cli.help 未列 convert/verify 子命令。
+- 待用户验证存档：冒烟中两次「未点击即开始转换」未定案——评审在打包产物层面穷举排除了全部前端自动路径,最可疑为 maybeResumeConvert 开机续传(状态文件 running 残留)与 a11y uid 点击错位的叠加;真实环境复现时优先查 `<project>/wire-v2-convert-state.json` 的 status 与服务端 “resuming unfinished migration” 日志行。
+
+**2026-07-14 收尾三修（用户三项要求,4 探索+3 评审 agent 计划闭环）**：
+1. 「仍在双写 v1」诊断=旧进程(06:36 启动的 `ccv -c` pid 49263 + 7/13 的 IM bot pid 12384 内存持旧代码;lsof+mtime 时序证明),代码无活 v1 写路径,重启即止;顺手删净死 v1 写入器(rotateLogFile/parseRotationContextHead/claimUntaggedLog/cleanupTempFiles)。
+2. 日志弹窗 v2/v1 双视图:v2 恒默认;`_v1FileCount`(盘上文件数,非未迁移数——转换器不删源)gating 的小链接入口进 v1 视图;迁移按钮/进度/未迁移提示只在 v1 视图;v1 视图支持查看/下载/迁移/软删;`?view=v1` + 简化版 listLocalLogs(去实例化)恢复;启动迁移弹窗保留,「立即迁移」直接打开 v1 视图看进度。
+3. 实例概念整体移除:--pid/CCV_INSTANCE_ID/meta.instanceId 写入/列表归属过滤+「显示全部实例」开关/instance-registry/标题 (id) 后缀/per-instance session-pin(合并为单一 .session-pin.json,旧文件留盘孤儿)/相关 i18n ×18;行为变更=同项目并行 ccv 互见会话。旧 meta.instanceId 会话正常列出(读端容忍)。
+三修后三人团评审:0 P0/P1;当轮采纳=interceptor 双 ingest 点外层 catch 升级 reportSwallowed、_v1FileCount 口径与 v1 视图行一致化(countListedV1Files,时间戳正则+非空,徽标数≠行数漂移堵死)、converted-but-present 分歧钉死测试(+_currentProject 断言)。遗留 P3(不阻塞):v1 视图 spinner 与 v1 数据刷新时序的瞬时空窗(localLogsLoading 只跟 v2 fetch);handleMigrateNow 里 setState 未落地即读 logView 的无害冗余 fetch;convert 运行中切回 v2 视图无进度指示(接受,启动弹窗直开 v1 视图);session-pin.test 裸跑(无 --test-force-exit)因 import interceptor 常驻句柄不退出(既有模式);server-logs.test 中途 initForWorkspace 对后续新增用例的潜在顺序耦合(可选 afterEach resetWorkspace 加固)。
+
+**2026-07-14 深夜:日志列表两组数据优化(概览 prompts 静态化 + 大小口径)——三人团评审闭环**:
+- 已采纳:writer 级 replace-tail 捕获测试(P1)、stats ctl 行 fixture 钉(P2)、synthetic prompt(Recap/Title/Compact/Topic/Summary)过滤并入共享提取链(P2,真实数据 5/31 会话实测泄漏;与 src/utils/contentFilter.js SYNTHETIC_PROMPTS KEEP-IN-SYNC)+ 回填 --force 重跑洗净。
+- 遗留 backlog:P2 workspace-registry 的 dirSizeSync 为主线程同步递归走盘(56 会话规模毫秒级可接受,corpus 增长后改 async 或下放 worker);P3 PROMPTS_MAX_PER_SESSION 上限无测试缝(需 opts 暴露才可测);P3 缓存路径(整会话 prompts)与兜底路径(仅 e0 首行)预览条数不一致;P3 stats 单元 size 在裸 meta 更新后滞后一拍(无 UI 消费);P3 e0 首行 >256KB 时兜底预览为空(既有行为)。
+
+**2026-07-15 凌晨:live-feed 误报双根因修复(3 法证/机制/读侧探索 + 2 评审 agent 闭环)**:
+- 根因①(写侧):重启接续的 fresh ConversationStore epoch 恒 0(journal seq 有盘播种、epoch 没有)→ 新 seq 追加进旧 epoch 文件,跨文件 seq 序破坏。修复=_state 创建时从磁盘播种 max e<N> + snapshot(first) 条件去掉 epoch===0。
+- 根因②(读侧):live 无冷读的全局 seq 排序,单调指针搁浅乱序事件 → 3s 死线降级误报(missing-conv-event/state-count-mismatch;数据完好,冷读恒正确)。修复=ingestConvLine 按 seq 有序插入(按序 O(1))。
+- 法证澄清:初始"agent 混流"理论被推翻——真 Agent 子代理全部正确路由 sub-fp-*;billing cc_version nonce 证明 3 代进程先后接力非并发;单写者零重复 seq。exp5-identity 的 spawn-registry 改判方案存档不实施。
+- 修后二人评审 0 P0/P1;当轮采纳:epoch 播种 max 语义 gap 钉死测试(e0+e5→5)、listV2Logs/listLocalLogs 中文 stderr 英文化;测试钉合力校准:v2-core 重启用例同时钉 Fix A 两半,adapter out-of-order 用例钉 Fix B,live-feed 代际用例只钉 Fix A 的盘上不变量(验收级);冷读对 epoch 文件错位天然免疫(全局 seq 排序)再次核实。遗留 P3:snapshot(first) 条件里 prev===0 与 count===0 恒等(死条件,化简可选);外围 1.7.0 文件(im-log-watcher/stats-worker)仍有中文注释(提交前清理项)。
+- backlog 新增:真·并发同 sid 双写者(两终端 `claude -c` 同会话)= seq 碰撞硬损坏(journal.js:24-25 既有文档,本轮未发生未加重)→ billing-nonce(cc_version 后缀)按进程分流是候选方案;已膨胀历史目录(约 10MB 重复 snapshot/会话)无 live 内安全清理手段,留档;重启首 wire 恰为 post-clear checkpoint 时 epoch 标签滞后一格(记入 §6.1)。
 
 ### S4 双写验证日志（验证期逐日追加）
 

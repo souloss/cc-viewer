@@ -260,13 +260,13 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     assert.equal(res.status, 400);
   });
 
-  // --- POST /api/resume-choice with invalid choice ---
-  it('POST /api/resume-choice rejects invalid choice', async () => {
+  // --- POST /api/resume-choice route removed (wire-v2 1.7.0) ---
+  it('POST /api/resume-choice is no longer routed (404)', async () => {
     const res = await httpRequest(port, '/api/resume-choice', {
       method: 'POST',
-      body: { choice: 'invalid' },
+      body: { choice: 'continue' },
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 404);
   });
 
   // --- Static file / SPA fallback ---

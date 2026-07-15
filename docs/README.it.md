@@ -58,13 +58,23 @@ Dopo l'avvio in modalità programmazione, si aprirà automaticamente una pagina 
 
 cc-viewer è anche distribuito come applicazione desktop nativa: [Pagina di download](https://github.com/weiesky/cc-viewer/releases)
 
+### Aggiornamento a 1.7.0 (formato log v2)
+
+Dalla versione 1.7.0, i log vengono archiviati in un formato a directory per sessione (wire-format v2) anziché in singoli file `.jsonl` — con un'occupazione su disco inferiore di circa il 90%. I file `.jsonl` v1 esistenti non vengono mai modificati né eliminati; la finestra di dialogo dei log elenca per impostazione predefinita le sessioni v2 e una piccola voce “Mostra log legacy (v1)” (visibile finché esistono vecchi file) apre una vista v1 in cui possono essere visualizzati, migrati o eliminati. All'avvio, cc-viewer offre una migrazione con un clic quando vengono rilevati log legacy (fortemente consigliata quando si prosegue una vecchia conversazione con `claude -c`, la cui prima metà risiede nei vecchi file). Puoi anche migrare dal terminale:
+
+```bash
+ccv convert <project>   # migra un singolo progetto
+ccv convert --all       # migra tutti i progetti
+ccv verify <v1-file>    # confronta un file v1 con le sue sessioni convertite
+```
+
 ### Modalità Logger
 
 Se preferisci ancora lo strumento nativo claude o l'estensione VS Code, usa questa modalità.
 
 In questa modalità, l'avvio di `claude`
 
-avvierà automaticamente un processo di registrazione che salva i log delle richieste in \~/.claude/cc-viewer/*yourproject*/date.jsonl
+avvierà automaticamente un processo di registrazione che salva i log delle richieste in directory per sessione sotto \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Abilitare la modalità logger:
 

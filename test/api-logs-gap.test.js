@@ -98,14 +98,29 @@ describe('GET /api/local-logs', () => {
     }
   });
 
-  it('returns grouped local logs JSON with 200', async () => {
+  it('returns grouped v2 sessions with 200 (v1 files are invisible, 1.7.0)', async () => {
+    // Legacy v1 files must NOT be listed anymore…
     writeLog('proj', 'proj_20260601_100000.jsonl', [entry('2026-06-01T10:00:00.000Z')]);
-    writeLog('proj', 'proj_20260602_100000.jsonl', [entry('2026-06-02T10:00:00.000Z')]);
+    // …only v2 session dirs are.
+    const sids = ['aaaa1111-2222-4333-8444-bbbb55550001', 'aaaa1111-2222-4333-8444-bbbb55550002'];
+    for (const [i, sid] of sids.entries()) {
+      const dir = join(tmpDir, 'proj', 'sessions', sid);
+      mkdirSync(join(dir, 'conversations', 'main'), { recursive: true });
+      writeFileSync(join(dir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, pid: 1, startTs: `2026-06-0${i + 1}T10:00:00.000Z` }));
+      writeFileSync(join(dir, 'journal.jsonl'), [
+        JSON.stringify({ ph: 'meta', wireFormat: 2 }),
+        JSON.stringify({ ph: 'req', seq: 1, rid: 'r1', ts: `2026-06-0${i + 1}T10:00:00.000Z`, kind: 'main', conv: 'main', epoch: 0, url: 'https://api.anthropic.com/v1/messages', method: 'POST', model: 'm', msgFrom: 0, msgTo: 1, evt: 'snapshot' }),
+        JSON.stringify({ ph: 'done', seq: 1, rid: 'r1', ts: `2026-06-0${i + 1}T10:00:01.000Z`, status: 'ok' }),
+      ].join('\n') + '\n');
+      writeFileSync(join(dir, 'conversations', 'main', 'e0.jsonl'),
+        JSON.stringify({ seq: 1, rid: 'r1', t: 'snapshot', msgs: [{ role: 'user', content: [{ type: 'text', text: `prompt ${i}` }] }] }) + '\n');
+    }
     const res = await callGet(h('/api/local-logs', 'GET'), url('/api/local-logs'));
     assert.equal(res.statusCode, 200);
     const data = json(res);
     assert.ok(data.proj, 'has proj group');
-    assert.equal(data.proj.length, 2);
+    assert.equal(data.proj.length, 2, 'two v2 sessions, zero v1 rows');
+    assert.ok(data.proj.every((row) => row.kind === 'v2'));
   });
 });
 
@@ -245,12 +260,23 @@ describe('POST /api/delete-logs', () => {
     assert.equal(json(res).error, 'Invalid JSON');
   });
 
-  it('200 with per-file results on valid delete', async () => {
+  it('200 with per-file results on valid delete (soft delete: moved, not unlinked)', async () => {
     const res = await callPost(h('/api/delete-logs', 'POST'), { files: ['del/del_20260601_100000.jsonl'] });
     assert.equal(res.statusCode, 200);
     const data = json(res);
     assert.ok(Array.isArray(data.results));
     assert.equal(data.results[0].ok, true);
+    // 1.7.0 result shape: movedTo points into removed-<YYYYMMDD>/ and the bytes survive there.
+    assert.match(data.results[0].movedTo, /removed-\d{8}[/\\]del_20260601_100000\.jsonl$/);
+    assert.equal(existsSync(data.results[0].movedTo), true, 'soft delete keeps the file');
     assert.equal(existsSync(join(tmpDir, 'del', 'del_20260601_100000.jsonl')), false);
+  });
+
+  it('per-file error (not HTTP error) for a nonexistent v2 ref', async () => {
+    const res = await callPost(h('/api/delete-logs', 'POST'), { files: ['v2:del/aaaa1111-2222-4333-8444-bbbb55550001'] });
+    assert.equal(res.statusCode, 200);
+    const data = json(res);
+    assert.equal(data.results[0].ok, undefined);
+    assert.equal(data.results[0].error, 'Not found');
   });
 });

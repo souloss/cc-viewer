@@ -5,7 +5,7 @@
 // an async mkdir would lose the race against AsyncWriteQueue's microtask drain
 // and the swallowed ENOENT would silently drop v2 lines (plan risk F2).
 
-import { mkdirSync, writeFileSync, renameSync, existsSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, existsSync, openSync, writeSync, fsyncSync, closeSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 // The wire-format version this build writes AND the only one it reads.
@@ -39,9 +39,27 @@ export function sessionPaths(logDir, project, sessionId, sessionsDirName = 'sess
     metaPath: join(dir, 'meta.json'),
     journalPath: join(dir, 'journal.jsonl'),
     responsesPath: join(dir, 'responses.jsonl'),
+    // Optional display cache: deduped user prompts, one {seq, texts} line per
+    // emitting request. Append-only, never read by replay/verify (spec §15).
+    promptsPath: join(dir, 'prompts.jsonl'),
     conversationsDir: join(dir, 'conversations'),
     blobsDir: join(dir, 'blobs'),
   };
+}
+
+/** Recursive byte size of a directory tree (the session-dir display size). */
+export function dirSizeSync(dir) {
+  let total = 0;
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return total; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    try {
+      if (e.isDirectory()) total += dirSizeSync(p);
+      else if (e.isFile()) total += statSync(p).size;
+    } catch { /* raced deletion — skip */ }
+  }
+  return total;
 }
 
 export function convEpochPath(paths, convKey, epoch) {
@@ -81,7 +99,7 @@ export function writeFileAtomicSync(finalPath, data) {
  * first line, idempotently. Must be called (synchronously) before any enqueue
  * targeting this session. Returns the paths object.
  *
- * meta: { wireFormat:2, sessionId, project, instanceId, pid, startTs, userIdRaw,
+ * meta: { wireFormat:2, sessionId, project, pid, startTs, userIdRaw,
  *         userIdEncoding, leader?, im? } — spec §3. Existing meta is never
  * rewritten here (later additive updates go through updateMetaSync).
  */

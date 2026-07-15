@@ -1,68 +1,82 @@
 /**
- * wire-v2 S4 — verifier end-to-end + replay units.
+ * wire-v2 — verifier units + end-to-end teeth (server/lib/v2/verify.js).
  *
- * The end-to-end suite drives REAL dual-write through the interceptor's fetch
- * hook (same harness as interceptor-v2-dualwrite.test.js), then runs the
- * verifier over the produced v1 file + v2 session dirs:
- *   clean run → zero diffs; tampered v2 conv file → reported diff;
- *   this pins the verifier's power to actually catch divergence (a verifier
- *   that never fails would make the 5-day soak gate meaningless).
+ * 1.7.0: dual-write no longer exists, so the verifier's job is the MIGRATION
+ * golden gate — a hand-authored v1 file is converted (real convertProject) and
+ * verified against the produced session dirs:
+ *   clean convert → zero diffs; extra v1-only entry → counted, not failed;
+ *   tampered v2 conv file / blob ref → reported diff (a verifier that never
+ *   fails would make the migration golden gate meaningless).
+ *
+ * Pure unit tier: mkdtemp dirs, no interceptor, no server.
  */
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, basename, dirname } from 'node:path';
+import { mkdtempSync, rmSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-// ████ 数据安全死命令：env 先于动态 import 锁死到临时目录；禁止顶层静态 import 项目模块 ████
-process.env.CCV_PROXY_MODE = '1';
-process.env.CCV_SYNC_WRITES = '1';
-process.env.CCV_WIRE_V2 = '1';
-delete process.env.CCV_WORKSPACE_MODE;
-delete process.env.CCV_IM_PLATFORM;
-const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-v2vfy-'));
-process.env.CCV_LOG_DIR = __isoDir;
-process.env.CLAUDE_CONFIG_DIR = __isoDir;
+import { convertProject } from '../server/lib/v2/convert.js';
+import { verifyV1File } from '../server/lib/v2/verify.js';
+import * as replay from '../server/lib/v2/replay.js';
+import { _resetForTest } from '../server/lib/error-report.js';
+
+let logDir;
+const PROJECT = 'proj';
+const V1_NAME = 'proj_20260101_000000.jsonl';
+beforeEach(() => { logDir = mkdtempSync(join(tmpdir(), 'ccv-v2vfy-')); mkdirSync(join(logDir, PROJECT)); _resetForTest(); });
+afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
 const SID = 'aaaa1111-2222-3333-4444-bbbb5555cccc';
 const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
 const textMsg = (role, text) => ({ role, content: [{ type: 'text', text }] });
 
-let mod, verify, replay;
-let nextResponse;
+let _tsCounter = 0;
+const nextTs = () => `2026-01-01T00:00:${String(_tsCounter++ % 60).padStart(2, '0')}.${String(_tsCounter).padStart(3, '0')}Z`;
 
-function mainAgentBody(messages) {
+function entryOf(messages, extra = {}) {
   return {
-    system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
-    tools: [
-      { name: 'Edit' }, { name: 'Bash' }, { name: 'Task' }, { name: 'Read' },
-      { name: 'Write' }, { name: 'Glob' }, { name: 'Grep' }, { name: 'Agent' },
-      { name: 'WebFetch' }, { name: 'WebSearch' }, { name: 'NotebookEdit' }, { name: 'AskUser' },
-    ],
-    metadata: { user_id: USER_ID },
-    messages,
+    timestamp: nextTs(),
+    project: PROJECT,
+    url: 'https://api.anthropic.com/v1/messages?beta=true',
+    method: 'POST',
+    headers: { 'user-agent': 'test' },
+    body: {
+      model: 'claude-fable-5',
+      system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
+      tools: [{ name: 'Edit' }, { name: 'Bash' }, { name: 'Agent' }],
+      metadata: { user_id: USER_ID },
+      messages,
+    },
+    response: { status: 200, headers: {}, body: { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } } },
+    duration: 42,
+    isStream: false, isHeartbeat: false, isCountTokens: false,
+    mainAgent: true,
+    ...extra,
   };
 }
 
-async function fireMainAgent(messages) {
-  nextResponse = () => new Response(JSON.stringify({ content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
-    { status: 200, headers: { 'content-type': 'application/json' } });
-  const res = await globalThis.fetch('https://api.anthropic.com/v1/messages?beta=true', {
-    method: 'POST',
-    body: JSON.stringify(mainAgentBody(messages)),
-  });
-  assert.equal(res.status, 200);
+const v1Path = () => join(logDir, PROJECT, V1_NAME);
+function writeV1(entries) {
+  writeFileSync(v1Path(), entries.map(e => JSON.stringify(e) + '\n---\n').join(''));
 }
 
-before(async () => {
-  globalThis.fetch = async () => (nextResponse ? nextResponse() : new Response('{}', { status: 200 }));
-  mod = await import('../server/interceptor.js');
-  mod.setupInterceptor();
-  verify = await import('../server/lib/v2/verify.js');
-  replay = await import('../server/lib/v2/replay.js');
-});
+/** The standard 3-turn fixture: checkpoint → delta → in-place tail replace. */
+function standardEntries() {
+  _tsCounter = 0;
+  return [
+    entryOf([textMsg('user', 'turn 1')],
+      { _deltaFormat: 1, _isCheckpoint: true, _seq: 1, _seqEpoch: 'ep1', _totalMessageCount: 1, _conversationId: 'mainAgent' }),
+    entryOf([textMsg('assistant', 'r1'), textMsg('user', 'turn 2')],
+      { _deltaFormat: 1, _isCheckpoint: false, _seq: 2, _seqEpoch: 'ep1', _totalMessageCount: 3, _conversationId: 'mainAgent' }),
+    entryOf([textMsg('user', 'turn 1'), textMsg('assistant', 'r1'), textMsg('user', 'turn 2 EDITED')],
+      { _deltaFormat: 1, _isCheckpoint: true, _inPlaceReplaceDetected: true, _seq: 3, _seqEpoch: 'ep1', _totalMessageCount: 3, _conversationId: 'mainAgent' }),
+  ];
+}
 
-after(() => { setTimeout(() => process.exit(0), 30).unref(); });
+async function convertAll() {
+  await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1n << 40n, bsize: 1n }) });
+}
 
 describe('replay units', () => {
   it('mechanical replay: snapshot / append / replace-tail', () => {
@@ -82,7 +96,7 @@ describe('replay units', () => {
   });
 
   it('readJsonlTolerant drops a truncated tail line', () => {
-    const p = join(__isoDir, 'trunc.jsonl');
+    const p = join(logDir, 'trunc.jsonl');
     writeFileSync(p, '{"a":1}\n{"b":2}\n{"trunca', 'utf-8');
     assert.deepEqual(replay.readJsonlTolerant(p), [{ a: 1 }, { b: 2 }]);
   });
@@ -98,15 +112,11 @@ describe('replay units', () => {
   });
 });
 
-describe('verifier end-to-end over real dual-write', () => {
-  it('clean dual-write verifies with zero diffs', async () => {
-    await fireMainAgent([textMsg('user', 'turn 1')]);
-    await fireMainAgent([textMsg('user', 'turn 1'), textMsg('assistant', 'r1'), textMsg('user', 'turn 2')]);
-    // in-place tail replace (same length, different tail) → ctl path
-    await fireMainAgent([textMsg('user', 'turn 1'), textMsg('assistant', 'r1'), textMsg('user', 'turn 2 EDITED')]);
-    await mod._v2Writer.flush();
-
-    const report = await verify.verifyV1File(mod.LOG_FILE);
+describe('verifier end-to-end over converted sessions (migration golden gate)', () => {
+  it('a clean conversion verifies with zero diffs', async () => {
+    writeV1(standardEntries());
+    await convertAll();
+    const report = await verifyV1File(v1Path());
     assert.equal(report.ok, true, JSON.stringify(report.diffs, null, 2));
     assert.equal(report.counters.matched, 3);
     assert.equal(report.counters.v1Only, 0);
@@ -114,38 +124,42 @@ describe('verifier end-to-end over real dual-write', () => {
     assert.ok(report.v2Sessions.includes(SID));
   });
 
-  it('a v1-only entry (v2 disabled window) is counted, not failed', async () => {
-    mod._v2Writer.setEnabled(false);
-    await fireMainAgent([
+  it('a v1-only entry (appended after conversion) is counted, not failed', async () => {
+    writeV1(standardEntries());
+    await convertAll();
+    // History that never made it into the v2 store (e.g. pre-v2 tail) must be
+    // tolerated forever — counted as v1Only, never a failure.
+    const extra = entryOf([
       textMsg('user', 'turn 1'), textMsg('assistant', 'r1'),
       textMsg('user', 'turn 2 EDITED'), textMsg('assistant', 'r2'), textMsg('user', 'turn 3'),
-    ]);
-    mod._v2Writer.setEnabled(true);
-    const report = await verify.verifyV1File(mod.LOG_FILE);
+    ], { _deltaFormat: 1, _isCheckpoint: true, _seq: 4, _seqEpoch: 'ep1', _totalMessageCount: 5, _conversationId: 'mainAgent' });
+    appendFileSync(v1Path(), JSON.stringify(extra) + '\n---\n');
+    const report = await verifyV1File(v1Path());
     assert.equal(report.ok, true);
-    assert.equal(report.counters.v1Only, 1, 'the v2-off request has no twin');
+    assert.equal(report.counters.v1Only, 1, 'the un-converted tail entry has no twin');
   });
 
   it('tampered v2 conversation file → digest diff reported (verifier has teeth)', async () => {
-    const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-    const convFile = join(__isoDir, project, 'sessions', SID, 'conversations', 'main', 'e0.jsonl');
+    writeV1(standardEntries());
+    await convertAll();
+    const convFile = join(logDir, PROJECT, 'sessions', SID, 'conversations', 'main', 'e0.jsonl');
     const original = readFileSync(convFile, 'utf-8');
     try {
-      // Corrupt the last stored event's content: swap the tail message text.
       appendFileSync(convFile, JSON.stringify({ seq: 3, rid: 'tamper', t: 'ctl', op: 'replace-tail', msg: textMsg('user', 'TAMPERED') }) + '\n');
-      const report = await verify.verifyV1File(mod.LOG_FILE);
+      const report = await verifyV1File(v1Path());
       assert.equal(report.ok, false, 'tampering must be detected');
       assert.ok(report.diffs.some(d => d.type === 'messages-digest'), 'digest diff reported');
     } finally {
       writeFileSync(convFile, original, 'utf-8');
     }
-    const clean = await verify.verifyV1File(mod.LOG_FILE);
+    const clean = await verifyV1File(v1Path());
     assert.equal(clean.ok, true, 'restored state verifies clean again');
   });
 
   it('tampered blob ref → tools-ref diff reported', async () => {
-    const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-    const journalFile = join(__isoDir, project, 'sessions', SID, 'journal.jsonl');
+    writeV1(standardEntries());
+    await convertAll();
+    const journalFile = join(logDir, PROJECT, 'sessions', SID, 'journal.jsonl');
     const original = readFileSync(journalFile, 'utf-8');
     try {
       const lines = original.trim().split('\n');
@@ -154,7 +168,7 @@ describe('verifier end-to-end over real dual-write', () => {
       req.blobs.tools = 'sha256-0000000000000000';
       lines[idx] = JSON.stringify(req);
       writeFileSync(journalFile, lines.join('\n') + '\n', 'utf-8');
-      const report = await verify.verifyV1File(mod.LOG_FILE);
+      const report = await verifyV1File(v1Path());
       assert.equal(report.ok, false);
       assert.ok(report.diffs.some(d => d.type === 'tools-ref'));
     } finally {

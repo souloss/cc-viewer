@@ -11,7 +11,7 @@
 1. **写侧保真，读侧物化**：对话文件存 wire 事件（增量切片 + 控制行），不在写路径做任何 merge/逆锚推断——写侧只做一个廉价判定（前缀延伸测试，与 v1 delta 同级）；一切歧义窗口（v1 §3.1/§3.2）原样落盘为 raw 快照事件，由读侧物化器用共享逆锚模块解决。写侧错误可事后在读侧修复；物化写则一错永久。
 2. **journal 是唯一定序轴**：所有顺序问题（v1 §3.7 完成序倒置）收归 journal 的**发起序 seq**；对话文件行佩戴 seq 回指，物理落盘序不承载语义。
 3. **append-only + 无 fsync 现实下的写序协议**：blob →（flush）→ conversation 行 → journal 行最后落。**硬保证只有 blob 半边**（journal 行绝不引用不存在的 blob——blob 在 journal 行入队前已持久）；conv 半边是尽力而为的批次分组——多请求同批 drain 时（如冷启动暂存队列冲刷），后一请求的 journal 行可能先于其 conv 行落盘，读侧按 §14 容忍暂缺尾部，属纵深防御而非正确性依赖。崩溃产生的只有孤儿（无引用的 blob/conv 行）与暂缺的 conv 尾。
-4. **v2 永不影响 v1**：双写期 v2 任何失败走 `reportSwallowed`，v1 路径零感知。双 kill switch：`CCV_WIRE_V2`（写）/`CCV_WIRE_V2_READ`（读）独立。
+4. **v2 永不影响 v1**：双写期 v2 任何失败走 `reportSwallowed`，v1 路径零感知。双 kill switch：`CCV_WIRE_V2`（写）/`CCV_WIRE_V2_READ`（读）独立。**【1.7.0 已移除】**双写与开关体系随 v1 写入端一并退役（`mode.js`/`wire-v2.json`/`/api/wire-v2-mode` 全部删除），v2 无条件生效；磁盘空间守卫是唯一写入抑制器。
 
 ## §2 目录布局
 
@@ -109,6 +109,13 @@ LOG_DIR/<project>/sessions/<session_id>/
 - heartbeat/countTokens：同样落一行（体积小、保真）。
 - 不去重：response 与下一请求的回显 messages 理论上重复，但 response 含 usage/stop_reason/id 等独有信息，且"最后一条 response 永远不会被回显"，为保真与实现简单不做交叉引用。此项占比小（v1 实测 response 平均 4–6KB）。
 
+## §5a prompts.jsonl —— 展示缓存（可选侧文件,2026-07-14 追加）
+
+会话根目录下的**可选**追加式侧文件,缓存该会话去重后的 user prompts,供日志列表的「概览」列零计算读取。每行 `{ seq, texts: ["…≤100字符…", …] }`,由 V2Writer 在 journal req 行之后写入(main 会话流的 snapshot/append/replace-tail 事件,经 `server/lib/user-prompt-extract.js` 共享提取链过滤系统注入/命令包裹/建议模式);离线转换器走同一写入器,产物天然携带。
+
+- **读者容忍缺失**:replay/verify 的文件白名单(meta/journal/conversations/e\d+.jsonl)不读它;列表读取端(`readPromptsHead`)有界头读(默认 256KB),文件缺失时回退到首行提取。缺失≠损坏——**不因本文件引入 bump `WIRE_FORMAT_VERSION`**(bump 会让读侧版本门拒读全部存量会话)。
+- 幂等:写侧内存去重集在会话对象初始化时由现有文件播种,进程重启/`-c` 续接的全量 snapshot 重放不会重复追加;单会话记录上限 2000 条。
+
 ## §6 conversations/<convKey>/e<N>.jsonl —— wire 事件行
 
 每行一个事件，两种类型（由写侧的**唯一判定**——前缀延伸测试——决定）：
@@ -134,6 +141,10 @@ LOG_DIR/<project>/sessions/<session_id>/
   - **/clear 判定（S1 共享谓词 isPostClearCheckpoint）优先于以上**：关闭当前 epoch，新开 e<N+1>，首事件为 snapshot(reason=first)，journal 记 `boundary:"clear"`
 - messages 切片**原样存 wire 内容**（不含 tools/system——那是 body 级字段，已入 blob）；不注入任何 `_` 字段（per-message 时间戳由读侧用 journal ts 赋予，粒度=事件级，与 v1 客户端位置时间戳机制精度等价）。
 - **物化算法（读侧，共享物化器）**：按 seq 升序折叠事件流；append 直接拼接；snapshot 用共享逆锚模块（S1 的 findReverseAnchor）与当前物化态求 merge（v1 客户端 sessionMerge 同款语义）；ctl 按 op 应用。物化结果校验 journal msgTo，不符则标记降级（对应 v1 `_reconstructBroken` 的读侧内部态，**不外泄给客户端**）。
+
+### §6.1 epoch 与进程重启（2026-07-15 修复）
+
+fresh writer(进程重启 / `-c` 接续既有会话目录)的 ConversationStore 会从磁盘**播种 epoch**(取 conv 目录下最大 e<N>),并把首事件写成自包含 snapshot(reason 'first')续在 **e_max** 内——保证跨 epoch 文件的全局 seq 顺序单调(journal seq 本就从盘播种)。修复前 fresh store 恒从 e0 开始,重启后把更新的 seq 追加进旧文件,打破 live 读侧的顺序假设。已知角落:重启首个 wire 若恰为 post-/clear checkpoint,该边界的 epoch 标签滞后一格(wire 真值无损,仅材料化的 epoch 分割可见)。
 
 ## §7 blobs/ —— tools/system CAS
 
@@ -168,7 +179,7 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 - **leader 视图 re-join（读侧规范，S4 对比与 S5 适配器共用）**：leader 流 = leader session 的 journal ∪ 所有 `meta.leader.sessionId == leader sid` 的 session journal，按 `ts` 升序合并（跨进程 seq 不可比，tie-break `(sessionId, seq)`）；teammate 条目适配时打 `teammate`/`teamName` 双标——与 v1"teammate 写 leader 文件"的读侧形态逐字段等价。
 - **proxy 模式 teammate**（v1 §3.7 L104 已知未解：无 `--agent-name` 标识）：其流量在 leader 进程内被拦截，v2 下自然落 leader session 的对应 conv——沿 v1 现状，本重构不解决，此处显式记录。
 - **subAgent**（同进程同 sid）：convKey 用 spawn 时 Agent tool_use 块的 `block.id`（响应 content 中可得，v1 丢弃）；异步竞态窗口内未匹配到 id 时 fallback 首 user msg 指纹。同 prompt 并行 subAgent 因 id 唯一不再碰撞。
-- **IM worker**：S6b 前 spawn 时强制 `CCV_WIRE_V2=0`（决策记录：IM 有独立 watcher/resolver 体系，推迟到 S6b 一并接入，避免 S3 范围膨胀）；meta.im 字段预留。
+- **IM worker**：~~S6b 前 spawn 时强制 `CCV_WIRE_V2=0`~~ **【1.7.0 已接入】**IM worker 与主流程同样写 v2；`im-log-watcher` 监听 session 目录（两级拓扑），记录弹窗以 `v2:IM_<id>/<sid>` 寻址。
 
 ## §11 v2→v1 适配器逐字段映射（客户端契约）
 
@@ -218,6 +229,10 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 - journal 行引用的 blob/conv 行暂缺（写序窗口内）：该 entry 暂标不完整，watcher 下一 tick 重试；持续缺失（孤儿引用，理论上仅目录被外部篡改）→ 跳过 + reportSwallowed。
 - conv 文件存在而 journal 无对应行（崩溃孤儿）：物化器忽略无 journal 佩戴的 conv 行。
 - 两相折叠：同 seq 多条 done（不应发生）取首条；req 缺失而 done 存在（不应发生）丢弃 done。
+
+### §14.1 live 读侧的事件排序（2026-07-15）
+
+冷读一直是全量拼接后按 seq 全局排序;live 读侧(SessionSynthesizer.ingestConvLine)自 2026-07-15 起对事件窗口做**按 seq 有序插入**(按序到达 O(1)),以承接历史上被修复前写入器打乱的跨 epoch 文件顺序——否则低 seq 事件会搁浅在单调消费指针之后,触发 missing-conv-event/state-count-mismatch 误报(数据盘上完好)。
 
 ## §15 体积预算（301MB 参照文件推算）
 

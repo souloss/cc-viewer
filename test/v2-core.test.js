@@ -71,13 +71,13 @@ describe('layout sanitization and atomic creation', () => {
   });
 
   it('creates skeleton + meta + journal sentinel idempotently', () => {
-    const p1 = ensureSessionDirSync(dir, 'proj', SID, { instanceId: '42', userIdRaw: jsonUserId, userIdEncoding: 'json' });
-    const p2 = ensureSessionDirSync(dir, 'proj', SID, { instanceId: 'SHOULD-NOT-OVERWRITE' });
+    const p1 = ensureSessionDirSync(dir, 'proj', SID, { userIdRaw: jsonUserId, userIdEncoding: 'json' });
+    const p2 = ensureSessionDirSync(dir, 'proj', SID, { userIdRaw: 'SHOULD-NOT-OVERWRITE' });
     assert.equal(p1.metaPath, p2.metaPath);
     const meta = JSON.parse(readFileSync(p1.metaPath, 'utf8'));
     assert.equal(meta.wireFormat, 2);
     assert.equal(meta.sessionId, SID);
-    assert.equal(meta.instanceId, '42', 'second ensure must not rewrite meta');
+    assert.equal(meta.userIdRaw, jsonUserId, 'second ensure must not rewrite meta');
     const sentinel = readLines(p1.journalPath);
     assert.equal(sentinel.length, 1);
     assert.deepEqual(sentinel[0], { ph: 'meta', wireFormat: 2, sessionId: SID });
@@ -153,6 +153,52 @@ describe('ConversationStore event judgement', () => {
     const e1 = readLines(convEpochPath(paths, 'main', 1));
     assert.equal(e1[0].t, 'snapshot');
     assert.equal(e1[0].msgs.length, 2);
+  });
+
+  it('restart continuation: a fresh store seeds epoch from disk and snapshots into e_max', () => {
+    // Generation A: e0 content, then /clear → e1 content.
+    ingest([textMsg('user', 'a'), textMsg('assistant', 'b'), textMsg('user', 'c'),
+            textMsg('assistant', 'd'), textMsg('user', 'e'), textMsg('assistant', 'f')], 1);
+    store.ingest('main', [clearMsg(), textMsg('assistant', 'fresh')], { seq: 2, rid: 'r2' });
+    assert.ok(existsSync(convEpochPath(paths, 'main', 1)), 'generation A left e1 on disk');
+
+    // Generation B: fresh store on the SAME paths (process restart / -c).
+    // Its first event must land in e1 as a self-contained snapshot — writing
+    // to e0 would append newer seqs into the older file (the 2026-07-15 bug).
+    const storeB = new ConversationStore(paths, queue);
+    const wire = [clearMsg(), textMsg('assistant', 'fresh'), textMsg('user', 'after restart')];
+    const r = storeB.ingest('main', wire, { seq: 3, rid: 'r3' });
+    assert.equal(r.evt, 'snapshot');
+    assert.equal(r.epoch, 1, 'epoch seeded from the existing e1, not reset to 0');
+    const e1 = readLines(convEpochPath(paths, 'main', 1));
+    assert.equal(e1.length, 2, 'restart snapshot appended to e1');
+    assert.deepEqual([e1[1].t, e1[1].seq, e1[1].msgs.length], ['snapshot', 3, 3]);
+    const e0 = readLines(convEpochPath(paths, 'main', 0));
+    assert.deepEqual(e0.map(l => l.seq), [1], 'e0 untouched — no newer seq behind e1');
+
+    // A later /clear on the seeded store keeps advancing: e2.
+    const r2 = storeB.ingest('main', [clearMsg(), textMsg('assistant', 'fresh2')], { seq: 4, rid: 'r4' });
+    assert.equal(r2.epoch, 2);
+    assert.ok(existsSync(convEpochPath(paths, 'main', 2)));
+  });
+
+  it('epoch seeding takes the MAX epoch file, not a count (gapped e0+e5 seeds 5)', () => {
+    ingest([textMsg('user', 'seed me')], 1); // creates e0 + the conv dir
+    writeFileSync(join(paths.conversationsDir, 'main', 'e5.jsonl'),
+      JSON.stringify({ seq: 2, rid: 'r2', t: 'snapshot', msgs: [textMsg('user', 'gapped epoch')] }) + '\n');
+    const storeB = new ConversationStore(paths, queue);
+    const r = storeB.ingest('main', [textMsg('user', 'after gap')], { seq: 3, rid: 'r3' });
+    assert.equal(r.epoch, 5, 'max-N semantics, not file count');
+    assert.equal(r.evt, 'snapshot');
+  });
+
+  it('restart continuation on an e0-only conversation stays in e0 (seed=0 path unchanged)', () => {
+    ingest([textMsg('user', 'one')], 1);
+    const storeB = new ConversationStore(paths, queue);
+    const r = storeB.ingest('main', [textMsg('user', 'one'), textMsg('assistant', 'two')], { seq: 2, rid: 'r2' });
+    assert.equal(r.epoch, 0);
+    assert.equal(r.evt, 'snapshot', 'fresh store always snapshots its first event');
+    assert.deepEqual(readLines(convEpochPath(paths, 'main', 0)).map(l => l.t), ['snapshot', 'snapshot']);
   });
 
   it('/compact stays in the SAME epoch with a compact ctl (spec §3.5)', () => {
@@ -403,7 +449,7 @@ describe('V2Writer', () => {
   });
 
   it('full request+completion round trip produces blob-deduped journal/conv/responses', async () => {
-    const w = new V2Writer({ logDir: dir, project: 'proj', instanceId: '77', enabled: true });
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
     const e1 = mkEntry();
     const h1 = w.ingestRequest(e1, e1.body.messages);
     assert.ok(h1 && h1.seq === 1 && h1.sid === SID);
@@ -432,7 +478,7 @@ describe('V2Writer', () => {
     assert.equal(responses[0].body.stop_reason, 'end_turn');
 
     const meta = JSON.parse(readFileSync(paths.metaPath, 'utf8'));
-    assert.equal(meta.instanceId, '77');
+    assert.ok(!('instanceId' in meta), 'instance concept removed — writer never stamps it');
     assert.equal(meta.userIdEncoding, 'json');
   });
 
@@ -466,6 +512,90 @@ describe('V2Writer', () => {
     const e = mkEntry();
     assert.equal(w.ingestRequest(e, e.body.messages), null);
     assert.ok(!existsSync(join(dir, 'proj')));
+  });
+
+  it('prompts.jsonl: snapshot writes all prompts, append writes only the new slice, dedup holds', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry(); // snapshot: ['hello']
+    w.ingestRequest(e1, e1.body.messages);
+    const e2 = mkEntry({ requestId: 'req_2' });
+    e2.body.messages = [textMsg('user', 'hello'), textMsg('assistant', 'hi'), textMsg('user', 'second question')];
+    w.ingestRequest(e2, e2.body.messages); // append slice = [assistant hi, user second question]
+    await w.flush();
+
+    const paths = sessionPaths(dir, 'proj', SID);
+    const lines = readLines(paths.promptsPath);
+    assert.equal(lines.length, 2);
+    assert.deepEqual(lines[0].texts, ['hello']);
+    assert.deepEqual(lines[1].texts, ['second question'], 'append emits only the new user prompt');
+    assert.ok(lines.every(l => typeof l.seq === 'number'));
+  });
+
+  it('prompts.jsonl: caveat/command wrappers and suggestion probes never land in the cache', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry();
+    e1.body.messages = [{ role: 'user', content: '<local-command-caveat>Caveat: generated by local commands</local-command-caveat>\n<command-name>/theme</command-name>' }];
+    w.ingestRequest(e1, e1.body.messages);
+    const e2 = mkEntry({ requestId: 'req_2' });
+    e2.body.messages = [textMsg('user', '[SUGGESTION MODE: predict input]')];
+    w.ingestRequest(e2, e2.body.messages);
+    const e3 = mkEntry({ requestId: 'req_3' });
+    e3.body.messages = [textMsg('user', 'a real prompt\nwith newline ' + 'x'.repeat(200))];
+    w.ingestRequest(e3, e3.body.messages);
+    await w.flush();
+
+    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    const all = lines.flatMap(l => l.texts);
+    assert.equal(all.length, 1, 'only the real prompt recorded');
+    assert.ok(!all[0].includes('\n') && all[0].length === 100, 'flattened + 100-char cap');
+  });
+
+  it('prompts.jsonl: a restarted process seeding from the file stays idempotent on resume snapshots', async () => {
+    const w1 = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry();
+    e1.body.messages = [textMsg('user', 'q1')];
+    w1.ingestRequest(e1, e1.body.messages);
+    await w1.flush();
+
+    // New process onto the same session dir: first main wire replays FULL
+    // history → ConversationStore emits a fresh snapshot. The seeded dedup set
+    // must keep q1 out of the file a second time.
+    const w2 = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e2 = mkEntry({ requestId: 'req_r2' });
+    e2.body.messages = [textMsg('user', 'q1'), textMsg('assistant', 'a1'), textMsg('user', 'q2')];
+    w2.ingestRequest(e2, e2.body.messages);
+    await w2.flush();
+
+    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    assert.deepEqual(lines.flatMap(l => l.texts), ['q1', 'q2'], 'no duplicate q1 after restart');
+  });
+
+  it('prompts.jsonl: a suggestion probe swapped for the real prompt (replace-tail) is captured', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry();                       // snapshot → captures q1
+    e1.body.messages = [textMsg('user', 'q1'), textMsg('assistant', 'draft')];
+    w.ingestRequest(e1, e1.body.messages);
+    const e2 = mkEntry({ requestId: 'req_2' });  // append of a probe → skipped by isSuggestionMode
+    e2.body.messages = [textMsg('user', 'q1'), textMsg('assistant', 'draft'), textMsg('user', '[SUGGESTION MODE: predict next]')];
+    w.ingestRequest(e2, e2.body.messages);
+    const e3 = mkEntry({ requestId: 'req_3' });  // real prompt supplants the probe, same length → replace-tail
+    e3.body.messages = [textMsg('user', 'q1'), textMsg('assistant', 'draft'), textMsg('user', 'the real followup')];
+    w.ingestRequest(e3, e3.body.messages);
+    await w.flush();
+    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    assert.deepEqual(lines.flatMap(l => l.texts), ['q1', 'the real followup'],
+      'replace-tail arm captures the real prompt that supplanted the probe');
+  });
+
+  it('prompts.jsonl: heartbeats and sub/misc conversations never write it', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkEntry();
+    w.ingestRequest(e, e.body.messages); // establishes the session
+    const ct = { timestamp: 't2', url: 'https://api/v1/messages/count_tokens', method: 'POST', isCountTokens: true, requestId: 'ct1', body: { messages: [textMsg('user', 'count me')] } };
+    w.ingestRequest(ct, ct.body.messages);
+    await w.flush();
+    const lines = readLines(sessionPaths(dir, 'proj', SID).promptsPath);
+    assert.deepEqual(lines.flatMap(l => l.texts), ['hello'], 'misc conv (countTokens) contributed nothing');
   });
 
   it('v2 failure is swallowed+reported, never thrown (failure isolation)', () => {
@@ -649,7 +779,9 @@ describe('write-order protocol', () => {
     const order = [];
     const spyQueue = {
       appendTo(path, data, onDone) {
-        order.push(path === paths.journalPath ? 'journal' : (path.includes('conversations') ? 'conv' : 'other'));
+        order.push(path === paths.journalPath ? 'journal'
+          : (path.includes('conversations') ? 'conv'
+            : (path === paths.promptsPath ? 'prompts' : 'other')));
         if (onDone) onDone();
       },
       flush: async () => {}, close: async () => {},
@@ -660,7 +792,9 @@ describe('write-order protocol', () => {
       body: { metadata: { user_id: jsonUserId }, messages: [textMsg('user', 'x')] },
     };
     w.ingestRequest(e, e.body.messages);
-    assert.deepEqual(order, ['conv', 'journal']);
+    // The prompts display cache must never precede the journal req line
+    // (a prompts failure must not cost the request its journal record).
+    assert.deepEqual(order, ['conv', 'journal', 'prompts']);
   });
 
   it('cold-start hold flush: cross-request batch ordering is best-effort (documented, read side tolerates)', async () => {

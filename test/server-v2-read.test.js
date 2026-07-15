@@ -1,8 +1,7 @@
 // ████ 文件内显式隔离(第六层闸) — ESM 静态 import 会被提升(hoist) ████
 // LOG_DIR 在 ../findcc.js 加载时即固化。必须:node: 内置静态 import → 隔离段锁
 // env → 动态 import 项目模块(与 server-logs.test.js 同款,详见该文件头注)。
-// 私有端口窗 18400-18409;CCV_WIRE_V2_READ=1 必须在 interceptor 动态 import 之前
-// 就位(读开关是 boot 时一次性解析,S5 startup-only 语义本身就是被测对象)。
+// 私有端口窗 18400-18409。1.7.0 起 v2 读取无条件——不再需要任何开关。
 import { describe, it, before, after } from 'node:test';
 import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
@@ -15,12 +14,10 @@ import { tmpdir } from 'node:os';
 const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-srvv2r-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
-delete process.env.CCV_INSTANCE_ID;
 process.env.CCV_START_PORT = '18400';
 process.env.CCV_MAX_PORT = '18409';
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
-process.env.CCV_WIRE_V2_READ = '1'; // boot-time read switch under test
 
 const { LOG_DIR } = await import('../findcc.js');
 
@@ -103,15 +100,6 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
     rmSync(join(LOG_DIR, projectName), { recursive: true, force: true });
   });
 
-  it('GET /api/wire-v2-mode reports the read path as running (env source)', async () => {
-    const res = await httpRequest(port, '/api/wire-v2-mode');
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.equal(data.readRunning, true);
-    assert.equal(data.readEnvOverride, true);
-    assert.ok(data.unlocked.includes('dual-read'));
-  });
-
   it('GET /api/local-log?file=v2:… streams adapted v1-shape entries over SSE', async () => {
     const res = await httpRequest(port, `/api/local-log?file=${encodeURIComponent(v2Ref)}`);
     assert.equal(res.status, 200);
@@ -127,12 +115,11 @@ describeCli('server v2 read path (wire-v2 S5)', { concurrency: false }, () => {
     assert.equal(entries[1].response.status, 200);
   });
 
-  it('GET /api/entries/page pages a v2 session', async () => {
+  it('GET /api/entries/page is gone (history paging removed in 1.7.0 P3)', async () => {
     const res = await httpRequest(port, `/api/entries/page?file=${encodeURIComponent(v2Ref)}&before=2026-07-13T05:00:01.000Z&limit=5`);
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.equal(data.entries.length, 1, 'only the entry older than `before`');
-    assert.equal(data.entries[0]._isCheckpoint, true);
+    let json = null;
+    try { json = res.json(); } catch { /* SPA HTML fallback — route gone */ }
+    assert.ok(!json || json.entries === undefined, 'paging endpoint must not answer');
   });
 
   it('GET /api/local-logs?v2=1 lists the session as an openable v2 item', async () => {

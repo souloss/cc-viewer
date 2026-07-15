@@ -38,9 +38,10 @@ function postPrefs(handler, body) {
   });
 }
 
-// resumeAutoChoice 出厂默认"继承"是虚拟默认：键缺失时仅注入 API 回包，绝不落盘；
-// 显式关闭持久化的是 null（键存在），必须原样返回 —— 这是区分"新用户"与"显式关闭"的唯一依据。
-describe('/api/preferences resumeAutoChoice virtual default', { concurrency: false }, () => {
+// wire-v2 (1.7.0): the resumeAutoChoice "virtual default" is GONE — the key is
+// no longer special-cased anywhere. GET/POST are plain passthrough: a missing
+// key stays missing, an explicit value (including null) round-trips unchanged.
+describe('/api/preferences plain key passthrough (resumeAutoChoice no longer special-cased)', { concurrency: false }, () => {
   let getHandler, postHandler;
 
   before(async () => {
@@ -54,50 +55,51 @@ describe('/api/preferences resumeAutoChoice virtual default', { concurrency: fal
 
   beforeEach(() => { if (existsSync(prefsFile)) unlinkSync(prefsFile); });
 
-  it('GET injects "continue" when key is missing (new user gets factory default)', () => {
+  it('GET does NOT inject resumeAutoChoice when the key is missing (virtual default removed)', () => {
     const data = getPrefs(getHandler);
-    assert.equal(data.resumeAutoChoice, 'continue');
+    assert.equal('resumeAutoChoice' in data, false, 'no injected default');
   });
 
-  it('GET does not create or modify the prefs file (default is virtual, never persisted)', () => {
+  it('GET does not create or modify the prefs file', () => {
     getPrefs(getHandler);
     assert.equal(existsSync(prefsFile), false, 'GET must not write preferences.json');
   });
 
-  it('GET preserves explicit null (user toggled the switch off)', () => {
+  it('GET preserves an explicit null value (plain passthrough)', () => {
     writeFileSync(prefsFile, JSON.stringify({ resumeAutoChoice: null }));
     const data = getPrefs(getHandler);
     assert.ok('resumeAutoChoice' in data, 'key must be present');
     assert.equal(data.resumeAutoChoice, null);
   });
 
-  it('GET preserves explicit "new"', () => {
+  it('GET preserves an explicit string value (plain passthrough)', () => {
     writeFileSync(prefsFile, JSON.stringify({ resumeAutoChoice: 'new' }));
     const data = getPrefs(getHandler);
     assert.equal(data.resumeAutoChoice, 'new');
   });
 
-  it('GET falls back to default on corrupted prefs file', () => {
+  it('GET falls back to empty prefs on a corrupted file (still no injected keys)', () => {
     writeFileSync(prefsFile, '{not valid json');
     const data = getPrefs(getHandler);
-    assert.equal(data.resumeAutoChoice, 'continue');
+    assert.equal('resumeAutoChoice' in data, false);
+    assert.ok(typeof data.logDir === 'string', 'runtime logDir is still returned');
   });
 
-  it('POST echoes the default but never persists it to disk', async () => {
+  it('POST echo carries no injected resumeAutoChoice and none is persisted', async () => {
     const { status, data } = await postPrefs(postHandler, { lang: 'en' });
     assert.equal(status, 200);
     assert.equal(data.lang, 'en');
-    assert.equal(data.resumeAutoChoice, 'continue', 'POST echo must match GET shape');
+    assert.equal('resumeAutoChoice' in data, false, 'POST echo must match GET shape (no injection)');
     const written = JSON.parse(readFileSync(prefsFile, 'utf-8'));
-    assert.equal('resumeAutoChoice' in written, false, 'virtual default must not be written to disk');
+    assert.equal('resumeAutoChoice' in written, false, 'nothing injected on disk either');
   });
 
-  it('POST persists explicit null and a later GET returns it (toggle-off round trip)', async () => {
+  it('POST persists an explicit null and a later GET returns it (round trip)', async () => {
     const { status } = await postPrefs(postHandler, { resumeAutoChoice: null });
     assert.equal(status, 200);
     const written = JSON.parse(readFileSync(prefsFile, 'utf-8'));
     assert.ok('resumeAutoChoice' in written, 'explicit null must be persisted with the key present');
     assert.equal(written.resumeAutoChoice, null);
-    assert.equal(getPrefs(getHandler).resumeAutoChoice, null, 'GET must not override explicit off');
+    assert.equal(getPrefs(getHandler).resumeAutoChoice, null, 'GET returns the stored null unchanged');
   });
 });

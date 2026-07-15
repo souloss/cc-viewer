@@ -58,11 +58,21 @@ ccv -c --d             # == claude --continue --dangerously-skip-permissions
 
 cc-viewer 는 네이티브 데스크톱 앱도 제공합니다: [다운로드 페이지](https://github.com/weiesky/cc-viewer/releases)
 
+### 1.7.0 으로 업그레이드 (로그 형식 v2)
+
+1.7.0 부터 로그는 단일 `.jsonl` 파일 대신 세션별 디렉터리 형식(wire-format v2)으로 저장되며, 디스크 사용량이 약 90% 줄어듭니다. 기존 v1 `.jsonl` 파일은 절대 수정되거나 삭제되지 않으며, 로그 대화상자는 기본적으로 v2 세션을 표시하며, 작은 “레거시(v1) 로그 보기” 항목(오래된 파일이 있는 동안 표시됨)에서 v1 보기를 열어 확인, 마이그레이션 또는 삭제할 수 있습니다. 시작 시 레거시 로그가 발견되면 cc-viewer 가 원클릭 마이그레이션을 제공합니다(`claude -c` 로 이전 대화를 이어갈 때는 대화의 전반부가 이전 파일에 저장되어 있으므로 마이그레이션을 강력히 권장합니다). 터미널에서 마이그레이션할 수도 있습니다:
+
+```bash
+ccv convert <project>   # 프로젝트 하나 마이그레이션
+ccv convert --all       # 모든 프로젝트 마이그레이션
+ccv verify <v1-file>    # v1 파일을 변환된 세션과 대조하여 확인
+```
+
 ### 로거 모드
 
 여전히 네이티브 claude 도구나 VS Code 확장을 사용하고 싶다면 이 모드를 사용하세요.
 
-이 모드에서 `claude` 를 실행하면 로깅 프로세스가 자동으로 시작되어 요청 로그를 \~/.claude/cc-viewer/*yourproject*/date.jsonl 에 기록합니다.
+이 모드에서 `claude` 를 실행하면 로깅 프로세스가 자동으로 시작되어 요청 로그를 \~/.claude/cc-viewer/*yourproject*/sessions/ 아래의 세션별 디렉터리(wire-format v2)에 기록합니다.
 
 로거 모드 활성화:
 

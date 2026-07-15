@@ -13,7 +13,7 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
 import { isCheckpointEntry, isDeltaEntry, reconstructSegment } from './delta-reconstructor.js';
-import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync } from './v2/adapter.js';
+import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync, readV2WindowedEntries } from './v2/adapter.js';
 
 const READ_CHUNK_SIZE = 1024 * 1024; // 1MB
 const SEPARATOR = '\n---\n';
@@ -313,6 +313,27 @@ export async function streamRawEntriesAsync(filePath, onRawEntry, opts = {}) {
   const onScan = opts.onScan || null;
   const onReady = opts.onReady || null;
 
+  // v2 windowed path: the adapter guarantees a reconstructable baseline at the
+  // window start (synthesized checkpoint), which the byte-tail heuristics below
+  // cannot — expand-to-checkpoint over adapter output could walk arbitrarily
+  // far back on a session with sparse organic snapshots.
+  if (isV2SessionDir(filePath)) {
+    const win = await readV2WindowedEntries(filePath, { limit: opts.limit, onScan });
+    if (onReady) onReady({ totalCount: win.totalCount, hasMore: win.hasMore, oldestTs: win.oldestTimestamp || null });
+    let sent = 0;
+    for (const raw of win.entries) {
+      if (sinceFilter) {
+        const ts = extractTimestamp(raw);
+        if (ts && ts < sinceFilter) continue;
+      }
+      await onRawEntry(raw);
+      sent++;
+      if (sent % 20 === 0) await new Promise(resolve => setImmediate(resolve));
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    return { sentCount: sent, totalCount: win.totalCount };
+  }
+
   // 第一遍：异步 generator 逐条读取 → dedup Map 存原始字符串（不 parse）
   // 内存 = 去重后的原始字符串总量 ≈ 文件大小的一半（inProgress 被 completed 覆盖）
   const dedup = new Map();
@@ -434,9 +455,12 @@ function _sliceToCheckpoint(entries, limit) {
 export async function readTailEntries(filePath, { limit = 300 } = {}) {
   const emptyResult = { entries: [], hasMore: false, oldestTimestamp: '', estimatedTotal: 0 };
   if (!existsSync(filePath)) return emptyResult;
-  // v2 session dirs have no byte-offset tail window — always full-read (the
-  // synthesized stream is a few % of the v1 volume, spec §15).
-  if (isV2SessionDir(filePath)) return _readTailFull(filePath, limit, 0);
+  // v2 session dirs have no byte-offset tail window — the adapter windows by
+  // entry count and synthesizes a baseline checkpoint at the window start.
+  if (isV2SessionDir(filePath)) {
+    const win = await readV2WindowedEntries(filePath, { limit });
+    return { entries: win.entries, hasMore: win.hasMore, oldestTimestamp: win.oldestTimestamp, estimatedTotal: win.totalCount };
+  }
   const st = statSync(filePath);
   if (st.size === 0) return emptyResult;
 
@@ -488,100 +512,4 @@ async function _readTailFull(filePath, limit, fileSize) {
   const { sliced, hasMore } = _sliceToCheckpoint(allEntries, limit);
   const oldestTimestamp = extractTimestamp(sliced[0]) || '';
   return { entries: sliced, hasMore, oldestTimestamp, estimatedTotal: totalCount };
-}
-
-/**
- * 读取分页历史条目（用于 /api/entries/page REST 端点）。
- *
- * 复用 iterateRawEntries + extractDedupKey 去重，
- * 过滤 timestamp < before 的条目，从末尾取最后 limit 条，
- * 向前扩展到 checkpoint 边界。
- *
- * @param {string} filePath
- * @param {{ before: string, limit: number }} opts
- * @returns {{ entries: string[], hasMore: boolean, oldestTimestamp: string, count: number }}
- */
-export async function readPagedEntries(filePath, { before, limit }) {
-  if (!existsSync(filePath)) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
-  if (!isV2SessionDir(filePath)) {
-    const stat = statSync(filePath);
-    if (stat.size === 0) return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
-  }
-
-  const dedup = await _collectDedup(iterateRawEntriesAsync(filePath));
-
-  // 过滤 timestamp < before
-  const filtered = [];
-  for (const [key, raw] of dedup) {
-    if (key.startsWith('__nokey_')) continue;
-    const ts = extractTimestamp(raw);
-    if (ts && ts < before) {
-      filtered.push(raw);
-    }
-  }
-
-  if (filtered.length === 0) {
-    return { entries: [], hasMore: false, oldestTimestamp: '', count: 0 };
-  }
-
-  const { sliced, hasMore } = _sliceToCheckpoint(filtered, limit);
-  const oldestTimestamp = extractTimestamp(sliced[0]) || '';
-  return { entries: sliced, hasMore, oldestTimestamp, count: sliced.length };
-}
-
-/**
- * Scan a whole segment and collect the parsed entries matching `predicate`,
- * for the post-rotation teammate backfill (/api/prev-segment-teammates).
- *
- * - `rawPrefilter(rawString)`: cheap substring gate evaluated BEFORE
- *   JSON.parse, so multi-MB MainAgent checkpoint frames are skipped without
- *   parsing.
- * - Last-write-wins dedup by timestamp|url (a request's inProgress and final
- *   writes share one key; the later frame replaces the earlier).
- * - `maxBytes` budget applied NEWEST-first over the raw sizes: when the
- *   matches exceed the budget, the oldest are dropped and `truncated` is set.
- *
- * Returns { entries, truncated } with entries in chronological (file) order.
- */
-export async function collectFilteredRawEntriesAsync(filePath, predicate, {
-  maxBytes = 64 * 1024 * 1024,
-  rawPrefilter = null,
-  yieldEvery = 50,
-} = {}) {
-  const matched = new Map(); // dedupKey -> { size, entry }, insertion order = file order
-  let nokey = 0;
-  let totalBytes = 0;
-  let truncated = false;
-  let parsedCount = 0;
-  for await (const raw of iterateRawEntriesAsync(filePath)) {
-    if (rawPrefilter && !rawPrefilter(raw)) continue;
-    // Real team logs defeat the prefilter for most BYTES (leader checkpoints
-    // embed the SendMessage tool text), so parses can total >1s on a 300MB
-    // segment — yield periodically to keep the live proxy's event loop
-    // responsive during the scan.
-    if (yieldEvery > 0 && ++parsedCount % yieldEvery === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-    let entry;
-    try { entry = JSON.parse(raw); } catch { continue; }
-    if (!entry || !predicate(entry)) continue;
-    const key = extractDedupKey(raw) || `__nokey_${nokey++}`;
-    const prev = matched.get(key);
-    if (prev) totalBytes -= prev.size;
-    matched.set(key, { size: raw.length, entry });
-    totalBytes += raw.length;
-    // Enforce the budget DURING the scan (newest wins): evicting the oldest
-    // keys keeps transient memory bounded even on teammate-heavy segments —
-    // not just the response size.
-    while (totalBytes > maxBytes && matched.size > 1) {
-      const oldestKey = matched.keys().next().value;
-      totalBytes -= matched.get(oldestKey).size;
-      matched.delete(oldestKey);
-      truncated = true;
-    }
-  }
-  return {
-    entries: [...matched.values()].map((it) => it.entry),
-    truncated,
-  };
 }

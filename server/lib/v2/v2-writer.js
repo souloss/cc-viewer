@@ -24,11 +24,16 @@ import { BlobStore } from './blob-store.js';
 import { Journal } from './journal.js';
 import { ConversationStore } from './conversation-store.js';
 import { parseUserId, classifyKind, ConvResolver } from './identity.js';
+import { extractUserTexts, flattenPromptText, isSuggestionMode, readPromptsHead } from '../user-prompt-extract.js';
 
-// Below this many free bytes on the log volume, v2 skips writing (v1 keeps its
-// own behavior) and reports once — dual-write must not be the thing that fills
-// the disk (plan risk #9 / F-review 6).
+// Below this many free bytes on the log volume, v2 skips writing and reports
+// once — logging must not be the thing that fills the disk (plan risk #9).
 const MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1GB
+
+// Hard ceiling on distinct prompts recorded per session in prompts.jsonl —
+// keeps both the in-memory dedup set and the side file bounded for extreme
+// thousand-turn sessions (the read side additionally caps at a byte budget).
+const PROMPTS_MAX_PER_SESSION = 2000;
 
 export class V2Writer {
   /**
@@ -37,9 +42,9 @@ export class V2Writer {
    * @param {string|Function} opts.project - project directory name, or a getter —
    *   workspace mode rebinds the interceptor's _projectName at runtime; a falsy
    *   resolved project makes ingest a no-op (mirrors v1's empty-LOG_FILE no-op)
-   * @param {string|null} [opts.instanceId] - CCV_INSTANCE_ID (pid) for meta ownership
    * @param {object|null} [opts.leader]     - teammate processes: {agentName, teamName, parentSessionId}
-   * @param {boolean} [opts.enabled]   - master switch (CCV_WIRE_V2); default off
+   * @param {boolean} [opts.enabled]   - always on since 1.7.0; `enabled: false`
+   *   is honored only as a test seam (fixtures asserting "nothing written")
    * @param {AsyncWriteQueue} [opts.queue]  - injected queue (tests); defaults to a
    *   dedicated instance so v2 volume never head-of-line-blocks v1's queue.
    * @param {number} [opts.minFreeBytes]    - disk guard threshold (tests)
@@ -50,9 +55,10 @@ export class V2Writer {
     this._projectFn = typeof opts.project === 'function'
       ? opts.project
       : () => (opts.project || '');
-    this._instanceId = opts.instanceId || null;
     this._leader = opts.leader || null;
-    this._enabled = !!opts.enabled;
+    // 1.7.0: always on in production; opts.enabled === false is honored only
+    // as a test seam (fixtures that must assert "nothing written").
+    this._enabled = opts.enabled === false ? false : true;
     this._queue = opts.queue || new AsyncWriteQueue(''); // paths are always explicit
     this._minFreeBytes = typeof opts.minFreeBytes === 'number' ? opts.minFreeBytes : MIN_FREE_BYTES;
     this._statfs = opts.statfs || statfsSync;
@@ -63,6 +69,10 @@ export class V2Writer {
     this._sessionsDirName = opts.sessionsDirName || 'sessions';
     this._metaExtra = opts.metaExtra || null;
     this._exactConvFps = !!opts.exactConvFps;
+    // S6b live feed: called with the session dir after every ingest so the
+    // in-process live cursor can read the fresh appends with zero fs-watch
+    // latency. Purely a nudge — the feed's data source stays the files.
+    this._onActivity = typeof opts.onActivity === 'function' ? opts.onActivity : null;
     this._sessions = new Map(); // sessionId → {paths, blobs, journal, convs, resolver}
     this._currentSid = null;    // last successfully resolved session (fallback routing §8.3)
     this._pendingNoSid = [];    // requests seen before any sid (cold-start heartbeats).
@@ -71,16 +81,26 @@ export class V2Writer {
     // REASSIGNED away from body.messages, never mutated in place — safe).
     this._lateHandles = new Map(); // rid → handle for held requests whose completion arrives after the flush
     this._diskGuardTripped = false;
+    this._continuedSeen = false;   // P2: wire-level `claude -c` continuation marker
   }
 
+  /** P2: true once any session's FIRST main wire already carried assistant
+   *  turns — the wire-level signature of a continued (-c/-r) conversation. */
+  sawContinuedSession() { return this._continuedSeen; }
+
+  // 1.7.0: v2 is the only format — the writer is always on. The getter is kept
+  // because read-side helpers key off it; the sole write inhibitor left is the
+  // in-band disk guard.
   get enabled() { return this._enabled; }
-  setEnabled(v) { this._enabled = !!v; }
+
+  /** Late wiring seam: the live feed is constructed by server.js AFTER this
+   *  writer exists (module init order), so the nudge callback arrives here. */
+  setOnActivity(fn) { this._onActivity = typeof fn === 'function' ? fn : null; }
 
   _session(sessionId, userIdRaw, encoding, project) {
     let s = this._sessions.get(sessionId);
     if (s) return s;
     const meta = {
-      ...(this._instanceId && { instanceId: this._instanceId }),
       pid: process.pid,
       ...(userIdRaw && { userIdRaw }),
       ...(encoding && { userIdEncoding: encoding }),
@@ -176,6 +196,9 @@ export class V2Writer {
       }
 
       const seq = this._ingestInto(s, sid, entry, originalMessages);
+      if (seq != null && this._onActivity) {
+        try { this._onActivity(s.paths.dir); } catch { /* nudge only — never disturb the write */ }
+      }
       // The handle carries the RESOLVED session object, not just the sid:
       // resetSessions() (workspace switch) clears the _sessions map, and a
       // completion arriving after the switch must still land its done/response
@@ -194,6 +217,16 @@ export class V2Writer {
     const rid = entry.requestId || `${seq}`;
     const msgs = Array.isArray(originalMessages) ? originalMessages
       : (entry.body && Array.isArray(entry.body.messages) ? entry.body.messages : null);
+
+    // P2 wire-level continuation detection: the very first main wire of a
+    // session that already carries assistant turns can only be `claude -c`
+    // (or -r) resuming an older conversation — a fresh one starts with a
+    // single user message. Used by the migrate prompt's `continued` flag.
+    if (!this._continuedSeen && kind === 'main' && !s._sawMain && msgs && msgs.length > 1
+        && msgs.some((m) => m && m.role === 'assistant')) {
+      this._continuedSeen = true;
+    }
+    if (kind === 'main') s._sawMain = true;
 
     // 1. Blobs (sync + fsync — the durability barrier).
     const toolsRef = s.blobs.put(entry.body && entry.body.tools);
@@ -228,7 +261,46 @@ export class V2Writer {
       ...(convResult && convResult.boundary && { boundary: convResult.boundary }),
       ...(entry.proxyProfile && { proxy: { profile: entry.proxyProfile, ...(entry.proxyUrl && { url: entry.proxyUrl }) } }),
     });
+
+    // 4. prompts.jsonl display cache — strictly AFTER the journal line (a
+    // prompts failure must never cost the request its journal record) and
+    // fully caught on its own. Main conversation only; the converter drives
+    // this same path, so migrated sessions get the cache for free.
+    if (convKey === 'main' && convResult && msgs) {
+      try { this._appendPrompts(s, seq, msgs, convResult); }
+      catch (err) { reportSwallowed('v2-write.prompts', err); }
+    }
     return seq;
+  }
+
+  /**
+   * Append newly-seen user prompts of the main conversation to the session's
+   * `prompts.jsonl` ({seq, texts} lines). Idempotent across process restarts:
+   * the dedup set is seeded once from the existing file (bounded head read),
+   * so a resume/`-c` snapshot replaying the full history appends nothing new.
+   */
+  _appendPrompts(s, seq, msgs, convResult) {
+    // snapshot (msgFrom=0, full wire), append (new tail) — and replace-tail:
+    // a suggestion-mode probe replaced by the REAL next user prompt arrives as
+    // a same-length tail swap, so skipping ctl entirely would lose exactly
+    // those prompts.
+    const covered = convResult.evt === 'append' || convResult.evt === 'snapshot'
+      || (convResult.evt === 'ctl' && convResult.ctl === 'replace-tail');
+    if (!covered) return;
+    if (isSuggestionMode(msgs)) return; // next-input probes are not user prompts
+    if (!s._promptSeen) s._promptSeen = new Set(readPromptsHead(s.paths.promptsPath));
+    const slice = msgs.slice(convResult.msgFrom);
+    const texts = [];
+    for (const text of extractUserTexts(slice)) {
+      if (s._promptSeen.size >= PROMPTS_MAX_PER_SESSION) break;
+      const flat = flattenPromptText(text);
+      if (!flat || s._promptSeen.has(flat)) continue;
+      s._promptSeen.add(flat);
+      texts.push(flat);
+    }
+    if (texts.length > 0) {
+      this._queue.appendTo(s.paths.promptsPath, JSON.stringify({ seq, texts }) + '\n');
+    }
   }
 
   /**
@@ -290,9 +362,21 @@ export class V2Writer {
         }),
         ...(respBody && respBody.stop_reason && { stop: respBody.stop_reason }),
       });
+      if (this._onActivity && s.paths) {
+        try { this._onActivity(s.paths.dir); } catch { /* nudge only — never disturb the write */ }
+      }
     } catch (err) {
       reportSwallowed('v2-write.ingestCompletion', err);
     }
+  }
+
+  /** Session directory of the writer's current (fallback-routing) session, or
+   *  null before the first sid-bearing request. The read side uses this to
+   *  resolve "the live session" for /events cold loads (S6b). */
+  currentSessionDir() {
+    if (!this._currentSid) return null;
+    const s = this._sessions.get(this._currentSid);
+    return s ? s.paths.dir : null;
   }
 
   /** Lifecycle hook (resume / workspace reset): drop in-memory conversation

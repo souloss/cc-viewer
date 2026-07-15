@@ -15,9 +15,8 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
       key: 'check',
       width: 40,
       fixed: mobile ? 'left' : false,
-      // v2 session rows are not selectable: selection feeds delete, which does
-      // not apply to v2 dirs before S6a (soft-delete work).
-      render: (file, log) => log.kind === 'v2' ? null : (
+      // 1.7.0: every row is a v2 session; selection feeds the soft-delete.
+      render: (file) => (
         <Checkbox
           checked={selectedLogs.has(file) || false}
           onClick={(e) => e.stopPropagation()}
@@ -32,35 +31,21 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
       width: mobile ? 150 : 180,
       render: (ts) => <span className={styles.tableTimestampCell}>{formatTimestamp(ts, mobile)}</span>,
     },
-    // 实例归属(pid)列：仅桌面端（移动端列宽紧张，沿用 turns 列同款 !mobile 守卫）。
-    // 无 pid 的无标签日志该列留空。
-    ...(!mobile ? [{
-      title: t('ui.logInstanceId'),
-      dataIndex: 'instanceId',
-      key: 'instanceId',
-      width: 90,
-      render: (id) => id ? <Tag className={styles.tableTag}>{id}</Tag> : null,
-    }] : []),
     {
       title: t('ui.logPreview'),
       dataIndex: 'preview',
       key: 'preview',
       width: mobile ? 150 : undefined,
       ellipsis: true,
-      render: (arr, log) => {
-        // v2 会话行在 preview 列前缀 "v2" tag：preview 为空时单独显示，有内容时与
-        // 文本并排（列表切换开关下两种源可能被来回对照，行内需自明）。
-        const v2Tag = log.kind === 'v2'
-          ? <Tag className={styles.tableTag} style={{ marginRight: 6 }}>v2</Tag>
-          : null;
+      render: (arr) => {
         if (!Array.isArray(arr) || arr.length === 0) {
-          return v2Tag || '—';
+          return '—';
         }
         const first = arr[0];
         // 防 server 偶发返回 [null] / [undefined] / [number] — 强制 string 才用作 displayText
-        if (typeof first !== 'string') return v2Tag || '—';
+        if (typeof first !== 'string') return '—';
         const displayText = (first.length <= 30 && arr.length > 1) ? `${first} | ${arr[1]}` : first;
-        if (arr.length <= 1) return <span className={styles.tablePreviewText}>{v2Tag}{displayText}</span>;
+        if (arr.length <= 1) return <span className={styles.tablePreviewText}>{displayText}</span>;
         return (
           <Popover
             trigger={mobile ? 'click' : 'hover'}
@@ -84,7 +69,7 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
               </div>
             }
           >
-            <span className={styles.tablePreviewTextClickable} style={{ textDecoration: mobile ? 'underline dotted #666' : 'none' }}>{v2Tag}{displayText}</span>
+            <span className={styles.tablePreviewTextClickable} style={{ textDecoration: mobile ? 'underline dotted #666' : 'none' }}>{displayText}</span>
           </Popover>
         );
       },
@@ -121,11 +106,10 @@ function LogTable({ logs, mobile, selectedLogs = EMPTY_SET, onToggleSelect, onOp
       scroll={mobile ? { x: 'max-content', y: 'calc(100vh - 160px)' } : { y: 400 }}
       onRow={(log) => ({
         onClick: () => {
-          if (log.kind === 'v2') return; // v2 rows carry no selection (see check column)
           const checked = !selectedLogs.has(log.file);
           onToggleSelect(log.file, checked);
         },
-        style: { cursor: log.kind === 'v2' ? 'default' : 'pointer' },
+        style: { cursor: 'pointer' },
       })}
     />
   );

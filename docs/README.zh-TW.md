@@ -58,13 +58,23 @@ ccv -c --d             # == claude --continue --dangerously-skip-permissions
 
 cc-viewer 也提供了客戶端版本：[下載連結](https://github.com/weiesky/cc-viewer/releases)
 
+### 升級到 1.7.0（日誌格式 v2）
+
+自 1.7.0 起，日誌以「每工作階段目錄」格式（wire-format v2）儲存，不再使用單一 `.jsonl` 檔案——磁碟佔用約減少 90%。既有的 v1 `.jsonl` 檔案不會被修改或刪除；日誌對話框預設會列出 v2 工作階段，並提供一個小的「檢視舊版（v1）日誌」項目（只要舊檔案還存在便會顯示），點選後會開啟 v1 檢視，可在其中檢視、遷移或刪除它們。啟動時，若發現舊版日誌，cc-viewer 會提供一鍵遷移（在使用 `claude -c` 繼續舊對話時強烈建議遷移，因為這類對話的前半部分儲存在舊檔案中）。你也可以在終端機中遷移：
+
+```bash
+ccv convert <project>   # 遷移單個專案
+ccv convert --all       # 遷移所有專案
+ccv verify <v1-file>    # 對照轉換後的工作階段校驗某個 v1 檔案
+```
+
 ### 日誌模式
 
 如果你仍習慣使用 claude 原生工具，或 VS Code 擴充功能，請使用此模式。
 
 此模式下啟動 `claude`
 
-會自動啟動一個日誌行程，將請求日誌自動記錄到 \~/.claude/cc-viewer/*yourproject*/date.jsonl
+會自動啟動一個日誌行程，將請求日誌自動記錄到 \~/.claude/cc-viewer/*yourproject*/sessions/ 下的每工作階段目錄（wire-format v2）
 
 啟動日誌模式：
 

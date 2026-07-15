@@ -1,5 +1,5 @@
 import React from 'react';
-import { ConfigProvider, Spin, Button, Badge, Switch, Select, Modal, message, Radio, Tooltip } from 'antd';
+import { ConfigProvider, Spin, Button, Badge, Switch, Select, Modal, message, Tooltip } from 'antd';
 import { BranchesOutlined, DownloadOutlined, DeleteOutlined, RollbackOutlined, ReloadOutlined, UploadOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import AppBase, { styles, OPTIMISTIC_CLEAR_PERCENT } from './AppBase';
 import { isIOS, isPad, setViewMode } from './env';
@@ -40,9 +40,9 @@ const CALIBRATION_MODELS = appConfig.calibrationModels;
 // tight and aliasing on mobile is less common. Cross-tab / same-tab updates
 // still propagate here via the hook so a desktop alias edit reflects on
 // mobile without reload.
-function MobileCtxLabelText({ projectName, instanceId }) {
+function MobileCtxLabelText({ projectName }) {
   const alias = useProjectAlias(projectName);
-  const base = `${t('ui.liveMonitoring')}${projectName ? `: ${projectName}` : ''}${instanceId ? `(${instanceId})` : ''}`;
+  const base = `${t('ui.liveMonitoring')}${projectName ? `: ${projectName}` : ''}`;
   return <>{base}{alias ? ` (${alias})` : ''}</>;
 }
 
@@ -662,7 +662,7 @@ class Mobile extends AppBase {
                 >
                   <span className={styles.mobileCtxTagFill} style={{ width: `${contextPercent}%`, backgroundColor: ctxColor }} />
                   <span className={styles.mobileCtxTagContent}>
-                    <MobileCtxLabelText projectName={this.state.projectName} instanceId={this.state.instanceId} />
+                    <MobileCtxLabelText projectName={this.state.projectName} />
                   </span>
                 </span>
               );
@@ -844,7 +844,7 @@ class Mobile extends AppBase {
                     collapseToolResults={prefs.collapseToolResults}
                     expandThinking={prefs.expandThinking}
                     showFullToolContent={prefs.showFullToolContent}
-                    onlyCurrentSession={mobileIsLocalLog ? false : prefs.onlyCurrentSession}
+                    onlyCurrentSession={!mobileIsLocalLog}
                     isLocalLog={mobileIsLocalLog}
                     showThinkingSummaries={prefs.showThinkingSummaries}
                     onViewRequest={null}
@@ -856,11 +856,6 @@ class Mobile extends AppBase {
                     mobileChatVisible={true}
                     fileLoading={this.state.fileLoading}
                     isStreaming={this.state.isStreaming}
-                    hasMoreHistory={this.state.hasMoreHistory}
-                    loadingMore={this.state.loadingMore}
-                    onLoadMoreHistory={() => this.loadMoreHistory()}
-                    loadingSessionId={this.state.loadingSessionId}
-                    onLoadSession={(sid) => this.loadSession(sid)}
                     onPendingPermission={this.handlePendingPermission}
                     onPendingPlanApproval={this.handlePendingPlanApproval}
                     onPendingAsk={this.handleApprovalAsk}
@@ -1032,10 +1027,6 @@ class Mobile extends AppBase {
               >
                 {t('ui.refreshStats')}
               </Button>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 'auto' }}>
-                <Switch size="small" checked={this.state.logShowAllInstances} onChange={this.handleToggleShowAllLogs} />
-                {t('ui.showAllInstanceLogs')}
-              </span>
             </div>
             <div className={styles.mobileLogMgmtBody}>
               {this.state.localLogsLoading ? (
@@ -1158,43 +1149,6 @@ class Mobile extends AppBase {
                       checked={prefs.collapseToolResults}
                       onChange={this.handleCollapseToolResultsChange}
                     />
-                  </div>
-                )}
-                {/* logfile 只读模式强制全量展示所有 session，隐藏该开关 */}
-                {!mobileIsLocalLog && (
-                  <div className={styles.mobileSettingsRow}>
-                    <span className={styles.mobileSettingsLabel}>
-                      {t('ui.onlyCurrentSession')}
-                      <Tooltip title={t('ui.onlyCurrentSession.help')} trigger="click">
-                        <QuestionCircleOutlined className={styles.mobileSettingsHelpIcon} />
-                      </Tooltip>
-                    </span>
-                    <Switch
-                      checked={prefs.onlyCurrentSession}
-                      onChange={this.handleOnlyCurrentSessionChange}
-                    />
-                  </div>
-                )}
-              </div>
-              <div className={styles.mobileSettingsGroup}>
-                <div className={styles.mobileSettingsSectionTitle}>{t('ui.logSettings')}</div>
-                <div className={styles.mobileSettingsRow}>
-                  <span className={styles.mobileSettingsLabel}>{t('ui.resumeAutoChoice')}</span>
-                  <Switch
-                    checked={!!this.state.resumeAutoChoice}
-                    onChange={this.handleResumeAutoChoiceToggle}
-                  />
-                </div>
-                {this.state.resumeAutoChoice && (
-                  <div className={styles.mobileSettingsRow}>
-                    <Radio.Group
-                      value={this.state.resumeAutoChoice}
-                      onChange={(e) => this.handleResumeAutoChoiceChange(e.target.value)}
-                      size="small"
-                    >
-                      <Radio value="continue">{t('ui.resumeAutoChoice.continue')}</Radio>
-                      <Radio value="new">{t('ui.resumeAutoChoice.new')}</Radio>
-                    </Radio.Group>
                   </div>
                 )}
               </div>

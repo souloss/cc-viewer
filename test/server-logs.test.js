@@ -15,13 +15,10 @@ import { tmpdir } from 'node:os';
 const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-srvlogs-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
-// 清掉可能从 `ccv --pid <id>` 父会话继承来的实例 id，确保 server 以默认实例(null)启动，
-// 否则 /api/local-logs 会按继承的 pid 过滤掉本测试的无标签夹具（与运行环境耦合）。
-delete process.env.CCV_INSTANCE_ID;
-// wire-v2 S5: this suite pins the read path's DISABLED default — a soak shell
-// exporting CCV_WIRE_V2_READ=1 must not leak in (server-v2-read.test.js owns
-// the enabled path).
+// 1.7.0: v2 is unconditional; stale soak-shell exports must not confuse a
+// reader into thinking they still matter (they are ignored).
 delete process.env.CCV_WIRE_V2_READ;
+delete process.env.CCV_WIRE_V2;
 process.env.CCV_START_PORT = '19750';
 process.env.CCV_MAX_PORT = '19759';
 process.env.CCV_WORKSPACE_MODE = '1';
@@ -64,9 +61,33 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
   const fileRel = `${projectName}/${fileName}`;
   const projectDir = join(LOG_DIR, projectName);
 
+  // 1.7.0: the list endpoint serves v2 sessions; hand-written session fixture
+  // (same line shapes the writer produces — pinned by stats/adapter suites).
+  const SID = 'aaaa1111-2222-4333-8444-bbbb5555cccc';
+  function makeV2Session(sid, { startTs = '2026-01-01T12:00:00.000Z', leader = null } = {}) {
+    const dir = join(projectDir, 'sessions', sid);
+    mkdirSync(join(dir, 'conversations', 'main'), { recursive: true });
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({
+      wireFormat: 2, sessionId: sid, pid: 1, startTs,
+      ...(leader && { leader }),
+    }));
+    writeFileSync(join(dir, 'journal.jsonl'), [
+      JSON.stringify({ ph: 'meta', wireFormat: 2 }),
+      JSON.stringify({ ph: 'req', seq: 1, rid: 'r1', ts: startTs, kind: 'main', conv: 'main', epoch: 0, url: 'https://api.anthropic.com/v1/messages', method: 'POST', model: 'claude-opus-4-6', msgFrom: 0, msgTo: 1, evt: 'snapshot' }),
+      JSON.stringify({ ph: 'done', seq: 1, rid: 'r1', ts: startTs, status: 'ok', usage: { in: 1, out: 1 } }),
+    ].join('\n') + '\n');
+    writeFileSync(join(dir, 'conversations', 'main', 'e0.jsonl'),
+      JSON.stringify({ seq: 1, rid: 'r1', t: 'snapshot', msgs: [{ role: 'user', content: [{ type: 'text', text: 'q-first prompt' }] }] }) + '\n');
+    writeFileSync(join(dir, 'responses.jsonl'),
+      JSON.stringify({ seq: 1, rid: 'r1', body: { content: [{ type: 'text', text: 'a1' }], usage: { input_tokens: 1, output_tokens: 1 } } }) + '\n');
+    return dir;
+  }
+
   before(async () => {
     mkdirSync(projectDir, { recursive: true });
-    // 写入多条条目用于分页测试
+    makeV2Session(SID);
+    // 未迁移 v1 文件仍在磁盘上：列表必须无视它（迁移是它唯一的出路），
+    // 但 /api/local-log 直连逃生舱仍能读它。
     const entries = [];
     for (let i = 0; i < 10; i++) {
       const ts = `2026-01-01T12:${String(i).padStart(2, '0')}:00Z`;
@@ -79,7 +100,6 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
       }));
     }
     writeFileSync(join(projectDir, fileName), entries.join('\n---\n') + '\n---\n');
-    writeFileSync(join(projectDir, `${projectName}.json`), JSON.stringify({ files: { [fileName]: { summary: { sessionCount: 3 } } } }));
 
     const mod = await import('../server/server.js');
     startViewer = mod.startViewer;
@@ -95,53 +115,103 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
     rmSync(projectDir, { recursive: true, force: true });
   });
 
-  it('GET /api/local-logs returns grouped logs with stats', async () => {
+  it('GET /api/local-logs returns grouped v2 sessions (v1 files not in the default view)', async () => {
     const res = await httpRequest(port, '/api/local-logs');
     assert.equal(res.status, 200);
     const data = res.json();
     assert.equal(typeof data._currentProject, 'string');
     assert.ok(Array.isArray(data[projectName]));
-    assert.equal(data[projectName].length, 1);
-    assert.equal(data[projectName][0].file, fileRel);
-    assert.equal(data[projectName][0].turns, 3);
-    assert.equal(data[projectName][0].timestamp, '20260101_120000');
+    assert.equal(data[projectName].length, 1, 'the unmigrated v1 file must not be listed');
+    assert.equal(data[projectName][0].file, `v2:${projectName}/${SID}`);
+    assert.equal(data[projectName][0].kind, 'v2');
+    assert.equal(data[projectName][0].turns, 1);
+    assert.deepEqual(data[projectName][0].preview, ['q-first prompt']);
   });
 
-  it('GET /api/local-logs filters by instance; ?all=1 reveals pid-tagged logs newest-first', async () => {
-    // 同项目目录放一个更新的 pid 标签日志：默认实例(server 以 CCV_INSTANCE_ID= 空启动)不应看到它。
-    const pidFile = `999__${projectName}_20260105_120000.jsonl`;
-    writeFileSync(
-      join(projectDir, pidFile),
-      JSON.stringify({ timestamp: '2026-01-05T12:00:00Z', url: '/v1/messages', mainAgent: true, body: { model: 'm' } }) + '\n---\n',
-    );
+  it('GET /api/local-logs?view=v1 lists legacy files (incl. legacy pid-prefixed); default view carries _v1FileCount', async () => {
+    const pidFile = `999__${projectName}_20260102_130000.jsonl`;
+    writeFileSync(join(projectDir, pidFile), '{"timestamp":"2026-01-02T13:00:00Z","url":"/v1/messages"}\n---\n');
+    // _v1FileCount / _unmigratedV1Count are CURRENT-project signals — bind the
+    // workspace to the fixture project the way a real launch does.
+    const { initForWorkspace } = await import('../server/interceptor.js');
+    initForWorkspace(projectDir, { forceNew: true });
     try {
-      // 默认：只列无标签日志，排除 999__ 文件（HTTP 层确认 deps.instanceId=null 的硬隔离）。
+      const v1 = (await httpRequest(port, '/api/local-logs?view=v1')).json();
+      assert.equal(v1._currentProject, projectName);
+      assert.ok(Array.isArray(v1[projectName]), 'v1 view groups by project');
+      const files = v1[projectName].map((x) => x.file);
+      assert.ok(files.includes(fileRel), 'plain v1 file listed');
+      assert.ok(files.includes(`${projectName}/${pidFile}`), 'legacy pid-prefixed file listed as-is');
+      assert.equal(v1[projectName][0].file, `${projectName}/${pidFile}`, 'newest first');
+      assert.ok(v1[projectName].every((x) => typeof x.size === 'number' && x.size > 0));
+      assert.ok(!('_unmigratedV1Count' in v1), 'v1 view carries no migration counters');
+      assert.ok(!('_v1FileCount' in v1), 'v1 view carries no gating counter');
+
+      // default view: v1 rows absent, but both signals present
       const def = (await httpRequest(port, '/api/local-logs')).json();
-      assert.equal(def[projectName].length, 1, 'default hides pid-tagged log');
-      assert.equal(def[projectName][0].file, fileRel);
-      assert.equal(def[projectName][0].instanceId, null);
-      // ?all=1：确认 query 被解析并透传为 showAll=true → 两条都在，最新的 pid 日志排最前且带 instanceId。
-      const all = (await httpRequest(port, '/api/local-logs?all=1')).json();
-      assert.equal(all[projectName].length, 2, '?all=1 reveals all instances');
-      assert.equal(all[projectName][0].file, `${projectName}/${pidFile}`, 'newest (pid) first');
-      assert.equal(all[projectName][0].instanceId, '999');
-      assert.equal(all[projectName][1].instanceId, null);
+      assert.equal(def._v1FileCount, 2, 'v1 files ON DISK gate the v1-view entry');
+      assert.equal(typeof def._unmigratedV1Count, 'number');
     } finally {
       rmSync(join(projectDir, pidFile), { force: true });
     }
   });
 
-  it('GET /api/local-log rejects v2 addressing while the read switch is off (S5 default)', async () => {
-    const res = await httpRequest(port, '/api/local-log?file=v2:proj/aaaa1111-2222-3333-4444-bbbb5555cccc');
-    assert.equal(res.status, 403);
-    assert.match(res.json().error, /v2 read path is disabled/);
+  it('a converted-but-present v1 file counts in _v1FileCount but not _unmigratedV1Count', async () => {
+    // The converter never deletes sources: once every file is marked done AT
+    // ITS CURRENT SIZE, the migrate signals go to zero while the v1-view entry
+    // must stay reachable so the leftovers can still be viewed/deleted.
+    const { initForWorkspace } = await import('../server/interceptor.js');
+    const { listV1Files } = await import('../server/lib/v2/convert.js');
+    const { statSync } = await import('node:fs');
+    initForWorkspace(projectDir, { forceNew: true });
+    const files = listV1Files(projectDir).map((name) => ({
+      name, size: statSync(join(projectDir, name)).size, done: true,
+    }));
+    assert.ok(files.length >= 1, 'fixture has a v1 file on disk');
+    writeFileSync(join(projectDir, 'wire-v2-convert-state.json'),
+      JSON.stringify({ version: 1, status: 'done', files }));
+    try {
+      const def = (await httpRequest(port, '/api/local-logs')).json();
+      assert.equal(def._v1FileCount, files.length, 'converter never deletes sources — entry link stays');
+      assert.equal(def._unmigratedV1Count, 0, 'fully-converted files are no longer pending');
+    } finally {
+      rmSync(join(projectDir, 'wire-v2-convert-state.json'), { force: true });
+    }
   });
 
-  it('GET /api/local-logs?v2=1 and v2 download are 403 while the read switch is off', async () => {
-    const list = await httpRequest(port, '/api/local-logs?v2=1');
-    assert.equal(list.status, 403);
-    const dl = await httpRequest(port, '/api/download-log?file=v2:proj/aaaa1111-2222-3333-4444-bbbb5555cccc');
-    assert.equal(dl.status, 403);
+  it('GET /api/local-logs lists every session of the project (no instance filtering)', async () => {
+    const SID_2 = 'bbbb2222-3333-4444-8555-cccc6666dddd';
+    // Sessions written by an old build may still carry meta.instanceId — the
+    // list must include them all the same (the instance concept is gone).
+    const dir = makeV2Session(SID_2, { startTs: '2026-01-05T12:00:00.000Z' });
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({
+      wireFormat: 2, sessionId: SID_2, pid: 1, startTs: '2026-01-05T12:00:00.000Z', instanceId: '999',
+    }));
+    try {
+      const data = (await httpRequest(port, '/api/local-logs')).json();
+      assert.equal(data[projectName].length, 2, 'all sessions listed regardless of legacy instanceId');
+      assert.equal(data[projectName][0].file, `v2:${projectName}/${SID_2}`, 'newest first');
+      assert.ok(!('instanceId' in data[projectName][0]), 'instanceId is no longer emitted');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('GET /api/local-log serves v2 addressing unconditionally; unknown session is 404', async () => {
+    const ok = await httpRequest(port, `/api/local-log?file=${encodeURIComponent(`v2:${projectName}/${SID}`)}`);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers['content-type'], 'text/event-stream');
+    assert.ok(ok.body.includes('q-first prompt'), 'adapter-synthesized entry served');
+    const missing = await httpRequest(port, '/api/local-log?file=v2:projX/00000000-0000-4000-8000-000000000000');
+    assert.equal(missing.status, 404);
+  });
+
+  it('GET /api/download-log serves the rebuilt v2 stream; raw zip is still 400', async () => {
+    const dl = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(`v2:${projectName}/${SID}`)}`);
+    assert.equal(dl.status, 200);
+    assert.ok(dl.body.includes('q-first prompt'));
+    const raw = await httpRequest(port, `/api/download-log?file=${encodeURIComponent(`v2:${projectName}/${SID}`)}&format=raw`);
+    assert.equal(raw.status, 400);
   });
 
   it('GET /api/download-log rejects invalid file name', async () => {
@@ -179,93 +249,24 @@ describeCli('server local logs endpoints', { concurrency: false }, () => {
     assert.ok(res.body.includes('2026-01-01T12:00:00Z'), 'Should contain entry data');
   });
 
-  // /api/entries/page 分页端点测试
-  it('GET /api/entries/page returns valid JSON structure', async () => {
-    // LOG_FILE 在测试环境可能为空，验证端点结构和参数处理
-    const res = await httpRequest(port, `/api/entries/page?before=2099-01-01T00:00:00Z&limit=5`);
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.ok(Array.isArray(data.entries), 'entries should be an array');
-    assert.equal(typeof data.hasMore, 'boolean');
-    assert.equal(typeof data.oldestTimestamp, 'string');
-    assert.equal(typeof data.count, 'number');
-    assert.equal(data.count, data.entries.length, 'count should match entries.length');
-    // entries 如果有内容，应该是已解析的对象
-    for (const entry of data.entries) {
-      assert.equal(typeof entry, 'object', 'Each entry should be a parsed object');
-    }
+  // 1.7.0 P3: /api/entries/page 已随「加载更早会话」一并移除
+  it('GET /api/entries/page no longer exists (history paging removed)', async () => {
+    const res = await httpRequest(port, '/api/entries/page?before=2099-01-01T00:00:00Z&limit=5');
+    let json = null;
+    try { json = res.json(); } catch { /* SPA HTML fallback — route gone */ }
+    assert.ok(!json || json.entries === undefined, 'paging endpoint must not answer');
   });
 
-  it('GET /api/entries/page returns 400 without before param', async () => {
-    const res = await httpRequest(port, '/api/entries/page?limit=10');
-    assert.equal(res.status, 400);
-    const data = res.json();
-    assert.ok(data.error.includes('before'), 'Error should mention "before" parameter');
-  });
 
-  it('GET /api/entries/page returns 400 with invalid before', async () => {
-    const res = await httpRequest(port, '/api/entries/page?before=not-a-date&limit=10');
-    assert.equal(res.status, 400);
-  });
-
-  it('GET /api/entries/page accepts request without limit (defaults to 100)', async () => {
-    const res = await httpRequest(port, `/api/entries/page?before=2099-01-01T00:00:00Z`);
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.ok(Array.isArray(data.entries));
-    assert.equal(typeof data.hasMore, 'boolean');
-  });
-
-  it('GET /api/entries/page with early before returns empty', async () => {
-    const res = await httpRequest(port, `/api/entries/page?before=1970-01-01T00:00:00Z&limit=10`);
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.equal(data.entries.length, 0);
-    assert.equal(data.hasMore, false);
-    assert.equal(data.count, 0);
-  });
-
-  // ── wire-v2 S4: startup-only mode switch endpoints (review P2: HTTP-level
-  //    coverage per repo convention) ──────────────────────────────────────────
-  it('GET /api/wire-v2-mode returns config/running/effective shape', async () => {
-    const res = await httpRequest(port, '/api/wire-v2-mode');
-    assert.equal(res.status, 200);
-    const data = res.json();
-    assert.ok(['off', 'dual', 'dual-read'].includes(data.configMode));
-    assert.ok(['off', 'dual', 'dual-read'].includes(data.running), 'running = this process boot-time truth');
-    assert.ok(data.effective && ['env', 'config', 'default'].includes(data.effective.source));
-    assert.equal(typeof data.envOverride, 'boolean');
-    assert.deepEqual(data.unlocked, ['off', 'dual', 'dual-read']);
-    // wire-v2 S5: read-path state rides the same endpoint
-    assert.equal(data.readRunning, false, 'this suite pins the read-off default');
-    assert.ok(data.readEffective && ['env', 'config', 'default'].includes(data.readEffective.source));
-    assert.equal(typeof data.readEnvOverride, 'boolean');
-  });
-
-  it('POST /api/wire-v2-mode persists dual and GET reflects it (running unchanged)', async () => {
-    const post = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'dual' } });
-    assert.equal(post.status, 200);
-    assert.equal(post.json().ok, true);
+  // ── 1.7.0: the mode switch is gone — the routes must be too ─────────────────
+  it('GET/POST /api/wire-v2-mode no longer exist (v2 is unconditional)', async () => {
+    // Unrouted GETs fall through to the SPA handler — assert the API shape is
+    // gone rather than a status code.
     const get = await httpRequest(port, '/api/wire-v2-mode');
-    assert.equal(get.json().configMode, 'dual');
-    assert.equal(get.json().running, 'off', 'running process must NOT hot-switch (startup-only contract)');
-    // restore
-    const off = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'off' } });
-    assert.equal(off.status, 200);
-  });
-
-  it('POST /api/wire-v2-mode accepts dual-read (S5) and rejects locked/unknown modes with 400', async () => {
-    // 'dual-read' unlocked since S5 — roundtrip then restore off.
-    const dualRead = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'dual-read' } });
-    assert.equal(dualRead.status, 200);
-    assert.equal((await httpRequest(port, '/api/wire-v2-mode')).json().configMode, 'dual-read');
-    assert.equal((await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'off' } })).status, 200);
-    const locked = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'v2' } });
-    assert.equal(locked.status, 400);
-    assert.match(locked.json().error, /not yet available/);
-    const unknown = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'bogus' } });
-    assert.equal(unknown.status, 400);
-    const badJson = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: '{not json' });
-    assert.equal(badJson.status, 400);
+    let getJson = null;
+    try { getJson = get.json(); } catch { /* SPA HTML — exactly what we want */ }
+    assert.ok(!getJson || getJson.configMode === undefined, 'mode endpoint must not answer');
+    const post = await httpRequest(port, '/api/wire-v2-mode', { method: 'POST', body: { mode: 'dual' } });
+    assert.notEqual(post.status, 200, 'mode switch must not be persistable anymore');
   });
 });

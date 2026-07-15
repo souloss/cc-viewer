@@ -1,5 +1,5 @@
 import React from 'react';
-import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip, Switch, Popconfirm } from 'antd';
+import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip, Popconfirm } from 'antd';
 import { UploadOutlined, DeleteOutlined, ReloadOutlined, SwapOutlined } from '@ant-design/icons';
 import AppBase, { styles } from './AppBase';
 import { isMobile, isElectron, setViewMode } from './env';
@@ -16,6 +16,7 @@ import UsageWindowPill from './components/dashboard/UsageWindowPill';
 import { extractLatestPlanUsage } from './utils/rateLimitParser';
 import { t } from './i18n';
 import { filterRelevantRequests, visibleRequests, findPrevMainAgentTimestamp } from './utils/helpers';
+import { formatSize } from './utils/formatters';
 import { isMainAgent } from './utils/contentFilter';
 import { classifyRequest } from './utils/requestType';
 import { apiUrl } from './utils/apiUrl';
@@ -361,7 +362,6 @@ class App extends AppBase {
               isLocalLog={!!this._isLocalLog}
               localLogFile={this._localLogFile}
               projectName={this.state.projectName}
-              instanceId={this.state.instanceId}
               filterIrrelevant={!this.state.showAll}
               onFilterIrrelevantChange={this.handleFilterIrrelevantChange}
               logDir={this.state.logDir}
@@ -376,9 +376,6 @@ class App extends AppBase {
               contextBarLocked={this.state.contextBarLocked}
               onNavigateCacheMsg={this.handleNavigateCacheMsg}
               serverCachedContent={this.state.serverCachedContent || this._lastKvCacheContent}
-              resumeAutoChoice={this.state.resumeAutoChoice}
-              onResumeAutoChoiceToggle={this.handleResumeAutoChoiceToggle}
-              onResumeAutoChoiceChange={this.handleResumeAutoChoiceChange}
               themeColor={this.state.themeColor}
               onThemeColorChange={this.handleThemeColorChange}
               displayScale={this.state.displayScale}
@@ -487,7 +484,7 @@ class App extends AppBase {
               )
             )}
             <div className={styles.chatViewWrapper} style={{ display: viewMode === 'chat' ? 'flex' : 'none' }}>
-              <ChatView {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={filteredRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={this._isLocalLog ? false : prefs.onlyCurrentSession} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} hasMoreHistory={this.state.hasMoreHistory} loadingMore={this.state.loadingMore} onLoadMoreHistory={() => this.loadMoreHistory()} loadingSessionId={this.state.loadingSessionId} onLoadSession={(sid) => this.loadSession(sid)} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
+              <ChatView {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={filteredRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={!this._isLocalLog} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
             </div>
           </Layout.Content>
           <div className={styles.footer}>
@@ -543,36 +540,48 @@ class App extends AppBase {
           </div>
         </Modal>
         <Modal
-          title={t('ui.resume.title')}
-          open={this.state.resumeModalVisible}
-          closable={false}
-          maskClosable={false}
-          keyboard={false}
+          title={t('ui.migratePrompt.title')}
+          open={this.state.migratePromptVisible}
+          onCancel={() => this.handleMigrateLater(false)}
           footer={
             <div>
               <div className={styles.resumeFooterRight}>
-                <Button key="continue" type="primary" onClick={() => this.handleResumeChoice('continue')} className={styles.btnMarginRight}>
-                  {t('ui.resume.continue')}
+                <Button type="primary" onClick={this.handleMigrateNow} className={styles.btnMarginRight}>
+                  {t('ui.migratePrompt.now')}
                 </Button>
-                <Button key="new" onClick={() => this.handleResumeChoice('new')}>
-                  {t('ui.resume.new')}
+                <Button onClick={() => this.handleMigrateLater(this.state.migrateDontRemind)}>
+                  {t('ui.migratePrompt.later')}
                 </Button>
               </div>
-              <div className={styles.resumeFooterLeft}>
-                <Checkbox
-                  checked={this.state.resumeRememberChoice}
-                  onChange={(e) => this.setState({ resumeRememberChoice: e.target.checked })}
-                  className={styles.resumeCheckboxOpacity}
-                >
-                  <span className={styles.resumeCheckboxOpacity}>{t('ui.resume.remember')}</span>
-                </Checkbox>
-              </div>
+              {!this.state.migratePromptData?.continued && (
+                <div className={styles.resumeFooterLeft}>
+                  <Checkbox
+                    checked={!!this.state.migrateDontRemind}
+                    onChange={(e) => this.setState({ migrateDontRemind: e.target.checked })}
+                    className={styles.resumeCheckboxOpacity}
+                  >
+                    <span className={styles.resumeCheckboxOpacity}>{t('ui.migratePrompt.dontRemind')}</span>
+                  </Checkbox>
+                </div>
+              )}
             </div>
           }
         >
-          <p>{t('ui.resume.message', { file: this.state.resumeFileName })}</p>
+          <p>
+            {this.state.migratePromptData?.continued
+              ? t('ui.migratePrompt.bodyContinued', {
+                  files: this.state.migratePromptData?.files ?? 0,
+                  size: formatSize(this.state.migratePromptData?.totalBytes || 0),
+                })
+              : t('ui.migratePrompt.body', {
+                  files: this.state.migratePromptData?.files ?? 0,
+                  size: formatSize(this.state.migratePromptData?.totalBytes || 0),
+                })}
+          </p>
+          {(this.state.migratePromptData?.otherProjects || 0) > 0 && (
+            <p className={styles.pendingHint}>{t('ui.migratePrompt.otherProjects', { count: this.state.migratePromptData.otherProjects })}</p>
+          )}
         </Modal>
-
         <Modal
           title={<span className={styles.modalTitleInline}><OpenFolderIcon apiEndpoint={apiUrl('/api/open-log-dir')} title={t('ui.openLogDir')} size={16} />{t('ui.importLocalLogs')}</span>}
           open={this.state.importModalVisible}
@@ -604,83 +613,26 @@ class App extends AppBase {
             >
               {t('ui.refreshStats')}
             </Button>
-            <Checkbox
-              className={styles.btnMarginLeft}
-              checked={this.state.logShowAllInstances}
-              onChange={this.handleToggleShowAllLogs}
-            >
-              {t('ui.showAllInstanceLogs')}
-            </Checkbox>
-            {this.state.wireV2 && (() => {
-              const w = this.state.wireV2;
-              // Honesty rules (review P1): under an env override the switch
-              // must show what the process is ACTUALLY running (the ignored
-              // config value would contradict reality); otherwise it shows the
-              // persisted choice, with a "pending restart" hint whenever the
-              // running process differs from that choice.
-              const writeModes = ['dual', 'dual-read'];
-              const checked = w.envOverride
-                ? writeModes.includes(w.effective && w.effective.mode)
-                : writeModes.includes(w.configMode);
-              const pending = !w.envOverride && w.running != null && w.running !== w.configMode;
-              // wire-v2 S5 read switch: second opt-in layered on dual-write;
-              // shown only once the write side is on ('dual-read' needs it) and
-              // the server understands the mode (unlocked list carries it).
-              const readUnlocked = Array.isArray(w.unlocked) && w.unlocked.includes('dual-read');
-              const readChecked = w.readEnvOverride
-                ? !!(w.readEffective && w.readEffective.enabled)
-                : w.configMode === 'dual-read';
-              const readPending = !w.readEnvOverride && w.readRunning != null && w.readRunning !== (w.configMode === 'dual-read');
-              return (
-                <>
-                  <Tooltip title={w.envOverride ? t('ui.wireV2EnvOverride') : t('ui.wireV2NextBoot')}>
-                    <span className={styles.btnMarginLeft}>
-                      <Switch
-                        size="small"
-                        checked={checked}
-                        disabled={w.envOverride}
-                        onChange={this.handleToggleWireV2}
-                      />
-                      {' '}{t('ui.wireV2Toggle')}
-                      {pending && <span className={styles.pendingHint}> ({t('ui.wireV2Pending')})</span>}
-                    </span>
-                  </Tooltip>
-                  {checked && readUnlocked && (
-                    <Tooltip title={w.readEnvOverride ? t('ui.wireV2ReadEnvOverride') : t('ui.wireV2NextBoot')}>
-                      <span className={styles.btnMarginLeft}>
-                        <Switch
-                          size="small"
-                          checked={readChecked}
-                          disabled={w.readEnvOverride}
-                          onChange={this.handleToggleWireV2Read}
-                        />
-                        {' '}{t('ui.wireV2ReadToggle')}
-                        {readPending && <span className={styles.pendingHint}> ({t('ui.wireV2Pending')})</span>}
-                      </span>
-                    </Tooltip>
-                  )}
-                  {/* wire-v2 S5: list-source switch — only when THIS process can
-                      actually serve v2 reads (readRunning is boot-time truth;
-                      a pending dual-read choice still needs a restart first). */}
-                  {w.readRunning === true && (
-                    <Tooltip title={t('ui.wireV2ListToggleHint')}>
-                      <span className={styles.btnMarginLeft}>
-                        <Switch
-                          size="small"
-                          checked={this.state.logListV2}
-                          onChange={this.handleToggleLogListV2}
-                        />
-                        {' '}{t('ui.wireV2ListToggle')}
-                      </span>
-                    </Tooltip>
-                  )}
-                </>
-              );
-            })()}
-            {/* wire-v2 S8: one-click v1→v2 migration — v1 list state only (the
-                v2 list is the migration's OUTPUT, offering it there is circular).
-                The task is resident server-side; this row is just its remote. */}
-            {!this.state.logListV2 && (() => {
+            {/* v1 view entry — gated on "v1 files ON DISK" (not "unmigrated"):
+                the converter never deletes sources, so the view must stay
+                reachable after a finished migration until the user deletes the
+                leftovers from inside it. Hidden when no v1 file exists. */}
+            {this.state.logView === 'v2' && this.state.v1FileCount > 0 && (
+              <Button size="small" type="link" onClick={() => this.handleSetLogView('v1')}>
+                {t('ui.viewV1Logs', { count: this.state.v1FileCount })}
+              </Button>
+            )}
+            {this.state.logView === 'v1' && (
+              <Button size="small" type="link" onClick={() => this.handleSetLogView('v2')}>
+                {t('ui.backToV2Logs')}
+              </Button>
+            )}
+            {/* wire-v2 S8: one-click v1→v2 migration of legacy v1 logs. The
+                task is resident server-side; this row is just its remote.
+                Lives in the v1 view only (the v2 view carries no migration UI);
+                gated on "unmigrated v1 files present" (an active/just-finished
+                task stays visible so its progress/result can be read). */}
+            {this.state.logView === 'v1' && (this.state.unmigratedV1Count > 0 || this.state.wireV2Convert?.running || this.state.wireV2Convert?.state) && (() => {
               const cv = this.state.wireV2Convert;
               const st = cv && cv.state;
               const active = !!(cv && (cv.running || (st && (st.status === 'running' || st.status === 'verifying'))));
@@ -722,10 +674,23 @@ class App extends AppBase {
               );
             })()}
           </div>
+          {this.state.logView === 'v1' && this.state.unmigratedV1Count > 0 && (
+            <Alert
+              type="info"
+              showIcon
+              className={styles.btnMarginLeft}
+              style={{ marginBottom: 8 }}
+              message={t('ui.unmigratedV1Hint', {
+                count: this.state.unmigratedV1Count,
+                size: formatSize(this.state.unmigratedV1Bytes || 0),
+              })}
+            />
+          )}
           {this.state.localLogsLoading ? (
             <div className={styles.spinCenter}><Spin /></div>
           ) : (() => {
-            const currentLogs = this.state.localLogs[this.state.currentProject];
+            const source = this.state.logView === 'v1' ? this.state.localLogsV1 : this.state.localLogs;
+            const currentLogs = source[this.state.currentProject];
             if (!currentLogs || currentLogs.length === 0) {
               return (
                 <div className={styles.emptyCenter}>

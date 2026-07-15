@@ -1,57 +1,67 @@
 /**
- * interceptor.js — IM worker import-time 初始化分支（_initPromise 内 343-345）。
+ * interceptor.js — IM worker（CCV_IM_PLATFORM）进程的 v2 写路径。
  *
- * 非 teammate、非 workspace、CCV_IM_PLATFORM 已设、且项目目录存在最近日志时：直接 continue 最近日志
- * （LOG_FILE = recentLog; return），不进入 resume 交互状态。该分支在模块顶层 _initPromise 异步执行，
- * 需在 import 前把 env / 预置日志铺好，并 await mod._initPromise 让它落定。
+ * 1.7.0 前 IM worker 有专属 v1 boot 分支（auto-continue 最近日志）且被排除在 v2 写之外；
+ * 两者都已随 v1 写路径退役。本文件钉住新的不变量：IM worker 与普通进程一致 ——
+ * v2 writer 启用、LOG_FILE 恒空、请求经 fetch hook 正常写入 v2 session。
  *
  * 独立测试文件 = 独立进程；interceptor.js 在保护清单：只测不改。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const logDir = mkdtempSync(join(tmpdir(), 'ccv-imw-init-'));
 process.env.CCV_LOG_DIR = logDir;
+process.env.CLAUDE_CONFIG_DIR = logDir;
 process.env.CCV_PROXY_MODE = '1';
 process.env.CCV_SYNC_WRITES = '1';
 delete process.env.CCV_WORKSPACE_MODE;
 process.env.CCV_IM_PLATFORM = 'dingtalk'; // IM worker 模式
 
-// 已知 cwd → 可预测 projectName；预置最近日志使 _initPromise 命中 IM-worker continue 分支。
-const workCwd = mkdtempSync(join(tmpdir(), 'ccv-imw-proj-'));
-const projectName = basename(workCwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-const projLogDir = join(logDir, projectName);
-mkdirSync(projLogDir, { recursive: true });
-const recentLog = join(projLogDir, `${projectName}_20260202_000000.jsonl`);
-writeFileSync(recentLog, JSON.stringify({ type: 'prev', a: 1 }) + '\n---\n');
+const SID = 'aaaa1111-2222-3333-4444-555566667777';
+const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
 
 const savedArgv = process.argv.slice();
-const savedCwd = process.cwd();
 
 let mod;
 before(async () => {
-  // 注意：不能含 --agent-name（否则 _isTeammate=true 会走另一条分支，跳过 _initPromise resume 流程）
+  // 注意：不能含 --agent-name（否则 _isTeammate=true 走 teammate 分支）
   process.argv = [process.argv[0], process.argv[1]];
-  process.chdir(workCwd);
+  globalThis.fetch = async () => new Response('{"content":[]}', {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
   mod = await import('../server/interceptor.js');
-  await mod._initPromise; // 等异步初始化落定
+  mod.setupInterceptor();
+  await mod._initPromise;
 });
 
 after(() => {
   process.argv = savedArgv;
   delete process.env.CCV_IM_PLATFORM;
-  try { process.chdir(savedCwd); } catch { /* noop */ }
   try { rmSync(logDir, { recursive: true, force: true }); } catch { /* noop */ }
-  try { rmSync(workCwd, { recursive: true, force: true }); } catch { /* noop */ }
   setTimeout(() => process.exit(0), 30).unref();
 });
 
-describe('IM worker import 初始化（continue 最近日志，不进 resume 交互）', () => {
-  it('CCV_IM_PLATFORM + 最近日志存在 → LOG_FILE 指向最近日志，_resumeState 为 null', () => {
-    assert.equal(mod.LOG_FILE, recentLog, 'IM worker 直接 continue 最近日志');
-    assert.equal(mod._resumeState, null, 'IM worker 不进入 resume 交互（_resumeState 保持 null）');
+describe('IM worker 初始化（v2-only：与普通进程同一写路径）', () => {
+  it('CCV_IM_PLATFORM 进程 v2 writer 启用、LOG_FILE 恒空、无 v1 resume 机器', () => {
+    assert.equal(mod.LOG_FILE, '', 'v1 单文件日志已退役，IM worker 不再 continue 最近日志');
+    assert.ok(mod._v2Writer.enabled, 'IM worker 的 v2 writer 必须启用（旧 CCV_IM_PLATFORM 排除已移除）');
+    assert.equal(mod._resumeState, undefined, 'v1 resume 交互机器已随写路径删除（不再导出）');
+  });
+
+  it('IM worker 的请求经 fetch hook 正常写入 v2 session', async () => {
+    await globalThis.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'k' },
+      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'im' }], metadata: { user_id: USER_ID } }),
+    });
+    await mod._v2Writer.flush();
+    const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+    const dir = join(logDir, project, 'sessions', SID);
+    assert.ok(existsSync(join(dir, 'journal.jsonl')), 'v2 session journal 应已写入');
+    assert.equal(mod.getLiveLogSource(), dir, 'live source 指向 IM worker 自己的 v2 session dir');
   });
 });

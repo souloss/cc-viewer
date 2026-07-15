@@ -12,7 +12,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, readdirSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -322,7 +322,7 @@ describe('log-stream dispatch over a v2 session dir', () => {
     assert.deepEqual(async_, sync);
   });
 
-  it('listV2Logs lists sessions with v1-shaped items; teammate sessions fold away; instance filter applies', async () => {
+  it('listV2Logs lists sessions with v1-shaped items; teammate sessions fold away', async () => {
     const w = newWriter();
     fire(w, mainEntry([textMsg('user', 'the leader opening prompt')]));
     fire(w, mainEntry([textMsg('user', 'the leader opening prompt'), textMsg('assistant', 'r'), textMsg('user', 'more')]));
@@ -333,31 +333,54 @@ describe('log-stream dispatch over a v2 session dir', () => {
     const wt = newWriter({ leader: { agentName: 'bob', parentSessionId: SID } });
     fire(wt, mainEntry([textMsg('user', 'tm')], { sid: SID_TM, teammate: { name: 'bob', team: 't' } }));
     const OTHER_SID = 'd4d4d4d4-5555-6666-7777-888899990000';
-    const wPid = newWriter({ instanceId: '777' });
-    fire(wPid, mainEntry([textMsg('user', 'pid-tagged session')], { sid: OTHER_SID }));
-    await w.flush(); await wt.flush(); await wPid.flush();
+    const w2 = newWriter();
+    fire(w2, mainEntry([textMsg('user', 'second session')], { sid: OTHER_SID }));
+    await w.flush(); await wt.flush(); await w2.flush();
 
-    // Default instance (null) sees only the untagged leader session.
     const def = listV2Logs(dir, 'proj');
     assert.ok(Array.isArray(def.proj));
-    assert.equal(def.proj.length, 1, 'teammate folded into leader; pid-tagged filtered');
-    const item = def.proj[0];
-    assert.equal(item.file, `v2:proj/${SID}`);
+    assert.equal(def.proj.length, 2, 'teammate folded into leader; every main session listed');
+    const item = def.proj.find((x) => x.file === `v2:proj/${SID}`);
+    assert.ok(item, 'leader session listed');
     assert.equal(item.kind, 'v2');
     assert.match(item.timestamp, /^\d{8}_\d{6}$/, 'compact ts for formatTimestamp/sort');
     assert.equal(item.turns, 2, 'completed main requests only');
     assert.ok(item.size > 0);
     assert.equal(item.archived, undefined, 'archive semantics removed 2026-07-14 — no dead field');
-    assert.equal(item.instanceId, null);
+    assert.ok(!('instanceId' in item), 'instance concept removed — field no longer emitted');
     assert.match(item.preview[0], /^the leader opening prompt/);
+    assert.ok(def.proj.some((x) => x.file === `v2:proj/${OTHER_SID}`), 'second session listed too');
+  });
 
-    // showAll reveals the pid-tagged session; its own instanceId filter matches it.
-    const all = listV2Logs(dir, 'proj', { showAll: true });
-    assert.equal(all.proj.length, 2);
-    const pidOnly = listV2Logs(dir, 'proj', { instanceId: '777' });
-    assert.equal(pidOnly.proj.length, 1);
-    assert.equal(pidOnly.proj[0].file, `v2:proj/${OTHER_SID}`);
-    assert.equal(pidOnly.proj[0].instanceId, '777');
+  it('preview lists ALL user prompts from the prompts.jsonl cache (deduped, in order)', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'first question')]));
+    fire(w, mainEntry([textMsg('user', 'first question'), textMsg('assistant', 'a1'), textMsg('user', 'second question')]));
+    fire(w, mainEntry([
+      textMsg('user', 'first question'), textMsg('assistant', 'a1'), textMsg('user', 'second question'),
+      textMsg('assistant', 'a2'), textMsg('user', 'third question'),
+    ]));
+    await w.flush();
+    const s = listV2Sessions(join(dir, 'proj')).find((x) => x.sid === SID);
+    assert.deepEqual(s.preview, ['first question', 'second question', 'third question']);
+  });
+
+  it('preview falls back to a caveat-filtered first-line extract when prompts.jsonl is absent', async () => {
+    // Hand-written session (no writer → no prompts.jsonl), first line wraps a
+    // /command in local-command-caveat chrome plus a real prompt.
+    const sid2 = 'e5e5e5e5-6666-7777-8888-999900001111';
+    const sdir = join(dir, 'proj', 'sessions', sid2);
+    mkdirSync(join(sdir, 'conversations', 'main'), { recursive: true });
+    writeFileSync(join(sdir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid2, pid: 1, startTs: '2026-01-02T00:00:00.000Z' }));
+    writeFileSync(join(sdir, 'journal.jsonl'), JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n');
+    writeFileSync(join(sdir, 'conversations', 'main', 'e0.jsonl'), JSON.stringify({
+      seq: 1, rid: 'r1', t: 'snapshot', msgs: [
+        { role: 'user', content: '<local-command-caveat>Caveat: local commands</local-command-caveat>\n<command-name>/theme</command-name>' },
+        { role: 'user', content: 'legacy session real prompt' },
+      ],
+    }) + '\n');
+    const s = listV2Sessions(join(dir, 'proj')).find((x) => x.sid === sid2);
+    assert.deepEqual(s.preview, ['legacy session real prompt'], 'chrome filtered even on the fallback path');
   });
 
   it('validateLogPath v2 branch: valid ref resolves, traversal and missing rejected', async () => {

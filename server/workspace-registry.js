@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from '
 import { readdir, stat } from 'node:fs/promises';
 import { renameSyncWithRetry } from './lib/file-api.js';
 import { withFileLockAsync } from './lib/async-file-lock.js';
+import { dirSizeSync } from './lib/v2/layout.js';
 import { join, basename, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LOG_DIR } from '../findcc.js';
@@ -92,19 +93,38 @@ export async function removeWorkspace(id) {
 export async function getWorkspaces() {
   const list = loadWorkspaces();
   const enriched = await Promise.all(list.map(async (w) => {
-    let logCount = 0;
+    // wire-v2 (1.7.0): logs live in per-session dirs under sessions/. The v1
+    // *.jsonl glob is kept as unmigratedV1Count — the combined logCount must
+    // stay non-zero for a declined-migration workspace, because the launcher's
+    // `logCount > 0 → auto -c` heuristic hangs off it (WorkspaceList.jsx).
+    let sessionCount = 0;
+    let unmigratedV1Count = 0;
     let totalSize = 0;
     const logDir = join(LOG_DIR, w.projectName);
     try {
       const files = await readdir(logDir);
       for (const f of files) {
-        if (f.endsWith('.jsonl')) {
-          logCount++;
+        if (f.endsWith('.jsonl') && !f.endsWith('_temp.jsonl')) {
+          unmigratedV1Count++;
           try { totalSize += (await stat(join(logDir, f))).size; } catch { }
         }
       }
     } catch { }
-    return { ...w, logCount, totalSize };
+    try {
+      const sids = await readdir(join(logDir, 'sessions'), { withFileTypes: true });
+      for (const e of sids) {
+        if (!e.isDirectory()) continue;
+        const sessionDir = join(logDir, 'sessions', e.name);
+        try {
+          await stat(join(sessionDir, 'journal.jsonl'));
+          // Folder size, not journal size — conv/blob/response files carry
+          // most of a session's bytes (journal alone undercounts ~12x).
+          totalSize += dirSizeSync(sessionDir);
+          sessionCount++;
+        } catch { /* dir without a journal is not a session yet */ }
+      }
+    } catch { }
+    return { ...w, logCount: sessionCount + unmigratedV1Count, sessionCount, unmigratedV1Count, totalSize };
   }));
   return enriched.sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
 }

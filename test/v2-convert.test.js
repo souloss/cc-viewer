@@ -145,6 +145,13 @@ describe('convertProject golden round-trip', () => {
     // teammate session landed in its own dir
     assert.ok(existsSync(sessionsDir(SID_TM)));
     assert.ok(existsSync(sessionsDir(SID_LEGACY)));
+
+    // prompts.jsonl display cache rides the shared writer path: converted
+    // sessions carry it (and the golden verify above proved it's invisible to
+    // the whitelist reader).
+    const promptLines = readFileSync(join(sessionsDir(SID), 'prompts.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(promptLines.flatMap((l) => l.texts), ['u1', 'u2'], 'main-conv user prompts cached during conversion');
   });
 
   it('converts sessions spanning rotation files with a continuous journal', async () => {
@@ -231,8 +238,46 @@ describe('resume and skip semantics', () => {
     assert.equal(readConvertState(join(logDir, PROJECT)).status, 'done');
   });
 
+  it('resume ACROSS a /clear seeds the epoch from staging — continuation lands in e1, golden passes', async () => {
+    // File 1 drives SID2 through a /clear (e0 → e1) and completes; file 2's
+    // continuation is converted by a RESUMED run whose fresh ConversationStore
+    // must seed epoch=1 from the staged files, not restart at e0 (2026-07-15
+    // fix — pre-fix it appended newer seqs into e0, breaking file-seq order).
+    const preClear = [textMsg('user', 'a'), textMsg('assistant', 'b'), textMsg('user', 'c'),
+                      textMsg('assistant', 'd'), textMsg('user', 'e'), textMsg('assistant', 'f')];
+    const postClear = [clearMsg(), textMsg('assistant', 'fresh')];
+    writeV1('proj_20260101_000000.jsonl', [
+      entryOf({ messages: preClear, uid: jsonUid(SID2), extra: { _isCheckpoint: true } }),
+      entryOf({ messages: postClear, uid: jsonUid(SID2), extra: { _isCheckpoint: true } }),
+    ]);
+    writeV1('proj_20260102_000000.jsonl', [
+      entryOf({ messages: [...postClear, textMsg('user', 'resumed turn')], uid: jsonUid(SID2) }),
+    ]);
+
+    let filesDone = 0;
+    const stopped = await convertProject(logDir, PROJECT, {
+      statfs: () => ({ bavail: 1e9, bsize: 4096 }),
+      onProgress: (p) => { if (p.phase === 'convert') filesDone++; },
+      shouldStop: () => filesDone >= 1,
+    });
+    assert.equal(stopped.status, 'stopped');
+
+    const resumed = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(resumed.status, 'done');
+    const e0 = readFileSync(join(sessionsDir(SID2), 'conversations', 'main', 'e0.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map(JSON.parse);
+    const e1 = readFileSync(join(sessionsDir(SID2), 'conversations', 'main', 'e1.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map(JSON.parse);
+    const maxE0 = Math.max(...e0.map(l => l.seq));
+    const minE1 = Math.min(...e1.map(l => l.seq));
+    assert.ok(maxE0 < minE1, `file-seq order preserved across the resume (e0 max ${maxE0} < e1 min ${minE1})`);
+    assert.ok(e1.length >= 2, 'the resumed continuation landed in e1, not e0');
+    const report = await verifyV1File(join(logDir, PROJECT, 'proj_20260102_000000.jsonl'));
+    assert.equal(report.ok, true, JSON.stringify(report.diffs, null, 2));
+  });
+
   it('skips sessions that already have a real v2 dir (dual-write authority)', async () => {
-    ensureSessionDirSync(logDir, PROJECT, SID, { instanceId: 'live' });
+    ensureSessionDirSync(logDir, PROJECT, SID, {});
     const journalBefore = readFileSync(join(sessionsDir(SID), 'journal.jsonl'), 'utf8');
     writeV1('proj_20260101_000000.jsonl', [
       entryOf({ messages: [textMsg('user', 'u1')] }),               // SID — must be skipped

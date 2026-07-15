@@ -1,16 +1,20 @@
 /**
- * interceptor.js — BRANCH 覆盖补强（单跑口径 >= 95%）。
+ * interceptor.js — BRANCH 覆盖补强。
  *
- * 仅新增测试，不改任何源码 / package.json / 既有测试文件。
+ * 仅新增测试，不改任何源码 / package.json。
  * 目标分支（既有 interceptor-*.test.js 仍漏）：
- *   - _commitDeltaState 真正写入臂（284-288）：mainAgent 流式请求成功 → onDone 回调里 _dl>0>_lastMessagesCount
- *   - checkAndRotateLogFile 旋转命中臂（419-430）：LOG_FILE 撑到 >= MAX_LOG_SIZE（sparse truncate）后 mainAgent 请求触发轮转 + delta 状态重置
- *   - setupInterceptor 重入守卫（487-488）：第二次调用直接 return
- *   - 非流式响应 catch 臂（1059-1063）：response.clone().text() 抛错 → catch 仍 append + commit
- *   - 流式组装 catch 臂（955-964）：assembled 写盘 JSON.stringify(requestEntry) 抛错 → catch 降级 slice(0,1000)
- *   - 模块加载期 _ccvSkip / 自动执行臂（1075 / 1080-1084）：子进程跑 canonical import
+ *   - setupInterceptor 重入守卫：第二次调用直接 return
+ *   - 非流式响应 catch 臂：response.clone().text() 抛错 → catch 仍写 v2 completion（body null）
+ *   - fetch wrapper 杂项/细分支：url 形态、headers 来源、hotswitch、profile helper
+ *   - live-stream flush 分支族 + sendStreamChunk 协议/熔断臂
+ *   - 模块加载期 _ccvSkip / 自动执行 / 信号 handler 臂（子进程跑 canonical import）
  *
- * 风格：CCV_PROXY_MODE=1 跳过自执行 → 手动 setupInterceptor；CCV_SYNC_WRITES=1 同步写盘 + 同步触发 onDone。
+ * 1.7.0 起写盘只走 v2 session dir（LOG_FILE 恒空；v1 的 delta 信封写入、轮转、resume、
+ * teammate leader-log 定位等机器已删，对应 describe 一并移除）。读回断言统一走
+ * iterateV2RawEntries(getLiveLogSource())（v2→v1 adapter 合成视图）；before() 先发一条
+ * 带 SID 的引导请求建立 _currentSid，之后无 metadata 的请求按 §8.3 回落到同一 session。
+ *
+ * 风格：CCV_PROXY_MODE=1 跳过自执行 → 手动 setupInterceptor；CCV_SYNC_WRITES=1 同步写盘。
  * 并行隔离：私有 mkdtemp 作 CCV_LOG_DIR，且在 import 目标模块之前设好；listen(0) / 私有端口窗。
  */
 import { describe, it, before, after } from 'node:test';
@@ -19,8 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync,
-  rmSync, truncateSync, statSync, openSync, closeSync,
+  mkdtempSync, mkdirSync, writeFileSync, rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -32,19 +35,38 @@ const INTERCEPTOR = join(REPO_ROOT, 'server', 'interceptor.js');
 const logDir = mkdtempSync(join(tmpdir(), 'ccv-branch-itc-'));
 process.env.CCV_LOG_DIR = logDir;
 process.env.CCV_PROXY_MODE = '1';   // 跳过模块顶层 setupInterceptor 自执行
-process.env.CCV_SYNC_WRITES = '1';  // 同步写盘 → onDone 同步触发，便于断言 _commitDeltaState
+process.env.CCV_SYNC_WRITES = '1';  // v2 写队列同步写盘，便于读取断言
 delete process.env.CCV_WORKSPACE_MODE;
 delete process.env.CCV_IM_PLATFORM;
 delete process.env.ANTHROPIC_BASE_URL;
 
+// 本文件的固定 v2 session（引导请求携带；后续无 metadata 请求 §8.3 回落到它）
+const SID = 'abab1111-2222-3333-4444-555566667777';
+const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
+
 let mod;
+let iterateV2RawEntries;
 let nextResponse;
 let lastFetchArgs;
 
+/** 经 v2→v1 adapter 读取当前 session 的合成 entry 数组（seq 序） */
 function readEntries() {
-  if (!mod.LOG_FILE || !existsSync(mod.LOG_FILE)) return [];
-  return readFileSync(mod.LOG_FILE, 'utf-8')
-    .split('\n---\n').filter(p => p.trim()).map(p => JSON.parse(p));
+  const dir = mod.getLiveLogSource();
+  if (!dir) return [];
+  return [...iterateV2RawEntries(dir)].map(p => JSON.parse(p));
+}
+
+/** 引导请求：携带 SID 建立/恢复 _currentSid（initForWorkspace 会重置 session 绑定） */
+async function prime() {
+  const saved = nextResponse;
+  nextResponse = null;
+  await globalThis.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': 'boot' },
+    body: JSON.stringify({ model: 'm', messages: [], metadata: { user_id: USER_ID } }),
+  });
+  await mod._v2Writer.flush();
+  nextResponse = saved;
 }
 function lastCompleted() {
   const entries = readEntries();
@@ -72,6 +94,7 @@ function mainAgentBody(messages, extra = {}) {
   return {
     system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
     tools: makeMainAgentTools(),
+    metadata: { user_id: USER_ID },
     messages,
     ...extra,
   };
@@ -103,8 +126,11 @@ before(async () => {
     return nextResponse ? nextResponse(url, opts) : new Response('{}', { status: 200 });
   };
   mod = await import('../server/interceptor.js');
+  ({ iterateV2RawEntries } = await import('../server/lib/v2/adapter.js'));
   mod.setupInterceptor();
-  assert.ok(mod.LOG_FILE, 'LOG_FILE 应自动初始化');
+  assert.equal(mod.LOG_FILE, '', '1.7.0 起 LOG_FILE 恒为空串（v1 写路径已退役）');
+  await prime();
+  assert.ok(mod.getLiveLogSource().endsWith(SID), '引导请求应建立本文件的固定 v2 session');
 });
 
 after(() => {
@@ -122,215 +148,31 @@ describe('setupInterceptor 重入守卫（487-488）', () => {
   });
 });
 
-describe('mainAgent 流式请求成功 → _commitDeltaState 写入臂（284-288 / 947-948）', () => {
-  it('首条 mainAgent 流式请求（首次 checkpoint）成功落盘 → _lastMessagesCount 被推到 messages.length', async () => {
-    const messages = [
-      { role: 'user', content: 'hello-one' },
-      { role: 'assistant', content: 'hi' },
-    ];
-    nextResponse = () => sseStream([
-      { type: 'message_start', message: { id: 'm1', model: 'claude-x', content: [], usage: { input_tokens: 1 } } },
-      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
-      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
-      { type: 'content_block_stop', index: 0 },
-      { type: 'message_stop' },
-    ]);
-    const res = await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody(messages, { model: 'claude-x', stream: true })),
-    });
-    // 必须消费返回流，触发 ReadableStream.start 内 reader.read → done → 落盘 + onDone(_commitDeltaState)
-    const reader = res.body.getReader();
-    while (true) { const { done } = await reader.read(); if (done) break; }
-    await waitUntil(() => lastCompleted() != null, 2000, 'completed stream entry');
-    const entry = lastCompleted();
-    assert.ok(entry, '应有完成条目');
-    assert.equal(entry._isCheckpoint, true, '首条应为 checkpoint');
-    // _commitDeltaState 已把状态推到 2（CCV_SYNC_WRITES → onDone 同步）
-    // 不直接读私有变量，转而靠"下一条 delta 请求会基于 prevCount=2 产出 delta"间接验证
-    assert.equal(entry._totalMessageCount, 2);
-  });
 
-  it('第二条更长 mainAgent 流式请求 → 走 delta 臂（prevCount 来自上次 commit）', async () => {
-    const messages = [
-      { role: 'user', content: 'hello-one' },
-      { role: 'assistant', content: 'hi' },
-      { role: 'user', content: 'second-turn' },
-    ];
-    nextResponse = () => sseStream([
-      { type: 'message_start', message: { id: 'm2', model: 'claude-x', content: [] } },
-      { type: 'message_stop' },
-    ]);
-    const res = await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody(messages, { model: 'claude-x', stream: true })),
-    });
-    const reader = res.body.getReader();
-    while (true) { const { done } = await reader.read(); if (done) break; }
-    await waitUntil(() => {
-      const e = lastCompleted();
-      return e && e._totalMessageCount === 3;
-    }, 2000, 'delta entry total=3');
-    const entry = lastCompleted();
-    assert.equal(entry._isCheckpoint, false, '第二条应为 delta（非 checkpoint）');
-    assert.equal(entry._totalMessageCount, 3, 'total 仍记完整数');
-    // delta 只保留新增的 1 条（messages.slice(prevCount=2)）
-    assert.ok(Array.isArray(entry.body.messages), 'delta 应是数组');
-    assert.equal(entry.body.messages.length, 1, 'delta 只含新增 1 条');
-  });
-});
-
-describe('_commitDeltaState 真正写入臂（284-287）：交错请求让 commit 时 originalLength > _lastMessagesCount', () => {
-  it('长请求 A（len 大）流式未完 → 短请求 B（len 小）先完成把 _lastMessagesCount 压低 → A 完成 commit 时 A.len > 当前 count → 进入 if 体', async () => {
-    // 时序：
-    //  1) startA：eager 把 _lastMessagesCount 推到 A.len（较大）
-    //  2) A 的流 read() 阻塞（gate 未放行）
-    //  3) startB（更短 messages）：eager 把 _lastMessagesCount 压低到 B.len（< A.len）
-    //  4) 放行 A：A 流结束 → onDone 触发 _commitDeltaState(A.len, A.fp)
-    //     此刻 A.len > _lastMessagesCount(=B.len) → 命中 284-287 真正写入。
-    //
-    // A.len 必须比当前模块级 _lastMessagesCount 更大（前面的轮转测试把状态重置过，
-    // 但本 describe 在轮转测试之前；为稳健起见用一个足够大的 len，并先发一个等长 B 压低）。
-    const bigLen = 40;
-    const msgsA = Array.from({ length: bigLen }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'A' + i }));
-    const msgsB = Array.from({ length: 4 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'B' + i }));
-
-    // 可控释放的 gate
-    let releaseA;
-    const aGate = new Promise(r => { releaseA = r; });
-    const aSseText = [
-      { type: 'message_start', message: { id: 'A', model: 'claude-x', content: [] } },
-      { type: 'message_stop' },
-    ].map(e => `data: ${JSON.stringify(e)}\n\n`).join('');
-
-    const aResponse = {
-      status: 200, statusText: 'OK',
-      headers: new Headers({ 'content-type': 'text/event-stream' }),
-      body: {
-        getReader() {
-          let phase = 0;
-          return {
-            read: async () => {
-              phase++;
-              if (phase === 1) { await aGate; return { done: false, value: new TextEncoder().encode(aSseText) }; }
-              return { done: true, value: undefined };
-            },
-          };
-        },
-      },
-    };
-
-    // 1+2) 发 A（流式），拿到返回流后开始消费，但第一次 read 会卡在 aGate
-    nextResponse = () => aResponse;
-    const resA = await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody(msgsA, { model: 'claude-x', stream: true })),
-    });
-    const readerA = resA.body.getReader();
-    const drainA = (async () => { while (true) { const { done } = await readerA.read(); if (done) break; } })();
-
-    // 给 A 的 start() 一点时间进入第一次 read（阻塞在 gate）
-    await waitUntil(() => true, 50, 'tick');
-    await new Promise(r => setTimeout(r, 20));
-
-    // 3) 发 B（非流式、更短）→ 同步完成，其 eager 把 _lastMessagesCount 压到 B.len(=4)
-    nextResponse = () => new Response(
-      JSON.stringify({ id: 'B', content: [] }),
-      { status: 200, headers: { 'content-type': 'application/json' } });
-    await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody(msgsB, { model: 'claude-x' })),
-    });
-
-    // 4) 放行 A → A 流结束 → onDone commit(A.len=40) > 当前 count(=4) → 命中 284-287
-    releaseA();
-    await drainA;
-    await waitUntil(() => {
-      // A 的完成条目应已落盘（checkpoint，total=40）
-      const entries = readEntries();
-      return entries.some(e => e._totalMessageCount === bigLen && !e.inProgress);
-    }, 3000, 'A committed');
-    const aEntry = readEntries().reverse().find(e => e._totalMessageCount === bigLen && !e.inProgress);
-    assert.ok(aEntry, 'A 完成条目应落盘');
-    // 验证 commit 真正写入：紧接着发一条 len=41 的 delta 请求，prev 应为 40（来自 A 的 commit）
-    const msgsC = Array.from({ length: bigLen + 1 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'C' + i }));
-    nextResponse = () => new Response(
-      JSON.stringify({ id: 'C', content: [] }),
-      { status: 200, headers: { 'content-type': 'application/json' } });
-    await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody(msgsC, { model: 'claude-x' })),
-    });
-    await waitUntil(() => {
-      const e = readEntries().reverse().find(x => x._totalMessageCount === bigLen + 1 && !x.inProgress);
-      return !!e;
-    }, 2000, 'C committed');
-    const cEntry = readEntries().reverse().find(x => x._totalMessageCount === bigLen + 1 && !x.inProgress);
-    assert.equal(cEntry._isCheckpoint, false, 'C 应为 delta（prev=40 来自 A 的 commit，非 checkpoint）');
-    assert.equal(cEntry.body.messages.length, 1, 'C delta 仅含新增 1 条（slice(40)）→ 证明 commit 把状态推到了 40');
-  });
-});
-
-describe('非流式响应 clone().text() 抛错 → catch 臂（1059-1063）', () => {
-  it('response.clone() 抛错 → 走 catch：仍删 inProgress 并 append + commit，不抛出', async () => {
+describe('非流式响应 clone().text() 抛错 → catch 臂', () => {
+  it('response.clone() 抛错 → 走 catch：仍写 v2 completion（response.body=null），不抛出', async () => {
     nextResponse = () => ({
       status: 200, statusText: 'OK',
       headers: new Headers({ 'content-type': 'application/json' }),
-      // 非流式：requestEntry.isStream=false → 进入 else，clone() 抛错命中 1058 catch
+      // 非流式：requestEntry.isStream=false → 进入 else，clone() 抛错命中 catch 臂
       clone() { throw new Error('clone boom'); },
     });
-    const before = readEntries().length;
+    const before = readEntries().filter(e => !e.inProgress).length;
     const res = await globalThis.fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': 'k' },
       body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'x' }] }),
     });
     assert.equal(res.status, 200, '原 response 仍被返回');
-    await waitUntil(() => readEntries().length > before, 2000, 'catch-branch append');
+    await waitUntil(() => readEntries().filter(e => !e.inProgress).length > before, 2000, 'catch-branch completion');
     const entry = lastCompleted();
-    assert.ok(entry, 'catch 分支仍写入完成条目');
-    assert.equal(entry.inProgress, undefined, 'catch 也删除了 inProgress');
+    assert.ok(entry, 'catch 分支仍写入 completed 条目');
+    assert.equal(entry.inProgress, undefined, 'completed 相位不带 inProgress');
+    // clone() 在 response 元数据赋值之前就抛错 → journal done status='capture-failed'
+    // （无 http/headers）→ adapter 合成 response = { body: null }
+    assert.deepEqual(entry.response, { body: null }, '响应捕获失败 → body=null');
   });
 });
 
-describe('checkAndRotateLogFile 轮转命中臂（417-430）', () => {
-  it('LOG_FILE 撑到 >= MAX_LOG_SIZE → mainAgent 请求触发轮转 + delta 状态重置', async () => {
-    const MAX = 300 * 1024 * 1024; // darwin 阈值（win 为 150MB；取大值确保跨平台都过门槛）
-    const cur = mod.LOG_FILE;
-    // 确保文件存在再 sparse 撑大到阈值（APFS/ext4 上 truncate 稀疏文件极廉价）
-    if (!existsSync(cur)) writeFileSync(cur, '');
-    let sized = false;
-    try {
-      truncateSync(cur, MAX + 4096);
-      sized = statSync(cur).size >= MAX;
-    } catch { sized = false; }
-    if (!sized) {
-      // 该文件系统不支持稀疏大文件（罕见），跳过避免误失败
-      return;
-    }
-    // 注意：旋转前 cur 已被 truncate 成稀疏大文件（含 NUL），不可 JSON.parse。
-    // rotateLogFile 在 size >= MAX 时返回 rotated:true：要么切到新路径（不同秒），
-    // 要么同秒下 newFile===cur（writeFileSync('') 把旧文件清空再写 '\n'）。两种情况
-    // 都执行了 419-430 分支（含 delta 状态重置），用"文件尺寸暴跌 + 重置后首条 checkpoint"判定。
-    nextResponse = () => new Response(
-      JSON.stringify({ id: 'r', type: 'message', content: [] }),
-      { status: 200, headers: { 'content-type': 'application/json' } });
-    await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody([{ role: 'user', content: 'rotate-me' }], { model: 'm' })),
-    });
-    // 旋转后当前 LOG_FILE 尺寸应远小于 MAX（旧 314MB 被清空 / 切到新空文件）
-    await waitUntil(() => {
-      try { return existsSync(mod.LOG_FILE) && statSync(mod.LOG_FILE).size < MAX; }
-      catch { return false; }
-    }, 3000, 'log rotated (size dropped)');
-    assert.ok(statSync(mod.LOG_FILE).size < MAX, 'checkAndRotateLogFile 已轮转，当前日志尺寸应远小于 MAX');
-    // 轮转 + delta 重置后，本次请求应作为重置后首条写成 checkpoint
-    await waitUntil(() => lastCompleted() != null, 2000, 'post-rotate entry');
-    const entry = lastCompleted();
-    assert.ok(entry, '轮转后应有完成条目');
-    assert.equal(entry._isCheckpoint, true, 'delta 状态重置后首条应为 checkpoint');
-  });
-});
 
 // 流式组装 try 抛错臂（954-964 catch）说明：try 块内对 SSE 文本做 split/map/assemble，
 // 最终 JSON.stringify(requestEntry) 落盘。所有进入 stringify 的值都源自 JSON.parse（SSE data
@@ -395,13 +237,6 @@ describe('fetch wrapper 杂项分支补强（541 / 565 / 620 / 737）', () => {
   });
 });
 
-// proxy profile model 替换分支（789-807）说明：当 _activeProfile.activeModel 为真进入该块时，
-// 第 789 行 `(body && typeof body === 'object')` 引用的 `body` 是声明在 URL-匹配 if 块（L554）
-// 内的块级 let，到 L789 已离开作用域 → 引用即抛 ReferenceError，被 L746 的 try/catch 吞掉，
-// 永不执行 790-811 的 model 改写 / proxyProfile 记账。已用独立子进程复现确认（activeModel 在场时
-// 上游收到的 body.model 不变、entry.proxyProfile 为 undefined）。这是源码内潜在 scope bug，
-// 按"只测不改"约束不可修复，故 789-807 整段归入 unreachable，不写假断言。
-// （activeModel 不在场时不进该块，proxyProfile/proxyUrl 由既有 interceptor-fetch-errors 用例覆盖。）
 
 describe('live-stream flush 分支（859 / 873-876 / 878-883 / 895 / 983 / 986 / 994 / 907）', () => {
   let liveServer, livePort, received;
@@ -697,14 +532,18 @@ describe('fetch wrapper 更多分支（565 / 654 / 757 / 775-778 / 632）', () =
     assert.equal(lastFetchArgs[0], 'https://gw.example.com/v1/messages', 'path 完全相等 → 不重复拼接');
   });
 
-  it('options.body 抛错的对象 → JSON.parse(options.body) 走 catch → String 截断（558-559）', async () => {
+  it('options.body 非 JSON → JSON.parse 走 catch，请求仍记录为完成条目', async () => {
     nextResponse = () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-    // body 为非 JSON 字符串 → JSON.parse 抛 → catch → String(body).slice(0,500)
+    // body 为非 JSON 字符串 → JSON.parse 抛 → catch → 内存里回退截断字符串。
+    // v2 journal 只持久化结构化字段（原始字符串 body 不落盘），幸存断言：
+    // 该请求仍产生一条 completed 条目，且不携带会话切片。
+    const before = readEntries().filter(e => !e.inProgress).length;
     await globalThis.fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': 'k' }, body: 'not-json-at-all',
     });
-    const entry = lastCompleted();
-    assert.equal(typeof entry.body, 'string', '坏 body 回退为截断字符串');
+    const completed = readEntries().filter(e => !e.inProgress);
+    assert.equal(completed.length, before + 1, '坏 body 请求仍记录完成条目');
+    assert.equal(completed[completed.length - 1].body.messages, undefined, '无可解析 messages → 不携带会话切片');
   });
 });
 
@@ -766,7 +605,7 @@ describe('fetch wrapper 细分支补强（565 / 592 / 632 / 757 反向 / 776-778
     }
   });
 
-  it('_readWorkspaceActiveId：active-profile.json 的 activeId 非字符串 → 取 null（78 第二臂）', () => {
+  it('_readWorkspaceActiveId：active-profile.json 的 activeId 非字符串 → 取 null（78 第二臂）', async () => {
     const wsDir = mkdtempSync(join(tmpdir(), 'ccv-ws78-'));
     const r = mod.initForWorkspace(join(wsDir, 'proj78'), { forceNew: true });
     // activeId 写成 number → typeof !== 'string' → null
@@ -775,6 +614,10 @@ describe('fetch wrapper 细分支补强（565 / 592 / 632 / 757 反向 / 776-778
     // _readWorkspaceActiveId 返回 null（非字符串）→ getActiveProfileId 回退 profile.json.active='kk'
     assert.equal(mod.getActiveProfileId(), 'kk', 'activeId 非字符串 → 回退 profile.json.active');
     try { rmSync(wsDir, { recursive: true, force: true }); } catch { /* noop */ }
+    // initForWorkspace 重绑了项目并重置了 v2 session 绑定 → 恢复原项目 + 重新引导，
+    // 让后续用例继续写读本文件的固定 session。
+    mod.initForWorkspace(process.cwd());
+    await prime();
   });
 });
 
@@ -823,10 +666,13 @@ describe('live-stream decoder 尾字节 flush（907）+ 定时器复用（878）
 
 describe('profile / workspace catch 臂（80 / 145）', () => {
   const wsActivePath = () => join(mod._logDir || '', 'active-profile.json');
-  after(() => {
+  after(async () => {
     try { rmSync(mod.PROFILE_PATH, { force: true }); } catch { /* noop */ }
     try { if (mod._logDir) rmSync(wsActivePath(), { force: true }); } catch { /* noop */ }
     mod._loadProxyProfile();
+    // 用例内 initForWorkspace 重绑了项目 → 恢复原项目 + 重新引导 session 绑定
+    mod.initForWorkspace(process.cwd());
+    await prime();
   });
 
   it('active-profile.json 损坏 → _readWorkspaceActiveId catch（80）→ getActiveProfileId 回退', () => {
@@ -854,49 +700,6 @@ describe('profile / workspace catch 臂（80 / 145）', () => {
   });
 });
 
-describe('process.cwd 抛错臂：project IIFE catch（618）+ generateNewLogFilePath cwd catch（194）', () => {
-  let savedCwd;
-  before(() => { savedCwd = process.cwd; });
-  after(() => {
-    process.cwd = savedCwd;
-    nextResponse = null;
-  });
-
-  it('process.cwd 抛错 + LOG_FILE 已撑过 MAX → 轮转走 generateNewLogFilePath（194 catch）+ requestEntry.project=unknown（618 catch）', async () => {
-    // 先在私有 workspace 准备一个 > MAX 的 LOG_FILE，使本次 mainAgent 请求触发轮转。
-    const wsDir = mkdtempSync(join(tmpdir(), 'ccv-cwd-'));
-    const r = mod.initForWorkspace(join(wsDir, 'projcwd'), { forceNew: true });
-    const MAX = 300 * 1024 * 1024;
-    if (!existsSync(r.filePath)) writeFileSync(r.filePath, '');
-    let sized = false;
-    try { truncateSync(r.filePath, MAX + 4096); sized = statSync(r.filePath).size >= MAX; } catch { sized = false; }
-    // 现在把 process.cwd 换成抛错版本
-    process.cwd = () => { throw new Error('cwd boom'); };
-    nextResponse = () => new Response(
-      JSON.stringify({ id: 'r', content: [] }),
-      { status: 200, headers: { 'content-type': 'application/json' } });
-    // mainAgent 请求：project IIFE 读 process.cwd 抛 → 618 catch 'unknown'；
-    // 若 sized，则 checkAndRotateLogFile → generateNewLogFilePath 内 process.cwd 抛 → 194 catch homedir。
-    const res = await globalThis.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'x-api-key': 'k' },
-      body: JSON.stringify(mainAgentBody([{ role: 'user', content: 'cwd-throw' }], { model: 'm' })),
-    });
-    assert.equal(res.status, 200, '请求仍成功');
-    // 恢复 cwd 再读盘断言
-    process.cwd = savedCwd;
-    await waitUntil(() => {
-      try { return existsSync(mod.LOG_FILE) && readFileSync(mod.LOG_FILE, 'utf-8').includes('"project"'); }
-      catch { return false; }
-    }, 3000, 'entry written with project field');
-    const content = readFileSync(mod.LOG_FILE, 'utf-8');
-    const entries = content.split('\n---\n').filter(p => p.trim()).map(p => { try { return JSON.parse(p); } catch { return null; } }).filter(Boolean);
-    const last = [...entries].reverse().find(e => e && !e.inProgress && e.project !== undefined);
-    assert.ok(last, '应有带 project 字段的完成条目');
-    assert.equal(last.project, 'unknown', 'process.cwd 抛错 → project 取 unknown（618 catch）');
-    if (sized) assert.notEqual(mod.LOG_FILE, r.filePath, '撑过 MAX 时应已轮转（194 走 homedir 路径）');
-    try { rmSync(wsDir, { recursive: true, force: true }); } catch { /* noop */ }
-  });
-});
 
 describe('模块加载期臂：_ccvSkip 跳过 + 自动执行（子进程 canonical import）', () => {
   it('argv[2]=doctor → _ccvSkip=true → 跳过 setupInterceptor + server 自启（1075/1080 短路）', () => {
@@ -971,7 +774,7 @@ describe('模块加载期臂：_ccvSkip 跳过 + 自动执行（子进程 canoni
   it('teammate（--agent-name）模式下 fetch 记录带 teammate 字段（318/415/629 teammate 臂）', () => {
     // --agent-name 带 '--' 会被 node 当标志，必须写成临时脚本文件再以脚本参数传入。
     // 独立进程注入 teammate argv → _isTeammate=true。teammate 即使 proxy 模式也强制 setup（1075 _isTeammate 兜底）。
-    // 驱动一个 mainAgent fetch：requestEntry 带 teammate/teamName（629 真臂）；checkAndRotateLogFile 内 415 teammate-return。
+    // 驱动一个 mainAgent fetch：requestEntry 带 teammate/teamName（teammate 展开臂）。
     const scriptPath = join(logDir, '_teammate-driver.mjs');
     writeFileSync(scriptPath,
       `globalThis.fetch = async () => new Response(JSON.stringify({id:'r',content:[]}),{status:200,headers:{'content-type':'application/json'}});\n` +
@@ -1055,25 +858,6 @@ describe('模块加载期臂：_ccvSkip 跳过 + 自动执行（子进程 canoni
         encoding: 'utf-8', timeout: 30000,
       });
     assert.match(sub.stdout, /BADURL_OK defaultConfigNull=true/, `非法 url 应命中 592 catch 且 _defaultConfig 保持 null: ${sub.stderr}`);
-  });
-
-  it('teammate 在全新空 logDir（无 leader 日志）→ _newLogFile = "" （318 第二臂）', () => {
-    const freshDir = mkdtempSync(join(tmpdir(), 'ccv-tm-noleader-'));
-    const scriptPath = join(freshDir, '_tm-noleader.mjs');
-    writeFileSync(scriptPath,
-      `globalThis.fetch = async () => new Response('{}',{status:200});\n` +
-      `const m = await import(${JSON.stringify(INTERCEPTOR)});\n` +
-      `await m._initPromise;\n` +
-      `console.log('NOLEADER_OK logfile=' + JSON.stringify(m.LOG_FILE));\n` +
-      `process.exit(0);\n`);
-    const sub = spawnSync(process.execPath, [scriptPath, '--agent-name', 'w1'],
-      {
-        env: { ...process.env, CCV_LOG_DIR: freshDir, CCV_PROXY_MODE: '1', CCV_SYNC_WRITES: '1' },
-        encoding: 'utf-8', timeout: 30000,
-      });
-    try { rmSync(freshDir, { recursive: true, force: true }); } catch { /* noop */ }
-    // 无 leader 日志 → _leaderLog 为空 → _newLogFile='' → LOG_FILE 为空串
-    assert.match(sub.stdout, /NOLEADER_OK logfile=""/, `无 leader 日志时 LOG_FILE 应为空串: ${sub.stderr}`);
   });
 
   it('SIGTERM handler 干净退出（519-521）', () => {

@@ -58,13 +58,23 @@ Programlama modunu başlattıktan sonra web sayfası otomatik olarak açılır.
 
 cc-viewer'ın istemci sürümü de mevcuttur: [İndirme bağlantısı](https://github.com/weiesky/cc-viewer/releases)
 
+### 1.7.0 sürümüne yükseltme (log formatı v2)
+
+1.7.0 sürümünden itibaren loglar, tek `.jsonl` dosyaları yerine oturum başına dizin biçiminde (wire-format v2) saklanır — diskte yaklaşık %90 daha az yer kaplar. Mevcut v1 `.jsonl` dosyaları asla değiştirilmez veya silinmez; log iletişim kutusu varsayılan olarak v2 oturumlarını listeler ve küçük bir “Eski (v1) logları görüntüle” girişi (eski dosyalar var olduğu sürece gösterilir) bunların görüntülenebileceği, taşınabileceği veya silinebileceği bir v1 görünümü açar. Başlangıçta, eski loglar bulunduğunda cc-viewer tek tıkla taşıma sunar (`claude -c` ile eski bir konuşmaya devam ederken şiddetle önerilir; bu konuşmanın ilk yarısı eski dosyalarda bulunur). Taşımayı terminalden de yapabilirsiniz:
+
+```bash
+ccv convert <project>   # tek bir projeyi taşı
+ccv convert --all       # tüm projeleri taşı
+ccv verify <v1-file>    # bir v1 dosyasını dönüştürülmüş oturumlarıyla karşılaştır
+```
+
 ### Log modu
 
 Hâlâ claude'un native aracını veya VS Code eklentisini kullanmaya alışkınsanız bu modu kullanın.
 
 Bu modda `claude` çalıştırıldığında
 
-otomatik olarak bir log süreci başlatılır ve istek logları \~/.claude/cc-viewer/*yourproject*/date.jsonl içine kaydedilir
+otomatik olarak bir log süreci başlatılır ve istek logları \~/.claude/cc-viewer/*yourproject*/sessions/ altındaki oturum başına dizinlere kaydedilir (wire-format v2)
 
 Log modunu başlat:
 

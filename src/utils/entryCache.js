@@ -19,9 +19,6 @@ function getDB() {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
-      if (!db.objectStoreNames.contains('sessions')) {
-        db.createObjectStore('sessions');
-      }
     };
     req.onsuccess = () => {
       _dbInstance = req.result;
@@ -132,48 +129,6 @@ export async function clearEntries() {
     });
   } catch {
     // 静默
-  }
-}
-
-// --- Per-session 存储 (P1 hot/cold) ---
-
-export async function saveSessionEntries(projectName, sessionId, entries) {
-  if (!projectName || entries == null) return;
-  try {
-    const db = await getDB();
-    const key = `${projectName}:${sessionId}`;
-    return new Promise((resolve) => {
-      const tx = db.transaction('sessions', 'readwrite');
-      tx.objectStore('sessions').put({ entries, ts: Date.now() }, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    });
-  } catch {
-    // 静默
-  }
-}
-
-export async function loadSessionEntries(projectName, sessionId) {
-  try {
-    const db = await getDB();
-    const key = `${projectName}:${sessionId}`;
-    return new Promise((resolve) => {
-      const tx = db.transaction('sessions', 'readonly');
-      const req = tx.objectStore('sessions').get(key);
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data || !Array.isArray(data.entries) || data.entries.length === 0) {
-          resolve(null);
-        } else if (data.ts && Date.now() - data.ts > MAX_AGE) {
-          resolve(null);
-        } else {
-          resolve(data.entries);
-        }
-      };
-      req.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
   }
 }
 

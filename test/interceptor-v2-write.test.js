@@ -1,17 +1,17 @@
 /**
- * wire-v2 S3 — dual-write integration through the real fetch hook.
+ * wire-v2 — v2-only 写路径的集成测试（1.7.0：v2 是唯一日志存储）。
  *
- * Drives the interceptor exactly like test/interceptor-fetch.test.js (manual
- * setupInterceptor over a fake fetch) with CCV_WIRE_V2=1, and asserts the
- * plan's S3 automated gate:
- *   (a) the v2 session directory takes the WIRE_FORMAT_V2.md shape,
- *   (b) v1 entries on disk are byte-level unchanged in structure (placeholder +
- *       completed with delta envelope),
- *   (c) a sabotaged v2 writer cannot disturb the v1 write path.
+ * 驱动真实 fetch hook（手动 setupInterceptor over fake fetch），断言：
+ *   (a) v2 session 目录取 WIRE_FORMAT_V2.md 的规范形态（meta/journal/conversations/
+ *       responses/blobs），append 复用 CAS blob 引用；
+ *   (b) 项目目录下【不再】出现任何 v1 .jsonl 文件；getLiveLogSource() 返回当前
+ *       session dir；
+ *   (c) v2 writer 被 sabotage（方法抛错）时 fetch hook 不受影响（响应照常返回），
+ *       恢复后继续正常写入。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { readFileSync, mkdtempSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -19,11 +19,10 @@ import { tmpdir } from 'node:os';
 // env 必须先于任何项目模块的【动态】import 锁死到进程私有临时目录；
 // 严禁把 ../server/interceptor.js 改成顶层静态 import。
 process.env.CCV_PROXY_MODE = '1';      // 跳过模块顶层 setupInterceptor 自执行
-process.env.CCV_SYNC_WRITES = '1';     // 同步写盘，便于读取断言（v1 与 v2 队列都读此 env）
-process.env.CCV_WIRE_V2 = '1';         // S3 双写开启
+process.env.CCV_SYNC_WRITES = '1';     // 同步写盘，便于读取断言（v2 写队列读此 env）
 delete process.env.CCV_WORKSPACE_MODE;
-delete process.env.CCV_IM_PLATFORM;    // IM worker 强制 v1-only，测试进程必须不是
-const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-v2dw-'));
+delete process.env.CCV_IM_PLATFORM;
+const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-v2w-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
 
@@ -52,18 +51,13 @@ function mainAgentBody(messages, extra = {}) {
   };
 }
 
-function readV1Entries() {
-  if (!mod.LOG_FILE || !existsSync(mod.LOG_FILE)) return [];
-  return readFileSync(mod.LOG_FILE, 'utf-8')
-    .split('\n---\n')
-    .filter(p => p.trim())
-    .map(p => JSON.parse(p));
+function projectDir() {
+  const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  return join(__isoDir, project);
 }
 
 function sessionDir() {
-  // project name derives from cwd basename, same sanitization as interceptor
-  const project = basename(process.cwd()).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-  return join(__isoDir, project, 'sessions', SID);
+  return join(projectDir(), 'sessions', SID);
 }
 
 function readJsonl(path) {
@@ -78,35 +72,26 @@ async function fireMainAgent(messages, respBody = { content: [], usage: { input_
     body: JSON.stringify(mainAgentBody(messages)),
   });
   assert.equal(res.status, 200);
+  return res;
 }
 
 before(async () => {
   globalThis.fetch = async () => (nextResponse ? nextResponse() : new Response('{}', { status: 200 }));
   mod = await import('../server/interceptor.js');
   mod.setupInterceptor();
-  assert.ok(mod.LOG_FILE, 'LOG_FILE auto-initialized');
-  assert.ok(mod._v2Writer.enabled, 'CCV_WIRE_V2=1 must enable the v2 writer');
+  assert.equal(mod.LOG_FILE, '', '1.7.0 起 LOG_FILE 恒为空串（deprecated 占位导出）');
+  assert.ok(mod._v2Writer.enabled, 'v2 writer 常开（唯一写路径）');
 });
 
 after(() => {
   setTimeout(() => process.exit(0), 30).unref();
 });
 
-describe('wire-v2 S3 dual-write', () => {
-  it('(a)+(b) one mainAgent round trip: v1 entries unchanged, v2 dir takes spec shape', async () => {
+describe('wire-v2 唯一写路径', () => {
+  it('(a) 一次 mainAgent 往返：v2 session dir 取规范形态', async () => {
     await fireMainAgent([textMsg('user', 'hello v2')]);
     await mod._v2Writer.flush();
 
-    // v1 side: placeholder + completed, delta envelope intact (first request → checkpoint)
-    const v1 = readV1Entries();
-    const completed = v1.filter(e => !e.inProgress && !e.ccvRotationContext);
-    assert.equal(completed.length, 1);
-    assert.equal(completed[0]._isCheckpoint, true);
-    assert.equal(completed[0]._deltaFormat, 1);
-    assert.equal(completed[0]._seq, 1);
-    assert.ok(v1.some(e => e.inProgress), 'v1 placeholder still written (no live port)');
-
-    // v2 side: full spec shape
     const dir = sessionDir();
     const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf-8'));
     assert.equal(meta.wireFormat, 2);
@@ -122,7 +107,8 @@ describe('wire-v2 S3 dual-write', () => {
     assert.equal(req.conv, 'main');
     assert.equal(req.evt, 'snapshot');
     assert.ok(req.blobs.tools && req.blobs.sys, 'tools/system extracted to blob refs');
-    assert.equal(req.headers['x-api-key'] === undefined ? 'redacted-or-absent' : typeof req.headers['x-api-key'], 'string', 'headers captured');
+    assert.equal(typeof req.headers, 'object', 'redacted headers captured on the req line');
+    assert.match(req.headers['x-api-key'], /\*\*\*\*/, 'x-api-key 已脱敏');
     assert.equal(done.seq, 1);
     assert.equal(done.status, 'ok');
     assert.equal(done.usage.in, 3);
@@ -141,7 +127,14 @@ describe('wire-v2 S3 dual-write', () => {
     assert.equal(blobs.length, 2, 'tools + system blobs');
   });
 
-  it('(a) second request extending the wire appends a delta slice and reuses blob refs', async () => {
+  it('(b) 项目目录无任何 v1 .jsonl；getLiveLogSource() 返回当前 session dir', () => {
+    const names = readdirSync(projectDir());
+    assert.ok(!names.some(n => n.endsWith('.jsonl')),
+      `项目目录不得出现 v1 单文件日志（实际内容：${names.join(',')}）`);
+    assert.equal(mod.getLiveLogSource(), sessionDir(), 'live 读源即当前 v2 session dir');
+  });
+
+  it('(a) 第二次延长 wire 的请求：append delta 切片 + 复用 CAS blob 引用', async () => {
     await fireMainAgent([
       textMsg('user', 'hello v2'),
       textMsg('assistant', 'hi there'),
@@ -166,31 +159,31 @@ describe('wire-v2 S3 dual-write', () => {
     assert.equal(readdirSync(join(dir, 'blobs')).length, 2, 'no new blobs for identical tools/system');
   });
 
-  it('(c) a sabotaged v2 writer cannot disturb the v1 write path', async () => {
+  it('(c) sabotage v2 writer（方法抛错）→ fetch hook 不受影响，恢复后继续写入', async () => {
     const origIngest = mod._v2Writer.ingestRequest;
     const origCompletion = mod._v2Writer.ingestCompletion;
     mod._v2Writer.ingestRequest = () => { throw new Error('v2 exploded (request)'); };
     mod._v2Writer.ingestCompletion = () => { throw new Error('v2 exploded (completion)'); };
+    const dir = sessionDir();
+    const reqsBefore = readJsonl(join(dir, 'journal.jsonl')).filter(l => l.ph === 'req').length;
     try {
-      const beforeCount = readV1Entries().filter(e => !e.inProgress).length;
-      await fireMainAgent([
+      // 抛错的 writer 绝不能打断 fetch hook：响应照常返回（fireMainAgent 内断言 200）
+      const res = await fireMainAgent([
         textMsg('user', 'hello v2'),
         textMsg('assistant', 'hi there'),
         textMsg('user', 'second turn'),
         textMsg('assistant', 'sure'),
         textMsg('user', 'third turn — v2 is broken now'),
       ]);
-      const v1 = readV1Entries().filter(e => !e.inProgress);
-      assert.equal(v1.length, beforeCount + 1, 'v1 completed entry still written');
-      const last = v1[v1.length - 1];
-      assert.equal(last._deltaFormat, 1, 'v1 delta envelope unaffected');
+      assert.equal(res.status, 200, 'sabotaged writer 下响应仍正常返回');
+      const reqsDuring = readJsonl(join(dir, 'journal.jsonl')).filter(l => l.ph === 'req').length;
+      assert.equal(reqsDuring, reqsBefore, 'sabotage 期间无新 journal 行（写入被吞掉而非崩溃）');
     } finally {
       mod._v2Writer.ingestRequest = origIngest;
       mod._v2Writer.ingestCompletion = origCompletion;
     }
-  });
 
-  it('(a) journal seq allocation order matches v1 _seq order', async () => {
+    // 恢复后继续写入：conv 状态仍是 3 条（sabotage 那次没 ingest），7 条 wire → append 4..7
     await fireMainAgent([
       textMsg('user', 'hello v2'),
       textMsg('assistant', 'hi there'),
@@ -201,16 +194,12 @@ describe('wire-v2 S3 dual-write', () => {
       textMsg('user', 'fourth turn'),
     ]);
     await mod._v2Writer.flush();
-    const v1 = readV1Entries().filter(e => !e.inProgress && e._seq != null);
-    const dir = sessionDir();
     const reqs = readJsonl(join(dir, 'journal.jsonl')).filter(l => l.ph === 'req');
-    const lastV1 = v1[v1.length - 1];
-    const lastReq = reqs[reqs.length - 1];
-    // the sabotage test consumed one v1 _seq without a v2 seq, so absolute
-    // values differ — but ORDER must agree: the newest v1 entry and the newest
-    // v2 req line describe the same request (same requestId linkage).
-    assert.equal(lastReq.rid.length > 0, true);
-    assert.equal(lastReq.msgTo, 7, 'newest v2 req describes the 7-message wire');
-    assert.equal(lastV1._totalMessageCount, 7, 'newest v1 entry describes the same request');
+    assert.equal(reqs.length, reqsBefore + 1, '恢复后的请求正常落 journal');
+    const last = reqs[reqs.length - 1];
+    assert.equal(last.seq, reqs[reqs.length - 2].seq + 1, 'journal seq 继续单调递增');
+    assert.equal(last.msgTo, 7, '恢复后的 req 描述 7 消息 wire');
+    assert.equal(last.evt, 'append');
+    assert.deepEqual([last.msgFrom, last.msgTo], [3, 7], '基于恢复前的 conv 状态做增量');
   });
 });

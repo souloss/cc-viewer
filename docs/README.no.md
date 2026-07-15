@@ -58,13 +58,23 @@ Etter at programmeringsmodusen er startet, åpnes en nettside automatisk.
 
 cc-viewer kommer også som native desktop-app: [Nedlastingsside](https://github.com/weiesky/cc-viewer/releases)
 
+### Oppgradering til 1.7.0 (loggformat v2)
+
+Fra 1.7.0 lagres logger i et format med én mappe per økt (wire-format v2) i stedet for enkeltstående `.jsonl`-filer — omtrent 90 % mindre diskplass. Eksisterende v1-`.jsonl`-filer blir aldri endret eller slettet; loggdialogen viser v2-økter som standard, og en liten oppføring “Vis eldre (v1) logger” (vises så lenge det finnes gamle filer) åpner en v1-visning der de kan vises, migreres eller slettes. Ved oppstart tilbyr cc-viewer migrering med ett klikk når eldre logger blir funnet (sterkt anbefalt når du fortsetter en gammel samtale med `claude -c`, der første halvdel ligger i de gamle filene). Du kan også migrere fra terminalen:
+
+```bash
+ccv convert <project>   # migrer ett prosjekt
+ccv convert --all       # migrer alle prosjekter
+ccv verify <v1-file>    # sjekk en v1-fil mot dens konverterte økter
+```
+
 ### Logger-modus
 
 Hvis du fortsatt foretrekker det native claude-verktøyet eller VS Code-utvidelsen, bruker du denne modusen.
 
 I denne modusen starter `claude`
 
-automatisk en loggprosess som registrerer forespørselslogger til \~/.claude/cc-viewer/*yourproject*/date.jsonl
+automatisk en loggprosess som registrerer forespørselslogger til mapper per økt under \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Start logger-modus:
 

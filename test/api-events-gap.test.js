@@ -1,20 +1,21 @@
-// 覆盖目标：server/routes/events.js 的 6 个 handler + sseUpdateBadgeFrame（按当前工作区状态测）。
-//   sseUpdateBadgeFrame —— 纯函数帧格式
+// Coverage target: the 4 surviving handlers in server/routes/events.js + sseUpdateBadgeFrame
+// (wire-v2 1.7.0: /api/register-log and /api/resume-choice are GONE — asserted below).
+//   sseUpdateBadgeFrame —— pure SSE frame formatting
 //   GET  /events            events       —— server_config / update badge / load_start/chunk/end /
-//                              context_window(来自 mainAgent) / context_window fallback(读 file) /
-//                              limit 参数 / 推入 clients + close 清理
-//   GET  /api/requests      requests     —— 流式 JSON 数组输出
-//   GET  /api/entries/page  entriesPage  —— 400 缺/非法 before、非法 file、404 validateLogPath、200 分页
-//   POST /api/turn-end-notify turnEndNotify —— 403 非 local / 403 token 错 / 200 / 400 bad json / 16KB 截断
-//   POST /api/register-log  registerLog  —— 400 非法路径 / 200 合法（LOG_DIR 内）
-//   POST /api/resume-choice resumeChoice —— 400 非法 choice / 409 already resolved / 400 bad json
-// 范式：import 前先建临时 LOG_DIR 并设 env；用 interceptor.initForWorkspace 让 LOG_FILE（live binding）
-// 指向 tmp 路径，预写日志后直接调用 handler（EventEmitter 假 req + 收集型 res）。
+//                              context_window (from mainAgent) / context_window fallback (file) /
+//                              limit param / clients push + close cleanup
+//   GET  /api/requests      requests     —— streamed JSON array output
+//   (/api/entries/page removed in 1.7.0 P3 — absence pinned below)
+//   POST /api/turn-end-notify turnEndNotify —— 403 non-local / 403 bad token / 200 / 400 bad json / 16KB cap
+// Pattern: create the temp LOG_DIR and set env BEFORE any dynamic import; the live read
+// source is getLiveLogSource() (the current v2 session dir), so fixtures are seeded through
+// interceptor._v2Writer (a fresh session id per seed call keeps tests isolated), then the
+// handlers are invoked directly (EventEmitter fake req + collecting res).
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname, join, basename } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-api-events-gap-'));
@@ -22,8 +23,6 @@ process.env.CCV_LOG_DIR = tmpDir;
 process.env.CLAUDE_CONFIG_DIR = tmpDir;
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
-
-const SEP = '\n---\n';
 
 function mainAgentEntry(ts, inputTokens, extra = {}) {
   return {
@@ -40,6 +39,24 @@ function mainAgentEntry(ts, inputTokens, extra = {}) {
     },
     response: { body: { usage: { input_tokens: inputTokens, output_tokens: 10 } } },
     ...extra,
+  };
+}
+
+// A non-MainAgent (subagent) entry: no mainAgent flag, system text without
+// "You are Claude Code" — the adapter re-derives mainAgent=false for it.
+function subAgentEntry(ts, inputTokens) {
+  return {
+    timestamp: ts,
+    url: 'https://api.anthropic.com/v1/messages',
+    method: 'POST',
+    status: 200,
+    body: {
+      model: 'claude-opus-4-8',
+      system: [{ type: 'text', text: 'You are a helper subagent' }],
+      tools: [{ name: 'Bash' }],
+      messages: [{ role: 'user', content: 'hi' }],
+    },
+    response: { body: { usage: { input_tokens: inputTokens, output_tokens: 10 } } },
   };
 }
 
@@ -80,33 +97,46 @@ function url(pathname, query = {}) {
   return { pathname, searchParams: sp };
 }
 
-let events, sseUpdateBadgeFrame, requests, entriesPage, turnEndNotify, registerLog, resumeChoice;
-let interceptor;
-let LOG_FILE;
+let events, sseUpdateBadgeFrame, requests, turnEndNotify;
+let interceptor, eventsMod;
 
 before(async () => {
   interceptor = await import('../server/interceptor.js');
   interceptor.initForWorkspace(join(tmpDir, 'evproj'), { forceNew: true });
-  LOG_FILE = interceptor.LOG_FILE;
-  assert.ok(LOG_FILE, 'LOG_FILE set after initForWorkspace');
-  mkdirSync(dirname(LOG_FILE), { recursive: true });
 
-  const mod = await import('../server/routes/events.js');
-  sseUpdateBadgeFrame = mod.sseUpdateBadgeFrame;
-  const find = (p, m) => mod.eventsRoutes.find((r) => r.path === p && r.method === m).handler;
+  eventsMod = await import('../server/routes/events.js');
+  sseUpdateBadgeFrame = eventsMod.sseUpdateBadgeFrame;
+  const find = (p, m) => eventsMod.eventsRoutes.find((r) => r.path === p && r.method === m).handler;
   events = find('/events', 'GET');
   requests = find('/api/requests', 'GET');
-  entriesPage = find('/api/entries/page', 'GET');
   turnEndNotify = find('/api/turn-end-notify', 'POST');
-  registerLog = find('/api/register-log', 'POST');
-  resumeChoice = find('/api/resume-choice', 'POST');
 });
 
 after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
-function writeLog(entries) {
-  writeFileSync(LOG_FILE, entries.map((e) => JSON.stringify(e)).join(SEP) + SEP);
+// Seed the LIVE v2 session (the read source of /events, /api/requests and the
+// default-file /api/entries/page): a fresh session id per call so each test
+// sees exactly its own entries — getLiveLogSource() follows the latest sid.
+let sidCounter = 0;
+async function seedV2(entries) {
+  const w = interceptor._v2Writer;
+  w.resetSessions();
+  const sid = `10000000-0000-4000-8000-${String(++sidCounter).padStart(12, '0')}`;
+  for (const e of entries) {
+    e.body.metadata = { user_id: JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: sid }) };
+    const h = w.ingestRequest(e, e.body.messages);
+    w.ingestCompletion(h, e);
+  }
+  await w.flush();
 }
+
+// ---------------------------------------------------------------------------
+describe('removed routes (wire-v2 1.7.0)', () => {
+  it('register-log and resume-choice are no longer routed', () => {
+    assert.equal(eventsMod.eventsRoutes.find((r) => r.path === '/api/register-log'), undefined);
+    assert.equal(eventsMod.eventsRoutes.find((r) => r.path === '/api/resume-choice'), undefined);
+  });
+});
 
 // ---------------------------------------------------------------------------
 describe('sseUpdateBadgeFrame', () => {
@@ -134,7 +164,7 @@ describe('GET /events', () => {
   }
 
   it('emits server_config first, then load_start/load_chunk*/load_end and a context_window', async () => {
-    writeLog([
+    await seedV2([
       mainAgentEntry('2026-06-06T01:00:00.000Z', 111),
       mainAgentEntry('2026-06-06T01:01:00.000Z', 222),
     ]);
@@ -162,7 +192,7 @@ describe('GET /events', () => {
   });
 
   it('补推 update badge frame when deps.pendingMajorUpdate is set', async () => {
-    writeLog([mainAgentEntry('2026-06-06T01:00:00.000Z', 50)]);
+    await seedV2([mainAgentEntry('2026-06-06T01:00:00.000Z', 50)]);
     const req = new EventEmitter(); req.headers = {};
     const res = makeRes();
     await events(req, res, url('/events'), true, eventsDeps({ pendingMajorUpdate: { version: '9.9.9', source: 'gh' } }));
@@ -173,7 +203,7 @@ describe('GET /events', () => {
   });
 
   it('honours an explicit ?limit and reports hasMore in load_start', async () => {
-    writeLog(Array.from({ length: 5 }, (_, i) => mainAgentEntry(`2026-06-06T01:0${i}:00.000Z`, 100 + i)));
+    await seedV2(Array.from({ length: 5 }, (_, i) => mainAgentEntry(`2026-06-06T01:0${i}:00.000Z`, 100 + i)));
     const req = new EventEmitter(); req.headers = {};
     const res = makeRes();
     await events(req, res, url('/events', { limit: '2' }), true, eventsDeps());
@@ -186,7 +216,7 @@ describe('GET /events', () => {
   });
 
   it('removes res from clients on req close (cleanup)', async () => {
-    writeLog([mainAgentEntry('2026-06-06T01:00:00.000Z', 10)]);
+    await seedV2([mainAgentEntry('2026-06-06T01:00:00.000Z', 10)]);
     const req = new EventEmitter(); req.headers = {};
     const res = makeRes();
     const deps = eventsDeps();
@@ -197,8 +227,8 @@ describe('GET /events', () => {
   });
 
   it('falls back to context-window.json when the log has no MainAgent', async () => {
-    // 只有 teammate 伪 mainAgent → 无真实 mainAgent → 走 CONTEXT_WINDOW_FILE 回落
-    writeLog([mainAgentEntry('2026-06-06T01:00:00.000Z', 333, { teammate: 'bob' })]);
+    // Only a subagent entry → no real mainAgent → CONTEXT_WINDOW_FILE fallback
+    await seedV2([subAgentEntry('2026-06-06T01:00:00.000Z', 333)]);
     const cwFile = join(tmpDir, 'context-window.json');
     writeFileSync(cwFile, JSON.stringify({
       context_window: { total_input_tokens: 1000, total_output_tokens: 200 },
@@ -220,7 +250,7 @@ describe('GET /events', () => {
 // ---------------------------------------------------------------------------
 describe('GET /api/requests', () => {
   it('streams a JSON array of raw entries', async () => {
-    writeLog([
+    await seedV2([
       mainAgentEntry('2026-06-06T01:00:00.000Z', 1),
       mainAgentEntry('2026-06-06T01:01:00.000Z', 2),
     ]);
@@ -237,47 +267,9 @@ describe('GET /api/requests', () => {
 });
 
 // ---------------------------------------------------------------------------
-describe('GET /api/entries/page', () => {
-  it('400 when before is missing', async () => {
-    const res = makeRes();
-    await entriesPage({ headers: {} }, res, url('/api/entries/page'));
-    assert.equal(res.statusCode, 400);
-    assert.match(JSON.parse(bodyStr(res)).error, /before/);
-  });
-
-  it('400 when before is not a valid date', async () => {
-    const res = makeRes();
-    await entriesPage({ headers: {} }, res, url('/api/entries/page', { before: 'not-a-date' }));
-    assert.equal(res.statusCode, 400);
-  });
-
-  it('400 for a file param with path traversal or bad extension', async () => {
-    const res = makeRes();
-    await entriesPage({ headers: {} }, res, url('/api/entries/page', { before: '2026-06-06T02:00:00.000Z', file: '../evil.jsonl' }));
-    assert.equal(res.statusCode, 400);
-    assert.equal(JSON.parse(bodyStr(res)).error, 'Invalid file name');
-  });
-
-  it('404 for a file param that does not exist (validateLogPath NOT_FOUND)', async () => {
-    const res = makeRes();
-    await entriesPage({ headers: {} }, res, url('/api/entries/page', { before: '2026-06-06T02:00:00.000Z', file: 'evproj/missing.jsonl' }));
-    assert.equal(res.statusCode, 404);
-  });
-
-  it('200 returns paged entries from the active log (default file)', async () => {
-    writeLog([
-      mainAgentEntry('2026-06-06T01:00:00.000Z', 1),
-      mainAgentEntry('2026-06-06T01:01:00.000Z', 2),
-      mainAgentEntry('2026-06-06T01:02:00.000Z', 3),
-    ]);
-    const res = makeRes();
-    await entriesPage({ headers: {} }, res, url('/api/entries/page', { before: '2026-06-06T03:00:00.000Z', limit: '10' }));
-    assert.equal(res.statusCode, 200);
-    const data = JSON.parse(bodyStr(res));
-    assert.ok(Array.isArray(data.entries));
-    assert.equal(typeof data.hasMore, 'boolean');
-    assert.equal(typeof data.count, 'number');
-    assert.ok(data.count >= 1);
+describe('GET /api/entries/page (removed in 1.7.0 P3)', () => {
+  it('route is gone from eventsRoutes', () => {
+    assert.equal(eventsMod.eventsRoutes.find((r) => r.path === '/api/entries/page'), undefined);
   });
 });
 
@@ -350,88 +342,5 @@ describe('POST /api/turn-end-notify', () => {
     req.emit('end');
     // truncated 路径 return 前不写响应
     assert.equal(res.ended, false, 'no response written after destroy');
-  });
-});
-
-// ---------------------------------------------------------------------------
-describe('POST /api/register-log', () => {
-  function depsR() {
-    return {
-      MAX_POST_BODY: 1024 * 1024,
-      logWatcherOpts: (logFile) => ({ logFile, clients: [] }),
-    };
-  }
-  function postR(body, deps) {
-    const req = new EventEmitter();
-    req.headers = {};
-    req.destroy = () => {};
-    const res = makeRes();
-    return new Promise((resolve) => {
-      res.on('finish', () => resolve(res));
-      registerLog(req, res, url('/api/register-log'), true, deps);
-      req.emit('data', typeof body === 'string' ? body : JSON.stringify(body));
-      req.emit('end');
-    });
-  }
-
-  it('400 when logFile is outside LOG_DIR or non-existent', async () => {
-    const res = await postR({ logFile: '/etc/passwd' }, depsR());
-    assert.equal(res.statusCode, 400);
-    assert.match(JSON.parse(bodyStr(res)).error, /Invalid log file path/);
-  });
-
-  it('400 on invalid JSON body', async () => {
-    const res = await postR('{bad', depsR());
-    assert.equal(res.statusCode, 400);
-    assert.match(JSON.parse(bodyStr(res)).error, /Invalid request body/);
-  });
-
-  it('200 registers a log inside LOG_DIR that exists', async () => {
-    writeLog([mainAgentEntry('2026-06-06T01:00:00.000Z', 1)]);
-    const res = await postR({ logFile: LOG_FILE }, depsR());
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(JSON.parse(bodyStr(res)), { ok: true });
-  });
-});
-
-// ---------------------------------------------------------------------------
-describe('POST /api/resume-choice', () => {
-  function depsC() {
-    return {
-      MAX_POST_BODY: 1024 * 1024,
-      clients: [],
-      logWatcherOpts: (logFile) => ({ logFile, clients: [] }),
-    };
-  }
-  function postC(body, deps) {
-    const req = new EventEmitter();
-    req.headers = {};
-    req.destroy = () => {};
-    const res = makeRes();
-    return new Promise((resolve) => {
-      res.on('finish', () => resolve(res));
-      resumeChoice(req, res, url('/api/resume-choice'), true, deps);
-      req.emit('data', typeof body === 'string' ? body : JSON.stringify(body));
-      req.emit('end');
-    });
-  }
-
-  it('400 on an invalid choice value', async () => {
-    const res = await postC({ choice: 'maybe' }, depsC());
-    assert.equal(res.statusCode, 400);
-    assert.equal(JSON.parse(bodyStr(res)).error, 'Invalid choice');
-  });
-
-  it('409 already resolved when there is no pending resume state', async () => {
-    // workspace 模式下 _resumeState 恒为 null → resolveResumeChoice 返回 undefined → 409
-    const res = await postC({ choice: 'continue' }, depsC());
-    assert.equal(res.statusCode, 409);
-    assert.equal(JSON.parse(bodyStr(res)).error, 'Already resolved');
-  });
-
-  it('400 on invalid JSON body', async () => {
-    const res = await postC('{bad', depsC());
-    assert.equal(res.statusCode, 400);
-    assert.equal(JSON.parse(bodyStr(res)).error, 'Invalid request body');
   });
 });

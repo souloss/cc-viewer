@@ -1,10 +1,11 @@
 // SSE event stream + log-registration / resume / turn-end routes (moved verbatim from server.js).
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_FILE, _resumeState, resolveResumeChoice, _projectName, _wireV2ReadEnabled } from '../interceptor.js';
+import { _projectName, getLiveLogSource, isContinuedLaunch } from '../interceptor.js';
 import { LOG_DIR } from '../../findcc.js';
-import { watchLogFile } from '../lib/log-watcher.js';
-import { countLogEntries, streamRawEntriesAsync, readPagedEntries } from '../lib/log-stream.js';
+import { streamRawEntriesAsync } from '../lib/log-stream.js';
+import { migrationStatus } from '../lib/v2/migrate-prompt.js';
+import { reportSwallowed } from '../lib/error-report.js';
 import { awaitDrainOrClose } from '../lib/sse-backpressure.js';
 import { enrichRawIfNeeded } from '../lib/enrich-plan-input.js';
 import { validateLogPath } from '../lib/log-management.js';
@@ -49,77 +50,6 @@ function turnEndNotify(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
-// 注册新的日志文件进行 watch（供新进程复用旧服务时调用）
-function registerLog(req, res, parsedUrl, isLocal, deps) {
-  let body = '';
-  req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', () => {
-    try {
-      const { logFile } = JSON.parse(body);
-      if (logFile && typeof logFile === 'string' && logFile.startsWith(LOG_DIR) && existsSync(logFile)) {
-        watchLogFile(deps.logWatcherOpts(logFile));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
-      } else {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid log file path' }));
-      }
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-  });
-}
-
-// 用户选择继续/新开日志
-function resumeChoice(req, res, parsedUrl, isLocal, deps) {
-  let body = '';
-  req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', async () => {
-    try {
-      const { choice } = JSON.parse(body);
-      if (choice !== 'continue' && choice !== 'new') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid choice' }));
-        return;
-      }
-      const result = resolveResumeChoice(choice);
-      if (!result) {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Already resolved' }));
-        return;
-      }
-      // 重新 watch 最终的日志文件
-      watchLogFile(deps.logWatcherOpts(result.logFile));
-      // 广播 resume_resolved + full_reload
-      const resolvedData = JSON.stringify({ logFile: result.logFile });
-      deps.clients.forEach(client => {
-        try {
-          client.write(`event: resume_resolved\ndata: ${resolvedData}\n\n`);
-        } catch { }
-      });
-      // 流式分段广播 full_reload，避免全量加载 OOM
-      const reloadTotal = await countLogEntries(LOG_FILE);
-      deps.clients.forEach(client => {
-        try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: reloadTotal, incremental: false })}\n\n`); } catch { }
-      });
-      await streamRawEntriesAsync(LOG_FILE, (raw) => {
-        deps.clients.forEach(client => {
-          try { client.write('event: load_chunk\ndata: ['); client.write(raw.replace(/\n/g, '')); client.write(']\n\n'); } catch { }
-        });
-      });
-      deps.clients.forEach(client => {
-        try { client.write(`event: load_end\ndata: {}\n\n`); } catch { }
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, logFile: result.logFile }));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
-  });
-}
-
 // SSE endpoint
 // 构造「有新版」徽标的 SSE 帧（pending = {version, source}）。pending 为空返回 null。
 // 抽成纯函数便于单测帧格式；events() 在新连接上调用它补推，使版本徽标跨刷新持续显示。
@@ -157,15 +87,21 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     console.warn(`[server_config] SSE write failed (turnEndDebounceMs=${deps.turnEndDebounceMs}):`, err && err.message);
   }
 
-  // 如果有待决的 resume 选择，发送 resume_prompt 事件
-  if (_resumeState) {
-    res.write(`event: resume_prompt\ndata: ${JSON.stringify({ recentFileName: _resumeState.recentFileName })}\n\n`);
-  }
-
   // 补推「有新版」徽标：复用启动检查缓存的结果，让刷新/新标签页连上即恢复徽标。
   // 置于 deps.clients.push(res) 之前 → 新客户端仅得一份，不与一次性广播竞态。
   const updFrame = sseUpdateBadgeFrame(deps.pendingMajorUpdate);
   if (updFrame) res.write(updFrame);
+
+  // 1.7.0 迁移引导（P2）：当前项目仍有未转换的 v1 日志 → 连接即推 migrate_prompt。
+  // 是否弹窗由客户端决定（「不再提醒」偏好在客户端；continued=true 时无视 dismissed
+  // 再提醒一次——`-c` 续接的对话前半段在旧格式里，不迁移就看不到）。工作区切换后的
+  // 提示由 workspaces launch 路由对存量连接广播（本帧只覆盖新连接）。
+  try {
+    const mig = migrationStatus(LOG_DIR, _projectName || '');
+    if (mig.pending) {
+      res.write(`event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`);
+    }
+  } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
 
   // 增量加载参数：移动端带 since/cc/project 请求增量数据
   const sinceParam = parsedUrl.searchParams.get('since');
@@ -205,7 +141,9 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   const MAINAGENT_SCAN_RING = 3;
   const mainAgentRawRing = [];
 
-  await streamRawEntriesAsync(LOG_FILE, async (raw) => {
+  // S6b: the cold-load source is the current v2 session dir when the v2
+  // writer is active (adapter stream), else the v1 file.
+  await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
     // 直接发送原始 JSON 字符串，不做 parse/reconstruct/stringify
     // ExitPlanMode V2 空 input 的条目按需补全 plan / planFilePath，其它原样透传
     if (res.destroyed || !res.writable) return;
@@ -328,7 +266,7 @@ async function requests(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.write('[');
   let first = true;
-  await streamRawEntriesAsync(LOG_FILE, (raw) => {
+  await streamRawEntriesAsync(getLiveLogSource(), (raw) => {
     if (!first) res.write(',');
     res.write(enrichRawIfNeeded(raw));
     first = false;
@@ -337,64 +275,8 @@ async function requests(req, res) {
   res.end();
 }
 
-// 分页历史条目端点：移动端"加载更多"按需拉取
-// 支持可选 ?file= 参数指定目标文件（用于本地日志分页），默认使用活跃会话文件
-async function entriesPage(req, res, parsedUrl) {
-  const before = parsedUrl.searchParams.get('before');
-  const limitVal = Math.min(parseInt(parsedUrl.searchParams.get('limit'), 10) || 100, 500);
-  if (!before || isNaN(new Date(before).getTime())) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'missing or invalid "before" parameter' }));
-    return;
-  }
-  const file = parsedUrl.searchParams.get('file');
-  let targetFile = LOG_FILE;
-  if (file) {
-    // wire-v2 S5: v2 addressing allowed under the read switch (spec §12);
-    // validateLogPath resolves it to the session dir the paging reader accepts.
-    const isV2Ref = file.startsWith('v2:');
-    if (isV2Ref && !_wireV2ReadEnabled) {
-      res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'v2 read path is disabled' }));
-      return;
-    }
-    if (file.includes('..') || (!isV2Ref && !file.endsWith('.jsonl'))) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid file name' }));
-      return;
-    }
-    try { targetFile = validateLogPath(LOG_DIR, file); } catch (e) {
-      const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'ACCESS_DENIED' ? 403 : 400;
-      res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-      return;
-    }
-  }
-  try {
-    const result = await readPagedEntries(targetFile, { before, limit: limitVal });
-    // entries 是原始 JSON 字符串数组，parse 后返回给客户端
-    // ExitPlanMode V2 空 input 的条目用 enrichRawIfNeeded 在 raw 阶段补全
-    const entries = result.entries.map(raw => {
-      try { return JSON.parse(enrichRawIfNeeded(raw)); } catch { return null; }
-    }).filter(Boolean);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      entries,
-      hasMore: result.hasMore,
-      oldestTimestamp: result.oldestTimestamp,
-      count: entries.length,
-    }));
-  } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: err.message }));
-  }
-}
-
 export const eventsRoutes = [
   { method: 'POST', match: 'exact', path: '/api/turn-end-notify', handler: turnEndNotify },
-  { method: 'POST', match: 'exact', path: '/api/register-log', handler: registerLog },
-  { method: 'POST', match: 'exact', path: '/api/resume-choice', handler: resumeChoice },
   { method: 'GET', match: 'exact', path: '/events', handler: events },
   { method: 'GET', match: 'exact', path: '/api/requests', handler: requests },
-  { method: 'GET', match: 'exact', path: '/api/entries/page', handler: entriesPage },
 ];

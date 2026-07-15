@@ -58,13 +58,23 @@ ccv -c --d             # == claude --continue --dangerously-skip-permissions
 
 cc-viewer提供了客户端的版本：[下载地址](https://github.com/weiesky/cc-viewer/releases)
 
+### 升级到 1.7.0（日志格式 v2）
+
+自 1.7.0 起，日志以「每会话目录」格式（wire-format v2）存储，不再使用单个 `.jsonl` 文件——磁盘占用约减少 90%。已有的 v1 `.jsonl` 文件不会被修改或删除；日志对话框默认会列出 v2 会话，并提供一个小的「查看旧版（v1）日志」入口（只要旧文件仍存在便会显示），点击后会打开 v1 视图，可在其中查看、迁移或删除它们。启动时，如果发现旧版日志，cc-viewer 会提供一键迁移（在使用 `claude -c` 继续旧对话时强烈建议迁移，因为这类对话的前半部分保存在旧文件中）。你也可以在终端中迁移：
+
+```bash
+ccv convert <project>   # 迁移单个项目
+ccv convert --all       # 迁移所有项目
+ccv verify <v1-file>    # 对照转换后的会话校验某个 v1 文件
+```
+
 ### 日志模式
 
 如果你仍然习惯使用claude 原生工具，或者VS code插件，请使用该模式。
 
 这个模式下面启动 `claude`
 
-会自动启动一个日志进程自动记录请求日志到\~/.claude/cc-viewer/*yourproject*/date.jsonl
+会自动启动一个日志进程自动记录请求日志到 \~/.claude/cc-viewer/*yourproject*/sessions/ 下的每会话目录（wire-format v2）
 
 启动日志模式：
 

@@ -74,16 +74,17 @@ function execWithStdin(cmd, args, input, options) {
     child.stdin.end();
   });
 }
-import { LOG_FILE, _initPromise, _resumeState, _projectName, _logDir, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
+import { _initPromise, _projectName, _logDir, _v2Writer, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
+import { V2LiveFeed } from './lib/v2/live-feed.js';
+import { sanitizePathComponent } from './lib/v2/layout.js';
 import { maybeResumeConvert } from './lib/v2/convert-manager.js';
-import { recordInstance, listInstances } from './lib/instance-registry.js';
 import { LOG_DIR, setLogDir, getClaudeConfigDir, isBrowserOpenSuppressed } from '../findcc.js';
 import { t, getLang, setLang } from './i18n.js';
 import { loadAuthConfig, loadAuthState, saveAuthConfig, clearProjectOverride, generatePassword, decideAuth, parseCookies, renderLoginPage, localeFromAcceptLanguage } from './lib/auth.js';
 import { checkAndUpdate } from './lib/updater.js';
 import { loadPlugins, runWaterfallHook, runParallelHook } from './lib/plugin-loader.js';
 import { CONTEXT_WINDOW_FILE, readModelContextSize } from './lib/context-watcher.js';
-import { watchLogFile, startWatching, unwatchAll, sendEventToClients, sendToClients } from './lib/log-watcher.js';
+import { sendEventToClients, sendToClients } from './lib/log-watcher.js';
 import { createImLogWatcher } from './lib/im-log-watcher.js';
 import { unwatchAllWorkflows } from './lib/workflow-watcher.js';
 import { backupConfigs } from './lib/config-backup.js';
@@ -111,12 +112,6 @@ try {
 const isCliMode = process.env.CCV_CLI_MODE === '1';
 const isSdkMode = process.env.CCV_SDK_MODE === '1';
 const isWorkspaceMode = process.env.CCV_WORKSPACE_MODE === '1';
-// Instance id from `ccv --pid <name>` (sanitized in cli.js). null = default mode (no
-// per-instance isolation): the session-pin file falls back to the project-shared key.
-const INSTANCE_ID = process.env.CCV_INSTANCE_ID || null;
-// Remember this id under the project so the CLI banner can list past ids next run (memory
-// aid only). Fire-and-forget; no-ops when there's no active project (e.g. workspace mode).
-if (INSTANCE_ID && _logDir) recordInstance(_logDir, INSTANCE_ID).catch(() => {});
 const _defaultProxyProfiles = { active: 'max', profiles: [{ id: 'max', name: 'Default' }] };
 const _maskApiKey = (k) => k && typeof k === 'string' && k.length > 4 ? '****' + k.slice(-4) : k ? '****' : '';
 const _maskProfiles = (data) => {
@@ -305,7 +300,7 @@ let _launchCallback = null;
 export function setLaunchCallback(fn) { _launchCallback = fn; }
 export function setWorkspaceLaunched(v) { _workspaceLaunched = v; }
 export function initPostLaunch() {
-  watchLogFile(_logWatcherOpts(LOG_FILE));
+  startLogWatch();
   if (!statsWorker) startStatsWorker();
   startStreamingStatusTimer();
   // wire-v2 S8: a migration the previous process left unfinished resumes here
@@ -421,16 +416,34 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-// Helper to build log-watcher options object
-function _logWatcherOpts(logFile) {
-  return {
-    logFile: logFile || LOG_FILE,
-    clients,
-    getClaudePid,
-    runParallelHook,
-    notifyStatsWorker,
-    getLogFile: () => LOG_FILE,
-  };
+// S6b: v2 live feed — the live channel when the v2 writer is active. Lazy
+// singleton so worker/test paths that never watch anything pay nothing.
+let _v2LiveFeed = null;
+function _ensureV2LiveFeed() {
+  if (!_v2LiveFeed) {
+    _v2LiveFeed = new V2LiveFeed({
+      clients,
+      getClaudePid,
+      runParallelHook,
+      // The stats worker's v2 units are session dirs (stats-worker.js v9).
+      notifyStatsWorker,
+    });
+  }
+  return _v2LiveFeed;
+}
+
+/** Start the live channel for the current project (v2 live feed). No-op until
+ *  a project is bound (workspace mode defers to the launch route). */
+function startLogWatch() {
+  if (!_projectName) return;
+  const feed = _ensureV2LiveFeed();
+  feed.start(join(LOG_DIR, sanitizePathComponent(_projectName)));
+  _v2Writer.setOnActivity((dir) => feed.tick(dir));
+}
+
+function stopLogWatch() {
+  if (_v2LiveFeed) _v2LiveFeed.stop();
+  _v2Writer.setOnActivity(null);
 }
 
 function getLocalIp() {
@@ -519,7 +532,8 @@ const deps = {
   persistAskEntry: _persistAskEntry,
   persistAskDelete: _persistAskDelete,
   notifyParentPending: _notifyParentPending,
-  logWatcherOpts: _logWatcherOpts,
+  startLogWatch,
+  stopLogWatch,
   scheduleTurnEndBroadcast: _scheduleTurnEndBroadcast,
   ensureImWatch: _ensureImWatch,
   maskProfiles: _maskProfiles,
@@ -581,7 +595,6 @@ const deps = {
   isCliMode,
   isSdkMode,
   isWorkspaceMode,
-  instanceId: INSTANCE_ID,
   defaultProxyProfiles: _defaultProxyProfiles,
 };
 
@@ -1025,7 +1038,7 @@ export async function startViewer() {
           // 工作区模式下延迟到选择工作区后再启动监听
           if (!isWorkspaceMode) {
             readModelContextSize(); // Cache model→size mapping at startup
-            startWatching(_logWatcherOpts(LOG_FILE));
+            startLogWatch();
             startStatsWorker();
             startStreamingStatusTimer();
             // wire-v2 S8: resume an unfinished migration (see initPostLaunch)
@@ -2006,15 +2019,6 @@ export function getAuthConfig() {
   return authConfig;
 }
 
-// Instance id (`--pid`) + the project's previously-used ids — printed by cli.js in the
-// CLI-mode startup banner so the user can recall which id to reuse with `-c` next time.
-export function getInstanceId() {
-  return INSTANCE_ID;
-}
-export function getKnownInstances() {
-  try { return listInstances(_logDir); } catch { return []; }
-}
-
 // In-process broadcast helper for the `turn_end` SSE event. Two callers:
 //   1. /api/turn-end-notify POST handler (PTY/CLI mode via Stop hook bridge)
 //   2. cli.js runSdkMode → sdkManager.initSdkSession({ onTurnEnd }) (SDK mode —
@@ -2240,28 +2244,12 @@ async function _doStop() {
       new Promise(r => setTimeout(r, 3000)),
     ]);
   } catch { }
-  // 如果用户未做选择，将临时文件转为正式文件
-  if (_resumeState && _resumeState.tempFile) {
-    try {
-      const { tempFile } = _resumeState;
-      if (existsSync(tempFile)) {
-        // 只有非空 temp 文件才 rename 为正式文件，空文件直接删除
-        const sz = statSync(tempFile).size;
-        if (sz > 0) {
-          const newPath = tempFile.replace('_temp.jsonl', '.jsonl');
-          renameSync(tempFile, newPath);
-        } else {
-          unlinkSync(tempFile);
-        }
-      }
-    } catch { }
-  }
-  unwatchAll();
+  stopLogWatch();
   unwatchAllWorkflows();
   unwatchFile(CONTEXT_WINDOW_FILE);
   clients.forEach(client => client.end());
   // Truncate in place (not `clients = []`) so the array reference stays stable across
-  // stop/start cycles — deps.clients and _logWatcherOpts() hold this same reference.
+  // stop/start cycles — deps.clients holds this same reference.
   clients.length = 0;
   if (server) {
     // 销毁所有活跃连接，防止 keep-alive 阻止进程退出
@@ -2401,17 +2389,9 @@ if (!isWorkspaceMode) {
   });
 }
 
-// 进程退出时，将未决的临时文件转为正式文件
-function handleExit() {
-  if (_resumeState && _resumeState.tempFile) {
-    try {
-      if (existsSync(_resumeState.tempFile)) {
-        const newPath = _resumeState.tempFile.replace('_temp.jsonl', '.jsonl');
-        renameSync(_resumeState.tempFile, newPath);
-      }
-    } catch { }
-  }
-}
+// 进程退出钩子（v1 时代负责临时文件转正；v2 无暂存文件，保留空挂点防
+// 未来清理动作无处可挂）
+function handleExit() {}
 // 防御性单次注册：ESM cache 已保证模块顶层只执行一次，但若未来重构把这段
 // 移入函数（cleanupViewer 等）或用 dev hot-reload，缺守卫会导致 handler 堆积
 // → 进程退出时多次调用 stopViewer。globalThis flag 兼容所有 import 路径。

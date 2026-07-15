@@ -58,7 +58,6 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   prefs.logDir = LOG_DIR; // 始终返回当前运行时的日志目录
   // 日志设置出厂默认"继承"：键缺失（从未设置过）才注入；显式关闭持久化的是 null（键存在），不覆盖。
   // 虚拟默认 —— 仅注入回包不落盘（GET 不写文件），直接读 preferences.json 的代码看不到该默认。
-  if (!('resumeAutoChoice' in prefs)) prefs.resumeAutoChoice = 'continue';
   // home-friendly 展示形态：设了 CLAUDE_CONFIG_DIR 的用户看到真实路径，默认用户看到 "~/.claude"
   // join() 而非字符串拼接，避免 Windows 分隔符不匹配导致比较失败
   const _cDir = getClaudeConfigDir();
@@ -168,8 +167,6 @@ function preferencesPost(req, res, parsedUrl, isLocal, deps) {
       delete prefs.prefsByProject; // fork blob 绝不回显（与 GET 一致）
       stripImConfigs(prefs);
       prefs.logDir = LOG_DIR;
-      // 与 GET 一致：回显里补齐 resumeAutoChoice 虚拟默认（已在上方落盘，文件不含该默认值）
-      if (!('resumeAutoChoice' in prefs)) prefs.resumeAutoChoice = 'continue';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(prefs));
     } catch (err) {

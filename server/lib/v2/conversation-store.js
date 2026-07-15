@@ -16,9 +16,10 @@
 // Every stored line carries the initiating seq + rid (plan risk F8): physical
 // append order is completion order, semantic order is seq.
 
+import { readdirSync } from 'node:fs';
 import { isPostClearCheckpoint, isCompactContinuation, normalizeMsgForEquality } from '../session-boundary.js';
 import { fingerprintMsg } from '../interceptor-core.js';
-import { ensureConvDirSync, convEpochPath } from './layout.js';
+import { ensureConvDirSync, convEpochPath, convDir } from './layout.js';
 
 /** FNV-1a over a string — cheap full-content discriminator for exact mode. */
 function fnv1a(s) {
@@ -67,10 +68,29 @@ export class ConversationStore {
       // share prefixes/tails while differing in the middle — append/replace
       // judgements must verify the WHOLE prefix or replay produces a
       // franken-mix. Strings are ~90 chars × wire length: negligible memory.
-      st = { epoch: 0, count: 0, fps: [], dirEnsured: false, everWrote: false };
+      //
+      // epoch is SEEDED from the epoch files already on disk (2026-07-15 fix):
+      // a fresh store on an existing conv dir (process restart / `-c`
+      // continuation onto the same session) must continue in the LATEST epoch.
+      // Starting back at e0 appended newer seqs to an older file, breaking the
+      // global "file order == seq order" the live reader relies on (the
+      // journal seq already reseeds from disk; the epoch did not).
+      st = { epoch: this._seedEpoch(convKey), count: 0, fps: [], dirEnsured: false, everWrote: false };
       this._convs.set(convKey, st);
     }
     return st;
+  }
+
+  /** Highest e<N>.jsonl already on disk for this conv (0 when none/unreadable). */
+  _seedEpoch(convKey) {
+    let max = 0;
+    try {
+      for (const f of readdirSync(convDir(this._paths, convKey))) {
+        const m = f.match(/^e(\d+)\.jsonl$/);
+        if (m) { const n = Number(m[1]); if (n > max) max = n; }
+      }
+    } catch { /* no conv dir yet — brand-new conversation */ }
+    return max;
   }
 
   /** All fps[0..n) pairwise equal between the stored state and the incoming wire. */
@@ -140,10 +160,13 @@ export class ConversationStore {
       boundary = 'replace-tail';
       lines.push({ seq: ids.seq, rid: ids.rid, t: 'ctl', op: 'replace-tail', msg: msgs[len - 1] });
     } else if (len > prev && (prev === 0 || ConversationStore._prefixEqual(prevFps, fpsIn, prev))) {
-      if (prev === 0 && st.epoch === 0 && st.count === 0 && !st.everWrote) {
-        // First event of a brand-new conversation → snapshot(first), so every
-        // epoch file is self-contained even when it starts mid-wire (teammate
-        // logs, process restart onto an existing session dir).
+      if (prev === 0 && st.count === 0 && !st.everWrote) {
+        // First event of a FRESH STORE → snapshot(first), so every epoch file
+        // is self-contained even when it starts mid-wire (teammate logs,
+        // process restart onto an existing session dir). No epoch===0 guard:
+        // a store seeded onto an existing epoch (restart continuation) must
+        // snapshot too — falling through to `append` would write the full
+        // wire as a tail onto the previous process's state (franken-mix).
         evt = 'snapshot';
         lines.push({ seq: ids.seq, rid: ids.rid, t: 'snapshot', msgs, reason: 'first' });
       } else {

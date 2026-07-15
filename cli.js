@@ -222,6 +222,9 @@ function removeCliJsInjection() {
 
 async function runProxyCommand(args) {
   try {
+    // P2 detection channel ①（shell-hook 形态）：`claude -c` 经 hook 变成
+    // `ccv run -- claude --ccv-internal -c …`，在 proxy/server 模块加载前打标。
+    markContinueEnv(args);
     // Dynamic import to avoid side effects when just installing
     const { startProxy } = await import('./server/proxy.js');
     const proxyPort = await startProxy();
@@ -306,16 +309,27 @@ async function runProxyCommand(args) {
 
 // ensureHooks() extracted to server/lib/ensure-hooks.js (shared with electron/tab-worker.js)
 
-// Print the `--pid` instance id + this project's previously-used ids in the startup banner,
-// so the user can recall which id to reuse (with `-c`) next time. No-op without `--pid`.
-function printInstanceBanner(serverMod) {
+// P2 (-c migration guidance, detection channel ①): the interceptor resolves
+// CCV_CLAUDE_CONTINUE at prompt time, so setting it before the server module
+// loads is sufficient — claude's own -c semantics are untouched.
+function markContinueEnv(claudeArgs) {
+  if (Array.isArray(claudeArgs) && claudeArgs.some((a) => a === '-c' || a === '--continue' || a === '-r' || a === '--resume')) {
+    process.env.CCV_CLAUDE_CONTINUE = '1';
+  }
+}
+
+// 1.7.0: legacy v1 logs still present → one localized banner line pointing at
+// `ccv convert` (headless users never see the web migrate prompt).
+async function printMigrationBanner() {
   try {
-    const id = serverMod.getInstanceId && serverMod.getInstanceId();
-    if (!id) return;
-    console.log(`  ${t('cli.instanceId', { id })}`);
-    const known = (serverMod.getKnownInstances && serverMod.getKnownInstances()) || [];
-    const others = known.filter((x) => x !== id);
-    if (others.length) console.log(`  ${t('cli.instanceHistory', { ids: others.join(', ') })}`);
+    const { LOG_DIR } = await import('./findcc.js');
+    const { listConvertibleProjects } = await import('./server/lib/v2/convert.js');
+    const { migrationStatus } = await import('./server/lib/v2/migrate-prompt.js');
+    const pending = listConvertibleProjects(LOG_DIR)
+      .filter((p) => migrationStatus(LOG_DIR, p).pending);
+    if (pending.length > 0) {
+      console.log(`  ${t('cli.v1LogsFound', { count: pending.length })}`);
+    }
   } catch { /* banner is best-effort */ }
 }
 
@@ -440,7 +454,7 @@ async function runCliMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
-  printInstanceBanner(serverMod);
+  await printMigrationBanner();
 
   // 5. 注册退出处理（hardened：watchdog 5s 强退 + 连按 Ctrl+C 立退，
   //    防 Windows 上 ConPTY kill / IM teardown 挂住导致"Ctrl+C 完全无反应"）
@@ -623,7 +637,7 @@ async function runSdkMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
-  printInstanceBanner(serverMod);
+  await printMigrationBanner();
 
   // 注册退出处理（hardened，与 PTY 模式同款三层防御）
   const cleanup = createHardenedCleanup({
@@ -719,29 +733,6 @@ if (usePwdIdx !== -1) {
     if (val.length > 0) process.env.CCV_PASSWORD = val;
   }
   args.splice(usePwdIdx, 1);
-}
-
-// Extract --pid[=<name>] / --pid <name> — instance id for per-instance session-pin isolation.
-// NB: "pid" here is an instance *id* LABEL (user-chosen, e.g. alpha/beta), NOT an OS process id —
-// it only keys the session-pin file `.session-pin.<id>.json`; unrelated to process.pid.
-// ccv-owned (NEVER forwarded to claude — an unknown --pid would otherwise crash claude): sets
-// CCV_INSTANCE_ID and splices out. Sanitized to a filesystem-safe token (it becomes part of a
-// `.session-pin.<id>.json` filename → guard against path traversal / invalid names).
-const pidIdx = args.findIndex((a) => a === '--pid' || a.startsWith('--pid='));
-if (pidIdx !== -1) {
-  const arg = args[pidIdx];
-  let rawVal;
-  if (arg.startsWith('--pid=')) {
-    rawVal = arg.slice('--pid='.length);
-    args.splice(pidIdx, 1);
-  } else {
-    rawVal = args[pidIdx + 1];
-    if (rawVal && !rawVal.startsWith('-')) args.splice(pidIdx, 2);
-    else { console.error(t('cli.pidInvalid')); process.exit(1); }
-  }
-  const sanitized = (rawVal || '').replace(/[^a-zA-Z0-9_\-.]/g, '_');
-  if (!sanitized) { console.error(t('cli.pidInvalid')); process.exit(1); }
-  process.env.CCV_INSTANCE_ID = sanitized;
 }
 
 // Extract --im <platformId> — 启动一个独立常驻 IM worker：工作目录 IM_<id>/、绑 127.0.0.1、
@@ -987,6 +978,7 @@ if (imPlatform) {
   // SDK 模式（显式 -SDK 切换）
   const claudeArgs = args.filter(a => a !== '-SDK' && a !== '--sdk')
     .map(a => a === '--d' ? '--dangerously-skip-permissions' : a === '--ad' ? '--allow-dangerously-skip-permissions' : a);
+  markContinueEnv(claudeArgs);
   runSdkMode(claudeArgs, process.cwd(), noOpen).catch(err => {
     console.error('SDK mode error:', err);
     process.exit(1);
@@ -994,6 +986,7 @@ if (imPlatform) {
 } else {
   // PTY 模式（默认）
   const claudeArgs = args.map(a => a === '--d' ? '--dangerously-skip-permissions' : a === '--ad' ? '--allow-dangerously-skip-permissions' : a);
+  markContinueEnv(claudeArgs);
   runCliMode(claudeArgs, process.cwd(), noOpen).catch(err => {
     console.error('CLI mode error:', err);
     process.exit(1);
