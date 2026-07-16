@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.2 (2026-07-16)
 
 ### Empty "—" sessions: root cause + read-side discard everywhere
 
