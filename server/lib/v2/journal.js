@@ -8,7 +8,7 @@
 // The reader folds the two phases by seq; a req without a done is in-flight
 // (or the process died) — that IS the v1 placeholder, minus the duplicated body.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { iterateJsonlLines } from './jsonl-read.js';
 
 export class Journal {
   /**
@@ -29,11 +29,15 @@ export class Journal {
 
   static _maxSeqIn(journalPath) {
     try {
-      if (!existsSync(journalPath)) return 0;
       let max = 0;
-      // Regex scan instead of per-line JSON.parse: tolerant of a truncated
-      // tail line and ~10x cheaper on large journals.
-      for (const m of readFileSync(journalPath, 'utf-8').matchAll(/"seq":\s*(\d+)/g)) {
+      // Per-line regex instead of JSON.parse: tolerant of a truncated tail
+      // line and ~10x cheaper on large journals. Streamed line-by-line
+      // (issue #129): a whole-file read past Node's string cap would land in
+      // the catch below and silently RESET seq to 0 — colliding with every
+      // existing line, which the reader folds into corrupted sessions.
+      for (const line of iterateJsonlLines(journalPath)) {
+        const m = /"seq":\s*(\d+)/.exec(line);
+        if (!m) continue;
         const n = Number(m[1]);
         if (n > max) max = n;
       }

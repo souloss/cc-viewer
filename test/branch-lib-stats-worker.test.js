@@ -184,7 +184,10 @@ describe('stats-worker 分支: journal 解析 model 与 usage', () => {
     dispatch({ type: 'init', logDir: workRoot, projectName });
     const stats = readStats(workRoot, projectName);
     assert.equal(stats.summary.requestCount, 1);
-    assert.equal(stats.summary.fileCount, 2);
+    // sid-2 (empty journal, no main, no leader) is DISCARDABLE (2026-07-16):
+    // probe/torn orphans never count toward stats.
+    assert.equal(stats.summary.fileCount, 1);
+    assert.equal(stats.files['sessions/sid-2'], undefined, 'discardable session skipped');
   });
 });
 

@@ -9,6 +9,8 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from '
 import { join, basename } from 'node:path';
 import { readJsonlTolerant, listSessionIds } from './v2/replay.js';
 import { dirSizeSync } from './v2/layout.js';
+import { isDiscardableSession } from './v2/session-select.js';
+import { reportSwallowed } from './error-report.js';
 import {
   INTER_SESSION_TYPES, isSystemText, extractUserTexts, isSuggestionMode,
   collectPromptsFromEvents, sortEpochFiles,
@@ -23,7 +25,11 @@ export { INTER_SESSION_TYPES, isSystemText, extractUserTexts };
 // v9: v2 session-dir units (files map keyed `sessions/<sid>`), journal-based counts
 // v10: per-session `size` = recursive session-dir bytes (was journal-only);
 //      `journalSize` carries the incremental-cache key
-const STATS_VERSION = 10;
+// v11: discardable sessions (quota-probe orphans) excluded — the bump
+//      invalidates pre-discard caches so their probe units can't be reused
+//      back into filesStats, which lets the discard check sit AFTER the
+//      cache-reuse branch (cache hits skip the journal head scan entirely)
+const STATS_VERSION = 11;
 
 /**
  * Parse one v2 session directory into the same stats shape parseJsonlFile
@@ -199,7 +205,20 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
     }
 
     const sessionDir = join(projectDir, 'sessions', sid);
-    const parsed = parseSessionDir(sessionDir);
+    // Discardable sessions (quota-probe orphans — no main/teammate req, no
+    // leader) never count toward stats. Runs only on cache misses: v11+
+    // caches are written exclusively by post-discard code, so a cache hit can
+    // never resurrect a probe unit (the v10→v11 bump invalidated older ones).
+    if (isDiscardableSession(sessionDir)) continue;
+    let parsed;
+    try {
+      parsed = parseSessionDir(sessionDir);
+    } catch (err) {
+      // One unreadable session must not kill the whole worker (issue #129) —
+      // skip its stats and keep counting the healthy ones.
+      reportSwallowed('stats-worker.session-parse-failed', new Error(`${sid}: ${err.message}`));
+      continue;
+    }
     filesStats[unitKey] = {
       models: parsed.models,
       summary: parsed.summary,

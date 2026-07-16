@@ -232,6 +232,8 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 
 - **reader 版本门禁（任何未来格式演进的前置条款）**：写侧在 meta.json 与 journal 哨兵首行双处盖章 `wireFormat`（常量单一所有者 `layout.js WIRE_FORMAT_VERSION`）。读侧（`readSession`）必须校验两处（哨兵优先，逐文件自描述），版本未知/更高 → 整会话**拒读**：`readSession` 返回 `unsupported:true` + 空折叠，adapter 拒 yield + reportSwallowed，列表跳过该会话，verify 将其计入 `unsupportedSessions` 并使报告 FAILED（金门不允许带覆盖缺口通过）。版本字段缺失（创建撕裂）按当前版本容忍。理由：`isV2SessionDir` 只是存在性探针，若无本条款，未来 wireFormat:3 目录会被旧读路径当 v2 静默误读渲染垃圾。任何非增量格式变更必须先递增 `WIRE_FORMAT_VERSION`，且新 reader 必须先于（或随同）新 writer 发布。
 - journal 尾行截断：JSON.parse 失败即丢弃该行（pendingTail 思路，v1 同款）。
+- **可丢弃会话（2026-07-16）**：Claude Code 的配额探针（`max_tokens:1`、单条 `'quota'` 消息、一次性 session_id，启动/派生 agent 团队时触发）会按 §8 铸造只含一条 sub 请求的孤儿会话目录。读侧统一判据 `isDiscardableSession`（session-select.js）：**meta.leader 缺失且 journal 无 kind 'main'/'teammate' req 行** → 该会话被一切读取面舍弃（日志列表 listV2Logs、IM latest 选取、workspace sessionCount/自动 -c、stats、live-feed attach、teammate 归属的 leader 候选——最后一项顺带修复探针目录在无主 teammate tie-break 中偷走真实 leader 流量的 bug）。直接寻址（validateLogPath）不拦截（软删除依赖）；判据只读、自愈（目录一旦获得首个 main req 即在下一轮扫描/轮询现身）。写侧不阻止（无法预知某 sid 后续是否有真实流量）。
+- **超大文件流式读取（2026-07-16，issue #129）**：所有会话 JSONL（journal/conv/responses）经 `jsonl-read.js iterateJsonlLines` 分块读取、字节级找 `\n` 后逐行解码——整文件 `readFileSync` 会在 Node 字符串上限（~512MiB）抛 `ERR_STRING_TOO_LONG` 并使启动扫描崩溃循环。单行达到上限 → 跳过该行 + reportSwallowed（每文件一次）。会话级兜底：`iterateSessionItems` 捕获 `readSession` 任意异常 → 该会话降级为不渲染（reportSwallowed），扫描与其余会话存活；stats-worker 同样按会话隔离。
 - journal 行引用的 blob/conv 行暂缺（写序窗口内）：该 entry 暂标不完整，watcher 下一 tick 重试；持续缺失（孤儿引用，理论上仅目录被外部篡改）→ 跳过 + reportSwallowed。
 - conv 文件存在而 journal 无对应行（崩溃孤儿）：物化器忽略无 journal 佩戴的 conv 行。
 - 两相折叠：同 seq 多条 done（不应发生）取首条；req 缺失而 done 存在（不应发生）丢弃 done。

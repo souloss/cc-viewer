@@ -108,7 +108,15 @@ describe('workspace-registry', () => {
     mkdirSync(join(projectDir, 'sessions', 'sid-empty'), { recursive: true });
     writeFileSync(join(projectDir, `${entry.projectName}_a.jsonl`), '{"a":1}\n');
     writeFileSync(join(projectDir, `${entry.projectName}_temp.jsonl`), '{"t":1}\n');
-    writeFileSync(join(projectDir, 'sessions', 'sid-1', 'journal.jsonl'), '{"ph":"meta","wireFormat":2}\n');
+    writeFileSync(join(projectDir, 'sessions', 'sid-1', 'journal.jsonl'),
+      '{"ph":"meta","wireFormat":2}\n'
+      + '{"ph":"req","seq":1,"rid":"r1","kind":"main","ts":"2026-07-16T00:00:00.000Z","url":"u"}\n');
+    // discardable probe dir (sub-only, no leader): must count for NOTHING —
+    // a probe-only workspace would otherwise auto -c into a void (2026-07-16)
+    mkdirSync(join(projectDir, 'sessions', 'sid-probe'), { recursive: true });
+    writeFileSync(join(projectDir, 'sessions', 'sid-probe', 'journal.jsonl'),
+      '{"ph":"meta","wireFormat":2}\n'
+      + '{"ph":"req","seq":1,"rid":"rq","kind":"sub","ts":"2026-07-16T00:00:01.000Z","url":"u"}\n');
     // conv/blob content beyond the journal — totalSize must count the FOLDER
     // (journal-only undercounts ~12x on real sessions).
     mkdirSync(join(projectDir, 'sessions', 'sid-1', 'conversations', 'main'), { recursive: true });

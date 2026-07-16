@@ -13,7 +13,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, appendFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { tmpdir } from 'node:os';
@@ -126,7 +126,7 @@ describe('stats-worker v2: session parsing via init', () => {
     assert.ok(messages.some(m => m.type === 'init-done'));
 
     const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
-    assert.equal(stats._v, 10);
+    assert.equal(stats._v, 11);
     // v10: per-unit size = recursive session-dir bytes; journalSize = cache key.
     const sizedUnit = Object.values(stats.files)[0];
     assert.ok(sizedUnit.size >= sizedUnit.journalSize, 'folder size includes journal + conv/blob files');
@@ -378,5 +378,79 @@ describe('stats-worker v2: V2Writer round-trip format pin', () => {
     // Task C: the writer names the dir `<ts>_<uuid>`; the stats unit key follows.
     const dirName = resolveSessionDirName(join(logDir, 'proj'), SID) || SID;
     assert.deepEqual(stats.files[`sessions/${dirName}`].preview, ['real writer prompt']);
+  });
+});
+
+// ─── per-session containment (issue #129) ─────────────────────────────────────
+describe('stats-worker per-session containment', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
+
+  it('one unreadable session is skipped; healthy siblings still counted', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-good', {
+      requests: [mainReq(1, 1, { model: 'mA', usage: { in: 100, out: 50 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('healthy prompt')] }],
+    });
+    // Corrupt sibling: journal.jsonl is a DIRECTORY — reading it throws
+    // (EISDIR on POSIX), the crash class the per-session catch contains.
+    const bad = join(projectDir, 'sessions', 'sid-bad');
+    mkdirSync(join(bad, 'journal.jsonl'), { recursive: true });
+    writeFileSync(join(bad, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'sid-bad', pid: 1, startTs: '2026-07-14T00:00:00.000Z' }));
+
+    const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.ok(messages.some(m => m.type === 'init-done'), 'worker completes instead of dying');
+
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.ok(stats.files['sessions/sid-good'], 'healthy session counted');
+    assert.equal(stats.files['sessions/sid-good'].preview[0], 'healthy prompt');
+    assert.equal(stats.files['sessions/sid-bad'], undefined, 'broken session skipped, not crashed on');
+    assert.equal(stats.summary.input_tokens, 100);
+  });
+});
+
+// ─── discardable sessions vs the incremental cache (2026-07-16) ───────────────
+describe('stats-worker discardable-session cache interplay', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
+
+  it('a probe unit in a stale pre-v11 cache is not resurrected (version bump forces re-parse)', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-real', {
+      requests: [mainReq(1, 1, { model: 'mA', usage: { in: 10, out: 5 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('real prompt')] }],
+    });
+    // probe orphan (sub-only, no leader)
+    const probeDir = join(projectDir, 'sessions', 'sid-probe');
+    mkdirSync(probeDir, { recursive: true });
+    writeFileSync(join(probeDir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'sid-probe', pid: 1, startTs: '2026-07-16T00:00:00.000Z' }));
+    writeFileSync(join(probeDir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n'
+      + JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', ts: '2026-07-16T00:00:00.000Z', url: 'u' }) + '\n');
+    // Stale PRE-upgrade cache (v10) containing the probe unit with MATCHING
+    // journal size+mtime — without the version bump the reuse branch would
+    // copy it straight back into filesStats.
+    const st = statSync(join(probeDir, 'journal.jsonl'));
+    writeFileSync(join(projectDir, 'proj.json'), JSON.stringify({
+      _v: 10,
+      files: {
+        'sessions/sid-probe': {
+          models: {}, summary: { requestCount: 1 }, preview: [],
+          size: 1, journalSize: st.size, lastModified: st.mtime.toISOString(),
+        },
+      },
+      summary: { fileCount: 1, requestCount: 1 },
+      models: {},
+    }));
+
+    const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.ok(messages.some(m => m.type === 'init-done'));
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats._v, 11);
+    assert.equal(stats.files['sessions/sid-probe'], undefined, 'stale cached probe unit dropped');
+    assert.ok(stats.files['sessions/sid-real'], 'real session counted');
+    assert.equal(stats.summary.fileCount, 1);
   });
 });

@@ -75,9 +75,13 @@ const SCAN_CHUNK = 64 * 1024;
  * @param {string} dir - absolute session dir
  * @param {number} budget - max bytes to read before giving up
  * @param {(line:string) => boolean} onLine
+ * @param {boolean} [ioErrorResult=false] - returned when the journal EXISTS
+ *   but reading it throws (transient lock / fd exhaustion). The cold-load
+ *   scanners keep the false default ("not activated"); the discard predicate
+ *   passes true so an I/O hiccup can never hide a REAL session.
  * @returns {boolean}
  */
-function scanJournal(dir, budget, onLine) {
+function scanJournal(dir, budget, onLine, ioErrorResult = false) {
   const journal = join(dir, 'journal.jsonl');
   if (!existsSync(journal)) return false;
   let fd;
@@ -105,7 +109,7 @@ function scanJournal(dir, budget, onLine) {
     const last = (carry + decoder.end()).trim();
     return !!(last && onLine(last));
   } catch {
-    return false;
+    return ioErrorResult;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
@@ -165,6 +169,69 @@ export function sessionHasCompletedMainTurn(dir) {
     }
     return false;
   });
+}
+
+/**
+ * Does this session dir have at least one req of kind 'main' OR 'teammate'?
+ * The positive half of the discardable-session predicate. Budgeted with the
+ * WIDE budget (not MAIN_REQ_SCAN_BUDGET): journal req lines run ~1.1-1.3KB
+ * (headers + params), and time-driven heartbeat/countTokens lines can pile up
+ * before a real session's first main — a 256KB budget could give up early and
+ * misjudge a REAL session as discardable. Sessions that have a main still
+ * early-exit at its line; only genuinely main-less journals pay the budget.
+ * @param {string} dir - absolute session dir
+ * @returns {boolean}
+ */
+export function sessionHasMainOrTeammateReq(dir) {
+  // ioErrorResult=true: a transient read error must KEEP the session (treat
+  // as main-bearing) — hiding a real session is the worse failure direction;
+  // a missing journal still returns false (discard is correct there).
+  return scanJournal(dir, COMPLETED_TURN_SCAN_BUDGET, (line) => {
+    if (!line.includes('"ph":"req"')) return false;
+    if (!line.includes('"kind":"main"') && !line.includes('"kind":"teammate"')) return false;
+    try {
+      const o = JSON.parse(line);
+      return !!(o && o.ph === 'req' && (o.kind === 'main' || o.kind === 'teammate'));
+    } catch { return false; } // torn line — keep scanning
+  }, true);
+}
+
+/**
+ * Discardable-session predicate (2026-07-16): a session dir that must be
+ * DISCARDED by every read surface — never listed, counted, followed, or used
+ * as a candidate in any logic. These are orphan dirs minted by Claude Code's
+ * quota probes (max_tokens:1, one `'quota'` user message, a throwaway
+ * session_id per probe — fired at launches and agent-team spawns), plus any
+ * torn/empty dir with no renderable identity.
+ *
+ * discard ⟺ meta.leader ABSENT (not a teammate session)
+ *           AND no journal req line of kind 'main' or 'teammate'
+ *
+ * The 'teammate' kind clause is the safety net for a torn meta.json. Every
+ * real session carries a main req at/near the journal head (verified across
+ * the full real dataset: 18/18 main-less dirs were single quota probes), so a
+ * kept session early-exits its scan cheaply. Read-side only and self-healing:
+ * the moment a dir gains its first main req, the predicate flips and every
+ * surface picks it up on its next scan/poll.
+ *
+ * KEEP IN SYNC: adapter.js listV2Sessions pre-computes the same verdict
+ * inline (hasMainOrTeammate inside its existing full journal fold — unbounded,
+ * vs this predicate's 8MB budget; intentional asymmetry) and then CONFIRMS a
+ * discard through this predicate so the error→keep direction is shared.
+ * Change the rule here and there together.
+ *
+ * @param {string} dir - absolute session dir
+ * @param {object|null} [meta] - pre-parsed meta.json (avoids a re-read);
+ *   omitted → read here; unreadable → treated as leaderless (journal decides)
+ * @returns {boolean} true = discard everywhere
+ */
+export function isDiscardableSession(dir, meta) {
+  let m = meta;
+  if (m === undefined) {
+    try { m = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf-8')); } catch { m = null; }
+  }
+  if (m && m.leader) return false;
+  return !sessionHasMainOrTeammateReq(dir);
 }
 
 /**

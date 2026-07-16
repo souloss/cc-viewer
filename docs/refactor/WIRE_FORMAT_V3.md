@@ -56,6 +56,14 @@ Preflight/Plan classification), plus single-line `v3_conv`/`v3_resp` frames;
 the full-entry `data:` broadcast is suppressed (kv_cache_content /
 context_window side events unchanged — cold values rebuild from the newest
 ≤3 completed mainAgent rows, mirroring the legacy scan-ring fallback depth).
+Live rows MUST carry the SAME journal-truth fields as cold fold rows —
+`conv`/`evt` (the assembler inputs: `buildEntry` is `if (row.conv)`-gated,
+a conv-less row rebuilds with empty messages), `kind`, and kind-derived
+`mainAgent` (`kind==='main' && !leader`, never body re-derivation — a
+countTokens probe wears the main body shape). Threaded from the journal req
+line via the synthesizer item (adapter `_emit`) into live-feed `_rowFrom`;
+pinned by the live/cold row-parity tests in `test/v2-live-feed.test.js`
+(2026-07-16 live chat-render regression fix).
 `server_config` additionally carries `build` (server version): a tab whose
 bundle predates a server upgrade reloads itself on reconnect mismatch.
 

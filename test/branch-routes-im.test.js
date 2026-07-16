@@ -201,6 +201,28 @@ describe('server/routes/im.js 分支补齐', { concurrency: false }, () => {
     assert.equal(r.json().project, 'IM_discord');
     assert.equal(r.json().latest, 'IM_discord/IM_discord_2026-01-01.jsonl', 'findRecentLog 命中 → latest 设值');
   });
+  it('GET logs：v2 会话选取跳过 discardable 探针（更新的探针不得抢占 latest）', async () => {
+    // real v2 session (older) + quota-probe orphan (NEWER startTs): the pick
+    // must land on the real session, not the probe (2026-07-16 discard gate).
+    const sroot = join(tmpDir, 'IM_dingtalk', 'sessions');
+    const realDir = join(sroot, '20260716000001_aaaa1111-2222-4333-8444-000000000001');
+    mkdirSync(join(realDir, 'conversations', 'main'), { recursive: true });
+    writeFileSync(join(realDir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'aaaa1111-2222-4333-8444-000000000001', startTs: '2026-07-16T00:00:01.000Z' }));
+    writeFileSync(join(realDir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n'
+      + JSON.stringify({ ph: 'req', seq: 1, rid: 'r1', kind: 'main', ts: '2026-07-16T00:00:01.000Z', url: 'u' }) + '\n');
+    const probeDir = join(sroot, '20260716000002_bbbb2222-3333-4444-8555-000000000002');
+    mkdirSync(probeDir, { recursive: true });
+    writeFileSync(join(probeDir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'bbbb2222-3333-4444-8555-000000000002', startTs: '2026-07-16T00:00:02.000Z' }));
+    writeFileSync(join(probeDir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n'
+      + JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', ts: '2026-07-16T00:00:02.000Z', url: 'u' }) + '\n');
+
+    const route = imRoutes.find((r) => r.predicate('/api/im/dingtalk/logs', 'GET'));
+    const r = await call(route, { pathname: '/api/im/dingtalk/logs', deps: { im: {} } });
+    assert.equal(r.status, 200);
+    assert.ok(r.json().latest && r.json().latest.includes('aaaa1111'), `latest must be the real session, got ${r.json().latest}`);
+  });
   it('GET logs：惰性调用 deps.ensureImWatch(platformId)（登记日志目录监听）', async () => {
     const route = imRoutes.find((r) => r.predicate('/api/im/discord/logs', 'GET'));
     const calls = [];

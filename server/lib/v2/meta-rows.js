@@ -18,6 +18,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readJsonlTolerant } from './replay.js';
+import { iterateJsonlLines } from './jsonl-read.js';
 import { iterateV2Items, findTeammateSessionDirs } from './adapter.js';
 import { SingleFlight } from './singleflight.js';
 import { reportSwallowed } from '../error-report.js';
@@ -246,13 +247,11 @@ export async function readV2NativeCold(sessionDir, rows) {
       try { files = readdirSync(join(convRoot, key)).filter((f) => /^e\d+\.jsonl$/.test(f)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])); } catch { continue; }
       const raws = [];
       for (const f of files) {
-        let text = '';
-        try { text = readFileSync(join(convRoot, key, f), 'utf-8'); } catch { continue; }
-        for (const line of text.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed) raws.push(trimmed);
-        }
-        await yieldLoop(); // one yield per conv file read
+        // streamed line-by-line (issue #129): a conv epoch past Node's string
+        // cap must degrade to skipped lines, not lose the whole file silently
+        try { for (const trimmed of iterateJsonlLines(join(convRoot, key, f))) raws.push(trimmed); }
+        catch (err) { reportSwallowed('v2-native.conv-read-failed', err); }
+        await yieldLoop(); // one yield per conv file read (error path included)
       }
       // last snapshot at-or-before the window start for this session
       let start = 0;
@@ -271,17 +270,15 @@ export async function readV2NativeCold(sessionDir, rows) {
       // boundaries: the browser paints and the byte meter ticks between them.
       pushChunked(convPayloads, windowRaws, (linesJson) => `{"sessionId":${JSON.stringify(sessionId)},"channel":${JSON.stringify(key)},"lines":[${linesJson}]}`);
     }
-    // responses: exactly the window member seqs
-    let respText = '';
-    try { respText = readFileSync(join(dir, 'responses.jsonl'), 'utf-8'); } catch { /* none yet */ }
-    await yieldLoop();
+    // responses: exactly the window member seqs — streamed (issue #129)
     const respRaws = [];
-    for (const line of respText.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const m = /"seq":\s*(\d+)/.exec(trimmed);
-      if (m && memberSeqs && memberSeqs.has(Number(m[1]))) respRaws.push(trimmed);
-    }
+    try {
+      for (const trimmed of iterateJsonlLines(join(dir, 'responses.jsonl'))) {
+        const m = /"seq":\s*(\d+)/.exec(trimmed);
+        if (m && memberSeqs && memberSeqs.has(Number(m[1]))) respRaws.push(trimmed);
+      }
+    } catch (err) { reportSwallowed('v2-native.responses-read-failed', err); }
+    await yieldLoop();
     pushChunked(respPayloads, respRaws, (linesJson) => `{"sessionId":${JSON.stringify(sessionId)},"lines":[${linesJson}]}`);
   }
   return { convPayloads, respPayloads };
@@ -315,7 +312,7 @@ function pushChunked(out, raws, wrap) {
 async function attachBodyFields(sessionDir, rows) {
   const rowByKey = new Map(rows.map((r) => [itemKey(r.sessionId, r.seq), r]));
   const materialize = (sessionId, seq) => rowByKey.has(itemKey(sessionId, seq));
-  let pending = null;      // { row, entry } awaiting its nextReq for classify
+  let pending = null;      // { row, entry, isMain } awaiting its nextReq for classify
   let prevMainFull = null; // previous mainAgent full-body entry (cacheLoss)
   let n = 0;
   const finish = (slot, nextEntry) => {
@@ -329,8 +326,12 @@ async function attachBodyFields(sessionDir, rows) {
       reportSwallowed('v2-meta.row-classify', err);
       row.typeTag = null; // journal-derived kind still renders
     }
-    // authoritative synthesis-level markers (parity with the legacy list)
-    row.mainAgent = entry.mainAgent === true;
+    // Authoritative synthesis-level markers. mainAgent stays KIND-derived
+    // (item.isMain = journal kind==='main' && !leader) like foldDir and the
+    // live rows — entry.mainAgent re-derives from the blob-backfilled body
+    // and mis-tags a main-shaped countTokens probe as true, which would merge
+    // its turn into the chat after a cold reload (2026-07-16 review P1).
+    row.mainAgent = slot.isMain === true;
     if (entry.teammate) row.teammate = entry.teammate;
     if (entry.body && entry.body.model) row.model = entry.body.model;
     if (row.mainAgent) {
@@ -353,7 +354,7 @@ async function attachBodyFields(sessionDir, rows) {
       entry = { ...entry, body: { ...entry.body, messages: item.stateRef } };
     }
     if (pending) finish(pending, entry);
-    pending = { row, entry };
+    pending = { row, entry, isMain: item.isMain };
     if (++n % 20 === 0) await new Promise((resolve) => setImmediate(resolve));
   }
   if (pending) finish(pending, null);

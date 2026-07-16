@@ -14,14 +14,14 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { messageFingerprint, normalizeMsgForEquality } from '../session-boundary.js';
 import { isSupportedWireFormat } from './layout.js';
+import { iterateJsonlLines } from './jsonl-read.js';
 
-/** Parse a JSONL file tolerating a truncated tail line (spec §14). */
+/** Parse a JSONL file tolerating a truncated tail line (spec §14). Streams
+ *  line-by-line (issue #129): a file past Node's ~512MiB string cap must not
+ *  throw ERR_STRING_TOO_LONG out of the whole read path. */
 export function readJsonlTolerant(path) {
-  if (!existsSync(path)) return [];
   const out = [];
-  for (const line of readFileSync(path, 'utf-8').split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
+  for (const t of iterateJsonlLines(path)) {
     try { out.push(JSON.parse(t)); } catch { /* truncated tail — drop */ }
   }
   return out;

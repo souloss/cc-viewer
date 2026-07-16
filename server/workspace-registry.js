@@ -4,6 +4,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { renameSyncWithRetry } from './lib/file-api.js';
 import { withFileLockAsync } from './lib/async-file-lock.js';
 import { dirSizeSync } from './lib/v2/layout.js';
+import { isDiscardableSession } from './lib/v2/session-select.js';
 import { join, basename, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { LOG_DIR } from '../findcc.js';
@@ -117,6 +118,10 @@ export async function getWorkspaces() {
         const sessionDir = join(logDir, 'sessions', e.name);
         try {
           await stat(join(sessionDir, 'journal.jsonl'));
+          // Quota-probe orphans must not count: logCount>0 drives the
+          // auto -c heuristic, and a probe-only workspace would auto-continue
+          // into a conversation that does not exist (2026-07-16).
+          if (isDiscardableSession(sessionDir)) continue;
           // Folder size, not journal size — conv/blob/response files carry
           // most of a session's bytes (journal alone undercounts ~12x).
           totalSize += dirSizeSync(sessionDir);

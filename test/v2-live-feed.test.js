@@ -19,7 +19,9 @@ import { join } from 'node:path';
 import { V2Writer } from '../server/lib/v2/v2-writer.js';
 import { V2LiveFeed } from '../server/lib/v2/live-feed.js';
 import { iterateV2RawEntries } from '../server/lib/v2/adapter.js';
+import { readV2RequestsMeta } from '../server/lib/v2/meta-rows.js';
 import { reconstructEntries } from '../server/lib/delta-reconstructor.js';
+import { createV3Assembler } from '../src/utils/v3Assembler.js';
 import { _resetForTest } from '../server/lib/error-report.js';
 import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 
@@ -330,5 +332,250 @@ describe('V2LiveFeed across a writer restart continuation', () => {
     for (let i = 0; i < cold.length; i++) {
       assert.deepEqual(live[i].body.messages, cold[i].body.messages, `entry ${i} parity across the restart`);
     }
+  });
+});
+
+// ─── wire v3 live rows — chat live-render regression (2026-07-16) ─────────────
+// The live row builder (_rowFrom) omitted conv/evt, so the client assembler's
+// `if (row.conv)` gate rebuilt every live entry with EMPTY messages: the chat
+// vanished at stream end until a cold reload. These tests run the feed in
+// wireV3 mode (previously ZERO v3-mode live-feed coverage) and replay its
+// emitted frames through the REAL client assembler.
+
+/** Parse `event: <name>\ndata: <json>\n\n` frames in write order. */
+function namedFrames(client) {
+  const out = [];
+  for (const w of client.writes) {
+    if (!w.startsWith('event: ')) continue;
+    const nl = w.indexOf('\n');
+    const event = w.slice(7, nl);
+    const dataStart = w.indexOf('data: ', nl) + 6;
+    out.push({ event, data: JSON.parse(w.slice(dataStart, w.indexOf('\n\n', dataStart))) });
+  }
+  return out;
+}
+
+describe('wire v3 live rows → client assembler', () => {
+  it('rows carry conv/evt/kind/mainAgent (journal truth) and assemble to non-empty messages', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+
+    const w = newWriter();
+    const t1 = [textMsg('user', 'turn 1')];
+    const t2 = [...t1, textMsg('assistant', 'r1'), textMsg('user', 'turn 2')];
+    fire(w, mainEntry(t1));
+    fire(w, mainEntry(t2));
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+
+    const frames = namedFrames(client);
+    const rows = frames.filter((f) => f.event === 'v2_requests_delta').map((f) => f.data);
+    const completed = rows.filter((r) => !r.inProgress);
+    assert.equal(completed.length, 2);
+    assert.equal(completed[0].conv, 'main', 'live row names its conv channel (the regression)');
+    assert.equal(completed[0].evt, 'snapshot', 'first conversation event is a snapshot');
+    assert.equal(completed[1].evt, 'append');
+    for (const r of completed) {
+      assert.equal(r.kind, 'main');
+      assert.equal(r.mainAgent, true);
+    }
+
+    // End-to-end: replay the emitted frames through the REAL client assembler
+    // in write order (mirrors _applyV3Conv/_applyV3Resp/_applyV3Delta).
+    const asm = createV3Assembler();
+    const built = [];
+    for (const f of frames) {
+      if (f.event === 'v3_conv') asm.addConvLines(f.data.sessionId, f.data.channel, f.data.line);
+      else if (f.event === 'v3_resp') asm.addRespLines(f.data.sessionId, f.data.line);
+      else if (f.event === 'v2_requests_delta') {
+        const e = asm.buildEntry(f.data);
+        if (!f.data.inProgress) built.push(e);
+      }
+    }
+    assert.equal(built.length, 2);
+    const cold = reconstructEntries([...iterateV2RawEntries(sessionDirOf(SID))].map((r) => JSON.parse(r)));
+    for (let i = 0; i < built.length; i++) {
+      assert.ok(built[i].body.messages.length > 0, `entry ${i}: live-assembled messages must not be empty`);
+      assert.deepEqual(built[i].body.messages, cold[i].body.messages, `entry ${i}: parity with cold reconstruction`);
+      assert.ok(built[i].response && built[i].response.body, `entry ${i}: completed entry carries response body`);
+    }
+    assert.equal(built[0]._isCheckpoint, true, 'snapshot evt → checkpoint marker');
+  });
+
+  it('completed live rows are field-parallel to cold fold rows', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'parity turn')]));
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+
+    const liveRow = namedFrames(client)
+      .filter((f) => f.event === 'v2_requests_delta').map((f) => f.data)
+      .find((r) => !r.inProgress);
+    const { rows: coldRows } = await readV2RequestsMeta(sessionDirOf(SID), { passB: false });
+    const coldRow = coldRows.find((r) => r.seq === liveRow.seq);
+    assert.ok(coldRow);
+    for (const field of ['conv', 'evt', 'kind', 'mainAgent', 'timestamp', 'url', 'method', 'status', 'duration']) {
+      assert.deepEqual(liveRow[field], coldRow[field], `field ${field} live/cold parity`);
+    }
+    assert.deepEqual(liveRow.usage, coldRow.usage, 'usage mapping parity');
+  });
+
+  it('countTokens: kind is journal truth, mainAgent stays false live AND cold (chat-pollution pin)', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+
+    // The FULL main-agent tool set: isMainAgentRequest needs >5 tools incl.
+    // Edit+Bash+Task, so this body genuinely trips the re-derivation the fix
+    // outlaws (a 2-tool stub would pass with or without the fix).
+    const MAIN_TOOLS = ['Edit', 'Bash', 'Task', 'Read', 'Write', 'Glob', 'Grep'].map((name) => ({ name, input_schema: {} }));
+    const w = newWriter();
+    const main = mainEntry([textMsg('user', 'real main turn')]);
+    main.body.tools = MAIN_TOOLS;
+    fire(w, main);
+    // countTokens probe wearing the FULL main-agent body (system + tools):
+    // the old parsed.mainAgent re-derivation mis-tagged exactly this shape.
+    const ct = mainEntry([textMsg('user', 'count me')]);
+    ct.body.tools = MAIN_TOOLS;
+    ct.url = 'https://api.anthropic.com/v1/messages/count_tokens?beta=true';
+    ct.mainAgent = false;
+    ct.isCountTokens = true;
+    fire(w, ct);
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+
+    const rows = namedFrames(client)
+      .filter((f) => f.event === 'v2_requests_delta').map((f) => f.data)
+      .filter((r) => !r.inProgress);
+    const ctRow = rows.find((r) => r.url.includes('count_tokens'));
+    assert.ok(ctRow);
+    assert.equal(ctRow.kind, 'countTokens', 'journal-truth kind, not the sub fallback');
+    assert.equal(ctRow.mainAgent, false, 'kind-derived mainAgent — a main-shaped body must not pollute the chat');
+    assert.equal(ctRow.conv, 'misc', 'countTokens conversations live under misc');
+
+    // Cold parity through the DEFAULT Pass B (the path the client actually
+    // loads): attachBodyFields must not re-derive mainAgent from the
+    // blob-backfilled body either, or the pollution returns on reload.
+    const { rows: coldRows } = await readV2RequestsMeta(sessionDirOf(SID), {});
+    const coldCt = coldRows.find((r) => r.url.includes('count_tokens'));
+    assert.ok(coldCt);
+    assert.equal(coldCt.mainAgent, false, 'cold Pass B mainAgent stays kind-derived');
+    assert.equal(coldCt.kind, 'countTokens');
+  });
+
+  it('live/cold mainAgent parity holds through the default Pass B for real main rows', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'main turn')]));
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+
+    const liveRow = namedFrames(client)
+      .filter((f) => f.event === 'v2_requests_delta').map((f) => f.data)
+      .find((r) => !r.inProgress);
+    const { rows: coldRows } = await readV2RequestsMeta(sessionDirOf(SID), {});
+    const coldRow = coldRows.find((r) => r.seq === liveRow.seq);
+    assert.equal(liveRow.mainAgent, true);
+    assert.equal(coldRow.mainAgent, true, 'kind-derived on both paths — real mains unaffected');
+  });
+});
+
+// ─── readNewLines chunked cursor reader (issue #129 twin) ─────────────────────
+describe('readNewLines chunked cursor', () => {
+  it('splits lines across tiny chunks byte-exact, carries the partial tail across calls', async () => {
+    const { readNewLines } = await import('../server/lib/v2/live-feed.js');
+    const { writeFileSync, appendFileSync } = await import('node:fs');
+    const p = join(dir, 'cursor.jsonl');
+    const l1 = JSON.stringify({ seq: 1, t: '中文跨块内容' });
+    const l2 = JSON.stringify({ seq: 2, pad: 'x'.repeat(37) });
+    writeFileSync(p, l1 + '\n' + l2 + '\n{"seq":3,"partial"');
+    const cursor = { path: p, offset: 0, pending: '' };
+    assert.deepEqual(readNewLines(cursor, 5), [l1, l2], 'complete lines only; 5-byte chunks tear nothing');
+    // the torn tail stays pending until its newline arrives
+    appendFileSync(p, ':true}\n');
+    assert.deepEqual(readNewLines(cursor, 5), ['{"seq":3,"partial":true}']);
+    assert.deepEqual(readNewLines(cursor, 5), [], 'cursor fully drained');
+  });
+});
+
+// ─── discardable sessions never followed (2026-07-16) ─────────────────────────
+describe('discardable session attach gate', () => {
+  it('a quota-probe orphan is not attached; it attaches once a main req lands', async () => {
+    const { writeFileSync: wf, mkdirSync: mk, appendFileSync: af } = await import('node:fs');
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf());
+
+    const sid = 'deadbeef-0000-4000-8000-00000000000a';
+    const probe = join(dir, 'proj', 'sessions', `20260716132710_${sid}`);
+    mk(join(probe, 'conversations', 'sub-fp-x'), { recursive: true });
+    wf(join(probe, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, pid: 1, startTs: '2026-07-16T13:27:10.598Z', project: 'proj' }));
+    wf(join(probe, 'journal.jsonl'), [
+      JSON.stringify({ ph: 'meta', wireFormat: 2, sessionId: sid }),
+      JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', conv: 'sub-fp-x', ts: '2026-07-16T13:27:10.598Z', url: 'u' }),
+      JSON.stringify({ ph: 'done', seq: 1, rid: 'rq', ts: '2026-07-16T13:27:12.168Z', status: 'ok', http: 429 }),
+    ].join('\n') + '\n');
+
+    feed.tick(probe);
+    assert.equal(feed.isFollowing(probe), false, 'probe-only dir refused at _attach');
+    assert.equal(dataEntries(client).length, 0, 'zero frames emitted for the probe');
+
+    // The dir later gains a real main turn → the gate flips and attach works
+    // (safety poll / tick re-attempt path).
+    af(join(probe, 'journal.jsonl'),
+      JSON.stringify({ ph: 'req', seq: 2, rid: 'rm', kind: 'main', conv: 'main', ts: '2026-07-16T13:28:00.000Z', url: 'u' }) + '\n');
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(probe), true, 'main-bearing dir attaches on the next poll');
+    // First real attach of a previously-gated dir must NOT suppress history:
+    // cross-process observers have no cold-load fallback, so the first main
+    // turn (in-flight placeholder here) must be broadcast, not swallowed.
+    const emitted = dataEntries(client);
+    assert.ok(emitted.some((e) => e.inProgress && e._seq === 2),
+      'the first main turn is broadcast on the gated→real attach');
+  });
+
+  it('readNewLines skips an oversized line (maxLineBytes seam); neighbors survive, skip-state resets', async () => {
+    const { readNewLines } = await import('../server/lib/v2/live-feed.js');
+    const { writeFileSync: wf } = await import('node:fs');
+    const p = join(dir, 'oversize.jsonl');
+    const big = JSON.stringify({ seq: 2, blob: 'y'.repeat(200) });
+    wf(p, `{"seq":1}\n${big}\n{"seq":3}\n`);
+    const cursor = { path: p, offset: 0 };
+    assert.deepEqual(readNewLines(cursor, 16, 64), ['{"seq":1}', '{"seq":3}'],
+      'the ERR_STRING_TOO_LONG class degrades to a skipped line in the cursor reader too');
+  });
+
+  it('teammate live rows carry journal-truth kind/conv and mainAgent:false (wire v3)', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+
+    // Teammate identity rides the WRITER (a teammate process constructs its
+    // own V2Writer with leader info), plus the entry-level teammate tag.
+    const w = newWriter({ leader: { agentName: 'tm1', teamName: 'teamA', parentSessionId: SID } });
+    const tm = mainEntry([textMsg('user', 'teammate work')], { sid: SID_TM });
+    tm.teammate = 'tm1';
+    tm.teamName = 'teamA';
+    fire(w, tm);
+    await w.flush();
+    const tmDir = sessionDirOf(SID_TM);
+    feed.tick(tmDir);
+    assert.equal(feed.isFollowing(tmDir), true, 'teammate dir (meta.leader) is never discard-gated');
+
+    const rows = namedFrames(client)
+      .filter((f) => f.event === 'v2_requests_delta').map((f) => f.data)
+      .filter((r) => !r.inProgress);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, 'teammate', 'journal-truth kind');
+    assert.equal(rows[0].mainAgent, false, 'kind-derived: teammate is never mainAgent');
+    assert.equal(rows[0].conv, 'main', 'teammate conversations ride the main channel');
+    assert.equal(rows[0].teammate, 'tm1');
   });
 });

@@ -33,6 +33,8 @@ import { reportSwallowed } from '../error-report.js';
 import { isMainAgentRequest } from '../interceptor-core.js';
 import { readPromptsHead, collectPromptsFromEvents } from '../user-prompt-extract.js';
 import { readSession, readJsonlTolerant, listSessionIds } from './replay.js';
+import { iterateJsonlLines } from './jsonl-read.js';
+import { isDiscardableSession } from './session-select.js';
 import { blobPath, isSupportedWireFormat, dirSizeSync } from './layout.js';
 import { SingleFlight } from './singleflight.js';
 
@@ -59,16 +61,17 @@ export function isV2SessionDir(p) {
 function readResponsesRaw(sessionDir) {
   const bySeq = new Map();
   const p = join(sessionDir, 'responses.jsonl');
-  if (!existsSync(p)) return bySeq;
-  let raw = '';
-  try { raw = readFileSync(p, 'utf-8'); } catch { return bySeq; }
-  for (const line of raw.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    const m = t.match(/"seq":\s*(\d+)/);
-    if (!m) continue;
-    const seq = Number(m[1]);
-    if (!bySeq.has(seq)) bySeq.set(seq, t);
+  try {
+    // streamed line-by-line (issue #129): responses.jsonl is the most likely
+    // file to outgrow Node's string cap (full response bodies, one per request)
+    for (const t of iterateJsonlLines(p)) {
+      const m = t.match(/"seq":\s*(\d+)/);
+      if (!m) continue;
+      const seq = Number(m[1]);
+      if (!bySeq.has(seq)) bySeq.set(seq, t);
+    }
+  } catch (err) {
+    reportSwallowed('v2-read.responses-read-failed', err);
   }
   return bySeq;
 }
@@ -491,6 +494,14 @@ export class SessionSynthesizer {
       phase: 'placeholder',
       entry,
       isMain: isMainKind,
+      // Journal-truth request identity for the live row builder (live-feed
+      // _rowFrom): conv/evt are the V3.S5 assembler inputs the cold fold
+      // (meta-rows foldDir) already carries — without them on live rows the
+      // client rebuilds entries with EMPTY messages and the chat vanished at
+      // stream end until a cold reload (2026-07-16 live-render regression).
+      kind: req.kind,
+      ...(req.conv && { conv: req.conv }),
+      ...(req.evt && { evt: req.evt }),
       stateRef: conv ? conv.state : null,
     };
     this._await.set(seq, item);
@@ -563,7 +574,15 @@ export class SessionSynthesizer {
 function* iterateSessionItems(sessionDir, opts = {}) {
   const projectDir = dirname(dirname(sessionDir));
   const sessionId = basename(sessionDir);
-  const session = readSession(projectDir, sessionId);
+  let session;
+  try {
+    session = readSession(projectDir, sessionId);
+  } catch (err) {
+    // One unreadable session must degrade to "not rendered", never crash the
+    // whole scan (issue #129: an oversized file crash-looped every startup).
+    reportSwallowed('v2-read.session-read-failed', new Error(`${sessionId}: ${err.message}`));
+    return;
+  }
   if (session.unsupported) {
     reportSwallowed('v2-read.unsupported-wire-format', new Error(`${sessionId}: wireFormat=${session.wireFormat}`));
     return;
@@ -628,6 +647,12 @@ export function findTeammateSessionDirs(sessionDir, leaderUuid) {
         continue;
       }
       if (!l) {
+        // Discardable dirs (quota-probe orphans — no main/teammate req) must
+        // never act as leader candidates: a probe fires at process startup,
+        // so its startTs sits right next to the real leader's and can win the
+        // orphan tie-break below, stealing the teammate's traffic from the
+        // real leader's folded stream.
+        if (isDiscardableSession(dir, meta)) continue;
         leaderStarts.push({ sid: name, startTs: (meta && meta.startTs) || '' });
         continue;
       }
@@ -1081,8 +1106,12 @@ export function listV2Sessions(projectDir) {
       const reqKind = new Map();
       let turns = 0;
       let sentinelVersion = null;
+      let hasMainOrTeammate = false;
       for (const line of readJsonlTolerant(join(dir, 'journal.jsonl'))) {
-        if (line.ph === 'req') reqKind.set(line.seq, line.kind);
+        if (line.ph === 'req') {
+          reqKind.set(line.seq, line.kind);
+          if (line.kind === 'main' || line.kind === 'teammate') hasMainOrTeammate = true;
+        }
         else if (line.ph === 'done' && reqKind.get(line.seq) === 'main') {
           turns++;
           reqKind.delete(line.seq); // fold duplicate done lines (§14)
@@ -1117,6 +1146,17 @@ export function listV2Sessions(projectDir) {
         turns,
         size: dirSizeSync(dir),
         preview,
+        // Discardable-session verdict. KEEP IN SYNC: session-select.js
+        // isDiscardableSession is the canonical rule; this fold pre-computes
+        // it for free over the FULL journal (the canonical scan is 8MB-
+        // budgeted — intentional asymmetry, a first main sits at the head).
+        // When the fold says discard, the canonical predicate CONFIRMS it:
+        // readJsonlTolerant swallows an I/O error (Windows EBUSY/EPERM lock)
+        // into zero lines, which must KEEP the session, not hide it — the
+        // canonical path carries that error→keep direction (ioErrorResult).
+        // Main-bearing sessions never pay the extra read; probe journals are
+        // ~3 lines.
+        discard: !(meta && meta.leader) && !hasMainOrTeammate && isDiscardableSession(dir, meta),
       });
     } catch { /* one unreadable session must not break the list */ }
   }

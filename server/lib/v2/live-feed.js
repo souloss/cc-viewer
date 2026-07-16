@@ -28,6 +28,7 @@ import { reportSwallowed } from '../error-report.js';
 import { createIncrementalReconstructor } from '../delta-reconstructor.js';
 import { processWatchedEntry, sendEventToClients, sendEventRawToClients } from '../log-watcher.js';
 import { SessionSynthesizer } from './adapter.js';
+import { isDiscardableSession } from './session-select.js';
 import { computeCacheLoss } from './meta-rows.js';
 import { classifyRequest } from '../../../src/utils/requestType.js';
 
@@ -38,11 +39,26 @@ const ATTACH_RECENT_MS = 5 * 60 * 1000; // pre-existing dirs considered "live"
 const TICK_RETRY_MS = 250;      // in-process tick raced the first queue drain
 const TICK_RETRY_MAX = 8;
 
-/** Read newly appended complete lines from a file cursor {path, offset,
- *  pending}. Returns an array of raw line strings (possibly empty). A file
+const READ_CHUNK_BYTES = 8 * 1024 * 1024;
+// Node's max string length (~512MiB) — a longer line can never be decoded.
+const MAX_LINE_BYTES = 0x1fffffe8;
+
+/** Read newly appended complete lines from a file cursor {path, offset}
+ *  (partial-line carry lives on lazily-initialized _pendBufs/_pendBytes/
+ *  _skipLine cursor fields). Returns an array of raw line strings (possibly
+ *  empty). A file
  *  that shrank (should never happen — v2 files are append-only) returns null
- *  so the caller can rebuild the cursor. */
-function readNewLines(cursor) {
+ *  so the caller can rebuild the cursor.
+ *
+ *  Chunked + byte-level newline split (issue #129 twin): the first attach to
+ *  a session seeds from offset 0, so one whole-file read + decode would throw
+ *  ERR_STRING_TOO_LONG on an oversized journal and crash-loop the boot path
+ *  exactly like the cold-scan crash the streaming reader fixed. The partial
+ *  tail line is carried on the cursor as Buffer fragments (never decoded
+ *  until its newline lands); a single line past the string cap is skipped
+ *  with a report instead of thrown. Exported for tests (chunkBytes seam).
+ */
+export function readNewLines(cursor, chunkBytes = READ_CHUNK_BYTES, maxLineBytes = MAX_LINE_BYTES) {
   let size;
   try {
     size = statSync(cursor.path).size;
@@ -51,23 +67,74 @@ function readNewLines(cursor) {
   }
   if (size < cursor.offset) return null;
   if (size === cursor.offset) return [];
-  const toRead = size - cursor.offset;
-  const buf = Buffer.alloc(toRead);
+  if (cursor._pendBufs === undefined) {
+    cursor._pendBufs = [];
+    cursor._pendBytes = 0;
+    cursor._skipLine = false;
+  }
+  const out = [];
   let fd;
   try {
     fd = openSync(cursor.path, 'r');
-    readSync(fd, buf, 0, toRead, cursor.offset);
+    const chunk = Buffer.alloc(Math.min(chunkBytes, size - cursor.offset));
+    while (cursor.offset < size) {
+      const toRead = Math.min(chunk.length, size - cursor.offset);
+      const n = readSync(fd, chunk, 0, toRead, cursor.offset);
+      if (n === 0) break;
+      cursor.offset += n;
+      const view = chunk.subarray(0, n);
+      let from = 0;
+      while (from < n) {
+        const nl = view.indexOf(10, from);
+        if (nl === -1) {
+          if (!cursor._skipLine) {
+            const restLen = n - from;
+            if (cursor._pendBytes + restLen > maxLineBytes) {
+              cursor._skipLine = true;
+              cursor._pendBufs = [];
+              cursor._pendBytes = 0;
+              reportSwallowed('v2-live.read-line-too-long', new Error(`${cursor.path}: line exceeds ${maxLineBytes} bytes — skipped`));
+            } else {
+              // chunk is reused next readSync — the carried slice must own its bytes
+              cursor._pendBufs.push(Buffer.from(view.subarray(from)));
+              cursor._pendBytes += restLen;
+            }
+          }
+          break;
+        }
+        if (cursor._skipLine) {
+          cursor._skipLine = false; // the oversized line ends at this newline
+        } else {
+          const seg = view.subarray(from, nl);
+          let text = null;
+          try {
+            if (cursor._pendBufs.length > 0) {
+              cursor._pendBufs.push(seg);
+              text = Buffer.concat(cursor._pendBufs).toString('utf-8');
+            } else {
+              text = seg.toString('utf-8');
+            }
+          } catch (err) {
+            reportSwallowed('v2-live.read-line-too-long', err);
+          }
+          cursor._pendBufs = [];
+          cursor._pendBytes = 0;
+          if (text !== null) {
+            const t = text.trim();
+            if (t) out.push(t);
+          }
+        }
+        from = nl + 1;
+      }
+    }
   } catch (err) {
+    // Deliver what was already parsed; offset only advanced past read bytes,
+    // so the next poll resumes from the failure point.
     reportSwallowed('v2-live.read', err);
-    return [];
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* already closed */ } }
   }
-  cursor.offset = size;
-  const chunk = cursor.pending + buf.toString('utf-8');
-  const parts = chunk.split('\n');
-  cursor.pending = parts.pop() || '';
-  return parts.map((l) => l.trim()).filter(Boolean);
+  return out;
 }
 
 export class V2LiveFeed {
@@ -99,6 +166,7 @@ export class V2LiveFeed {
     this._wireV3 = !!opts.wireV3;
     this._sessions = new Map(); // dir → cursor bundle
     this._seenDirs = new Map(); // dir → last observed journal mtimeMs (attached or not)
+    this._discardGated = new Set(); // dirs refused by the discard gate — first real attach must NOT suppress history
     this._sessionsRoot = null;
     this._rootWatcher = null;
     this._safetyTimer = null;
@@ -126,6 +194,7 @@ export class V2LiveFeed {
     for (const cur of this._sessions.values()) this._closeCursor(cur);
     this._sessions.clear();
     this._seenDirs.clear();
+    this._discardGated.clear();
     this._sessionsRoot = null;
   }
 
@@ -246,6 +315,23 @@ export class V2LiveFeed {
   _attach(dir, { suppressExisting }) {
     if (this._sessions.has(dir)) return this._sessions.get(dir);
     if (!existsSync(join(dir, 'journal.jsonl'))) return null;
+    // Discardable sessions (quota-probe orphans — no main/teammate req, no
+    // meta.leader) are never followed: single choke point, every attach path
+    // (_initialScan / _maybeAttachNew / tick / _safetyTick / _rebuildCursor)
+    // funnels here and handles null. Self-healing when a dir later gains its
+    // first main: the leader's own dir re-attaches via tick's retry chain
+    // (sub-second); cross-process dirs via the 5s safety poll's mtime-bump
+    // scan (_seenDirs bookkeeping stays in the callers, so the bump fires).
+    if (isDiscardableSession(dir)) {
+      this._discardGated.add(dir);
+      return null;
+    }
+    // A dir previously refused by the discard gate is attaching for the FIRST
+    // time — its first renderable turn was never broadcast, so the safety
+    // poll's suppressExisting:true (meant for "old stale dir resumed") must
+    // not swallow it: cross-process producers (IM worker, second ccv) have no
+    // cold-load fallback for a connected client.
+    if (this._discardGated.delete(dir)) suppressExisting = false;
     const cur = {
       dir,
       synth: new SessionSynthesizer(dir, { deferMs: this._deferMs, now: this._now }),
@@ -254,9 +340,9 @@ export class V2LiveFeed {
       // rebase each other's accumulated baseline — v1's tail followed exactly
       // one file, so a single shared reconstructor was a new interleave surface.
       reconstructor: createIncrementalReconstructor(),
-      journal: { path: join(dir, 'journal.jsonl'), offset: 0, pending: '' },
-      responses: { path: join(dir, 'responses.jsonl'), offset: 0, pending: '' },
-      convFiles: new Map(), // path → {key, offset, pending}
+      journal: { path: join(dir, 'journal.jsonl'), offset: 0 },
+      responses: { path: join(dir, 'responses.jsonl'), offset: 0 },
+      convFiles: new Map(), // path → {key, offset} (+ lazy _pendBufs carry)
       watcher: null,
       debounce: null,
       reading: false,
@@ -353,7 +439,7 @@ export class V2LiveFeed {
         const p = join(convRoot, key, f);
         let fc = cur.convFiles.get(p);
         if (!fc) {
-          fc = { key, path: p, offset: 0, pending: '' };
+          fc = { key, path: p, offset: 0 };
           cur.convFiles.set(p, fc);
         }
         const lines = readNewLines(fc);
@@ -471,8 +557,17 @@ export class V2LiveFeed {
       timestamp: parsed.timestamp || '',
       url: parsed.url || '',
       method: parsed.method || 'POST',
-      kind: item.isMain ? 'main' : (parsed.teammate ? 'teammate' : 'sub'),
-      mainAgent: parsed.mainAgent === true,
+      // conv/evt/kind/mainAgent mirror the cold fold (meta-rows.js foldDir) —
+      // journal truth, NOT re-derivation. conv is load-bearing: the client
+      // assembler's buildEntry is `if (row.conv)`-gated, so a conv-less live
+      // row rebuilt every entry with EMPTY messages (chat vanished at stream
+      // end). mainAgent must be kind-derived like cold: parsed.mainAgent
+      // re-derives from the body and mis-tags countTokens (main system/tools
+      // aboard) as true, which would merge its turn into the chat live-only.
+      conv: item.conv,
+      evt: item.evt,
+      kind: item.kind || (item.isMain ? 'main' : (parsed.teammate ? 'teammate' : 'sub')),
+      mainAgent: item.isMain === true,
       teammate: parsed.teammate || undefined,
       model: parsed.body?.model,
       proxyUrl: parsed.proxyUrl || undefined,

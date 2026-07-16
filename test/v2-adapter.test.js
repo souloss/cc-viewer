@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { V2Writer } from '../server/lib/v2/v2-writer.js';
-import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync, listV2Sessions } from '../server/lib/v2/adapter.js';
+import { isV2SessionDir, iterateV2RawEntries, iterateV2RawEntriesAsync, listV2Sessions, findTeammateSessionDirs } from '../server/lib/v2/adapter.js';
 import { messagesDigest, readSession } from '../server/lib/v2/replay.js';
 import { verifyV1File } from '../server/lib/v2/verify.js';
 import { createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
@@ -596,5 +596,99 @@ describe('request params fidelity', () => {
     assert.equal(entry.body.metadata.user_id, undefined,
       'no userIdRaw → raw user_id dropped (would spuriously split the client timeline)');
     assert.equal(entry.body.metadata.custom, 'kept');
+  });
+});
+
+// ─── corrupt/oversized session containment (issue #129) ──────────────────────
+describe('corrupt session containment', () => {
+  it('a session whose read throws degrades to skipped — the scan and healthy siblings survive', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'healthy')]));
+    await w.flush();
+
+    // Handcraft a corrupt sibling: `conversations` is a regular FILE, so
+    // readSession's readdirSync throws (deterministic cross-platform stand-in
+    // for the ERR_STRING_TOO_LONG / unreadable-session crash class).
+    const badSid = 'deadbeef-dead-4bad-8bad-badbadbadbad';
+    const bad = join(dir, 'proj', 'sessions', `20260716000000_${badSid}`);
+    mkdirSync(bad, { recursive: true });
+    writeFileSync(join(bad, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: badSid, pid: 1, startTs: '2026-07-16T00:00:00.000Z' }));
+    writeFileSync(join(bad, 'journal.jsonl'), JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n');
+    writeFileSync(join(bad, 'conversations'), 'not a directory');
+
+    assert.deepEqual([...iterateV2RawEntries(bad)], [], 'corrupt session yields nothing instead of throwing');
+    const good = readAdapted(sessionDirOf(SID));
+    assert.equal(good.length, 1, 'healthy sibling session still reads fine');
+    assert.equal(good[0].body.messages[0].content[0].text, 'healthy');
+  });
+});
+
+// ─── discardable sessions excluded from listing surfaces (2026-07-16) ─────────
+describe('discardable session exclusion', () => {
+  const probeDir = (sid, startTs) => {
+    const dir = join(dir_probe_root(), `${startTs.replace(/[-:.TZ]/g, '').slice(0, 14)}_${sid}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, project: 'proj', startTs }));
+    writeFileSync(join(dir, 'journal.jsonl'), [
+      JSON.stringify({ ph: 'meta', wireFormat: 2, sessionId: sid }),
+      JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', conv: 'sub-fp-x', ts: startTs, url: 'https://api.anthropic.com/v1/messages' }),
+      JSON.stringify({ ph: 'done', seq: 1, rid: 'rq', ts: startTs, status: 'ok', http: 429 }),
+    ].join('\n') + '\n');
+    return dir;
+  };
+  const dir_probe_root = () => join(dir, 'proj', 'sessions');
+
+  it('listV2Sessions marks quota-probe orphans discard:true; real and teammate sessions false', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'real turn')]));
+    await w.flush();
+    probeDir('deadbeef-0000-4000-8000-000000000001', '2026-07-16T13:27:10.598Z');
+
+    const sessions = listV2Sessions(join(dir, 'proj'));
+    const real = sessions.find((s) => s.sid.endsWith(SID));
+    const probe = sessions.find((s) => s.sid.includes('deadbeef'));
+    assert.ok(real && probe);
+    assert.equal(real.discard, false);
+    assert.equal(probe.discard, true);
+  });
+
+  it('listV2Logs omits discardable sessions while keeping real ones', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'kept turn')]));
+    await w.flush();
+    probeDir('deadbeef-0000-4000-8000-000000000002', '2026-07-16T13:27:10.598Z');
+
+    const grouped = listV2Logs(dir, 'proj');
+    const rows = grouped.proj || [];
+    assert.equal(rows.length, 1, 'only the real session listed');
+    assert.ok(!rows[0].file.includes('deadbeef'));
+    // Direct addressing stays usable (escape hatch for deleteLogFiles).
+    const probePath = probeDir('deadbeef-0000-4000-8000-000000000003', '2026-07-16T13:27:11.598Z');
+    const probeRef = `v2:proj/${probePath.split('/').pop()}`;
+    assert.ok(validateLogPath(dir, probeRef), 'hidden ≠ unaddressable');
+  });
+
+  it('findTeammateSessionDirs never lets a probe act as a leader candidate', async () => {
+    // Real leader starts at T1; probe fires at T2 (right after, like a spawn);
+    // an orphan teammate (leader without sid) starts at T3. Without the gate
+    // the probe (latest ≤ T3) would claim the orphan and the real leader
+    // would drop it.
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'leader turn')]));
+    await w.flush();
+    const leaderDir = sessionDirOf(SID);
+    probeDir('deadbeef-0000-4000-8000-000000000004', '2026-07-16T23:59:58.000Z');
+    const tmSid = 'facefeed-0000-4000-8000-000000000001';
+    const tmDir = join(dir, 'proj', 'sessions', `20260716235959_${tmSid}`);
+    mkdirSync(tmDir, { recursive: true });
+    writeFileSync(join(tmDir, 'meta.json'), JSON.stringify({
+      wireFormat: 2, sessionId: tmSid, project: 'proj', startTs: '2026-07-16T23:59:59.000Z',
+      leader: { agentName: 'tm1' }, // leaderless orphan: no parentSessionId
+    }));
+    writeFileSync(join(tmDir, 'journal.jsonl'), JSON.stringify({ ph: 'meta', wireFormat: 2, sessionId: tmSid }) + '\n');
+
+    const found = findTeammateSessionDirs(leaderDir, SID);
+    assert.equal(found.length, 1, 'the real leader claims the orphan — the probe cannot steal it');
+    assert.ok(found[0].dir === tmDir);
   });
 });

@@ -99,6 +99,7 @@ export function listV2Logs(logDir, currentProjectName) {
       for (const s of listV2Sessions(join(logDir, project))) {
         if (s.leader) continue;
         if (s.size === 0) continue;
+        if (s.discard) continue; // quota-probe orphans: never listed (2026-07-16)
         if (!grouped[project]) grouped[project] = [];
         grouped[project].push({
           file: `v2:${project}/${s.sid}`,

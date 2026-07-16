@@ -259,7 +259,7 @@ function imLogs(req, res, parsedUrl, isLocal, deps) {
   try {
     // wire-v2: prefer the newest v2 session (by meta.startTs, journal mtime as
     // tie-break); fall back to legacy v1 files until they are migrated.
-    const sessions = listV2Sessions(join(LOG_DIR, project)).filter((s) => !s.leader);
+    const sessions = listV2Sessions(join(LOG_DIR, project)).filter((s) => !s.leader && !s.discard);
     if (sessions.length > 0) {
       sessions.sort((a, b) => (a.startTs < b.startTs ? 1 : a.startTs > b.startTs ? -1 : 0));
       latest = `v2:${project}/${sessions[0].sid}`; // 直接喂给 /api/local-log?file=
