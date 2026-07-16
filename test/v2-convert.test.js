@@ -237,6 +237,55 @@ describe('convertProject quarantine (weak, per-session verify)', () => {
   });
 });
 
+describe('verify-phase progress persisted to the state file', () => {
+  const okReport = { diffs: [], integrity: [], unsupportedSessions: [], suspectSessions: [], ok: true };
+  const twoFiles = () => {
+    writeV1('proj_20260101_000000.jsonl', [entryOf({ messages: [textMsg('user', 'u1')], uid: jsonUid(SID) })]);
+    writeV1('proj_20260102_000000.jsonl', [entryOf({ messages: [textMsg('user', 'u2')], uid: jsonUid(SID2) })]);
+  };
+
+  it('verifyIndex/verifyTotal/verifyEntries land on DISK mid-verify (the frontend renders from the state file)', async () => {
+    twoFiles();
+    const midStates = []; // state-file snapshot taken at the START of each verifyFn call
+    const verifyFn = async (v1File, o) => {
+      midStates.push(readConvertState(join(logDir, PROJECT)));
+      // Emulate verifyV1File's cumulative per-file counter (1000, then 2000).
+      o.onProgress({ entriesScanned: 1000 });
+      o.onProgress({ entriesScanned: 2000 });
+      return okReport;
+    };
+    const state = await convertProject(logDir, PROJECT, { verifyFn, statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+
+    assert.equal(state.status, 'done');
+    assert.equal(state.verifyTotal, 2, 'n = all v1 files (the verify loop does not skip done files)');
+    assert.equal(state.verifyIndex, 2, 'x reaches n');
+    assert.equal(state.verifyEntries, 4000, 'entries accumulate ACROSS files');
+
+    assert.equal(midStates.length, 2);
+    assert.equal(midStates[0].status, 'verifying');
+    assert.equal(midStates[0].verifyTotal, 2, 'verifyTotal persisted before the first verifyFn runs');
+    assert.equal(midStates[0].verifyIndex, 0);
+    assert.equal(midStates[1].verifyIndex, 1, 'per-file advance persisted unconditionally before file #2');
+    assert.equal(midStates[1].verifyEntries, 2000, 'file #1 entries persisted at the file boundary');
+
+    const disk = readConvertState(join(logDir, PROJECT));
+    assert.equal(disk.verifyIndex, 2);
+    assert.equal(disk.verifyEntries, 4000);
+  });
+
+  it('a throwing verifyFn still advances the persisted counter to n (no skipped numbers)', async () => {
+    twoFiles();
+    let calls = 0;
+    const state = await convertProject(logDir, PROJECT, {
+      verifyFn: async () => { if (++calls === 1) throw new Error('boom'); return okReport; },
+      statfs: () => ({ bavail: 1e9, bsize: 4096 }),
+    });
+    assert.equal(state.status, 'done');
+    assert.equal(calls, 2, 'both files attempted');
+    assert.equal(state.verifyIndex, state.verifyTotal, 'x reaches n even when a file verifier throws');
+  });
+});
+
 describe('legacy-format hardening (real-data classes, 2026-07-14)', () => {
   it('old entries without requestId + same-ms countTokens burst + equal-length interleave pass golden verify', async () => {
     const ts = '2026-01-01T00:00:00.100Z'; // deliberately reused: ts|url key collision

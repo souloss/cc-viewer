@@ -711,8 +711,15 @@ class App extends AppBase {
               if (active) {
                 const total = st && Array.isArray(st.files) ? st.files.length : 0;
                 const done = st && Array.isArray(st.files) ? st.files.filter(f => f.done).length : 0;
+                // Verify progress MUST come from st.verifyIndex/verifyTotal —
+                // the convert-phase `done/total` above are files with f.done,
+                // which are ALL done by verify time (would render a frozen n/n).
                 const label = st && st.status === 'verifying'
-                  ? t('ui.wireV2ConvertVerifying')
+                  ? t('ui.wireV2ConvertVerifying', {
+                      done: st.verifyIndex || 0,
+                      total: st.verifyTotal || total,
+                      entries: (st.verifyEntries || 0).toLocaleString(),
+                    })
                   : t('ui.wireV2ConvertProgress', { done, total, sessions: (st && st.sessionsConverted) || 0 });
                 return (
                   <span className={styles.btnMarginLeft}>

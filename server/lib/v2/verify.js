@@ -41,11 +41,16 @@ const MAX_REPORTED_DIFFS = 50;
  * @param {string} [opts.sessionsDirName] - session-dir name under the project
  *   dir; the offline converter verifies its staging area ('sessions-migrating')
  *   before promoting. Defaults to the live 'sessions'.
+ * @param {(p: {entriesScanned: number}) => void} [opts.onProgress] - called
+ *   every 1000 scanned v1 entries and once after the scan completes, so a
+ *   long-running verify of one big file can surface live progress. Callback
+ *   errors are swallowed — progress must never break the verification.
  * @returns {Promise<object>} report (see shape at the bottom)
  */
 export async function verifyV1File(v1File, opts = {}) {
   const projectDir = opts.projectDir || dirname(v1File);
   const sessionsDirName = opts.sessionsDirName || 'sessions';
+  const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
 
   // ---- v2 side: index every session of the project --------------------------
   // `${ts}|${url}` is NOT unique in real logs (same-millisecond countTokens
@@ -154,7 +159,17 @@ export async function verifyV1File(v1File, opts = {}) {
 
   // Single streaming pass (1MB chunks): verify must stay memory-bounded on
   // 300MB soak files — no dedup map, no second pass (review P2).
-  for await (const raw of iterateRawEntriesAsync(v1File)) onScan(raw);
+  let entriesScanned = 0;
+  for await (const raw of iterateRawEntriesAsync(v1File)) {
+    onScan(raw);
+    entriesScanned++;
+    if (onProgress && entriesScanned % 1000 === 0) {
+      try { onProgress({ entriesScanned }); } catch { /* progress must never break the verify */ }
+    }
+  }
+  if (onProgress) {
+    try { onProgress({ entriesScanned }); } catch { /* progress must never break the verify */ }
+  }
 
   // v2 records never matched by any v1 entry in THIS file: only suspicious if
   // their req/done both exist (a live v2-only write) — they may simply belong

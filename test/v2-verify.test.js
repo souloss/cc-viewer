@@ -203,3 +203,35 @@ describe('verifier end-to-end over converted sessions (migration golden gate)', 
     assert.deepEqual(clean.suspectSessions, [], 'restored state has no suspects');
   });
 });
+
+describe('verifyV1File onProgress (verify-phase live progress)', () => {
+  it('reports monotonically increasing entriesScanned, final call equals the entry count', async () => {
+    const entries = standardEntries();
+    writeV1(entries);
+    await convertProject(logDir, PROJECT, { verify: false, statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+
+    const seen = [];
+    const report = await verifyV1File(v1Path(), { onProgress: (p) => seen.push(p.entriesScanned) });
+    assert.equal(report.ok, true, 'progress callback does not change the verdict');
+    assert.ok(seen.length >= 1, 'final flush always fires');
+    for (let i = 1; i < seen.length; i++) assert.ok(seen[i] >= seen[i - 1], 'monotonic');
+    assert.equal(seen[seen.length - 1], entries.length, 'final count equals the scanned v1 entries');
+  });
+
+  it('fires an intermediate callback every 1000 entries on a long file (the moving signal for big files)', async () => {
+    // No conversion needed: progress counts raw v1 entries regardless of v2 state.
+    const entries = [];
+    for (let i = 0; i < 2500; i++) entries.push(entryOf([textMsg('user', `m${i}`)]));
+    writeV1(entries);
+    const seen = [];
+    await verifyV1File(v1Path(), { onProgress: (p) => seen.push(p.entriesScanned) });
+    assert.deepEqual(seen, [1000, 2000, 2500], 'a callback at every 1000 scanned entries plus the final flush');
+  });
+
+  it('a throwing onProgress never breaks the verify', async () => {
+    writeV1(standardEntries());
+    await convertProject(logDir, PROJECT, { verify: false, statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    const report = await verifyV1File(v1Path(), { onProgress: () => { throw new Error('ui went away'); } });
+    assert.equal(report.ok, true, 'callback errors are swallowed');
+  });
+});

@@ -143,6 +143,13 @@ export async function convertProject(logDir, project, opts = {}) {
     sessionsQuarantined: 0,
     quarantined: [], // [{ sessionId (dir name), uuid, reasons: string[] }] — held-back sessions
     entries: 0,
+    // Verify-phase progress, persisted so the frontend (which renders from the
+    // state file only) can show "verifying (x/n) · m entries" instead of a
+    // static label. verifyEntries accumulates ACROSS files (the moving signal
+    // when one big file dominates); all three keep their final values on done.
+    verifyIndex: 0,
+    verifyTotal: 0,
+    verifyEntries: 0,
     lastError: null,
   };
 
@@ -279,23 +286,45 @@ export async function convertProject(logDir, project, opts = {}) {
     const quarantineSids = new Map(); // staged dir name → reasons[] (merged across files)
     if (doVerify && listSessionIds(projectDir, STAGING_DIR_NAME).length > 0) {
       state.status = 'verifying';
+      state.verifyTotal = state.files.length;
       writeConvertState(projectDir, state);
+      // Per-entry progress: verifyEntries accumulates across files; state-file
+      // writes are time-throttled (≥1s) so a huge file can't turn the scan into
+      // an fsync storm. The per-FILE advance below is written unconditionally.
+      let entriesBase = 0;
+      let lastEntriesWrite = 0;
       for (let i = 0; i < state.files.length; i++) {
         const f = state.files[i];
-        let report;
+        let report = null;
         try {
-          report = await verifyFn(join(projectDir, f.name), { sessionsDirName: STAGING_DIR_NAME });
+          report = await verifyFn(join(projectDir, f.name), {
+            sessionsDirName: STAGING_DIR_NAME,
+            onProgress: ({ entriesScanned }) => {
+              state.verifyEntries = entriesBase + (entriesScanned || 0);
+              const now = Date.now();
+              if (now - lastEntriesWrite >= 1000) {
+                lastEntriesWrite = now;
+                writeConvertState(projectDir, state);
+              }
+            },
+          });
         } catch (err) {
           // Verify is a soft check — a crash in the verifier itself (e.g. an
           // unreadable staged session) must not sink the migration. Skip this
           // file's attribution and keep going; unverified sessions still promote.
           reportSwallowed('v2-convert.verify', err);
-          continue;
         }
-        for (const s of report.suspectSessions || []) {
-          const prev = quarantineSids.get(s.sessionId) || [];
-          quarantineSids.set(s.sessionId, [...prev, ...(s.reasons || [])].slice(0, 10));
+        if (report) {
+          for (const s of report.suspectSessions || []) {
+            const prev = quarantineSids.get(s.sessionId) || [];
+            quarantineSids.set(s.sessionId, [...prev, ...(s.reasons || [])].slice(0, 10));
+          }
         }
+        // Advance the persisted counter even when verifyFn threw — x must reach
+        // n at the end of the loop, never skip numbers.
+        entriesBase = state.verifyEntries;
+        state.verifyIndex = i + 1;
+        writeConvertState(projectDir, state);
         onProgress({ phase: 'verify', file: f.name, fileIndex: i + 1, filesTotal: state.files.length, entries: state.entries, sessionsConverted: state.sessionsConverted, sessionsSkipped: state.sessionsSkipped, quarantined: quarantineSids.size });
         if (shouldStop()) {
           state.status = 'stopped';
