@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.1 (2026-07-16)
 
 ### v2 store: full request-body fidelity (`params` on the journal req line)
 
