@@ -45,6 +45,7 @@ function buildSession(logDir, project) {
     headers: {},
     body: {
       model: 'claude-fable-5',
+      max_tokens: 32000, // residual param — must ride req.params to the detail view
       system: [{ type: 'text', text: 'You are Claude Code test system.' }],
       tools: [{ name: 'Bash', description: 'runs shell commands in a sandbox' }],
       metadata: { user_id: USER_ID },
@@ -116,6 +117,7 @@ describe('readV2SingleEntry (V3.S1 unit)', () => {
     assert.deepEqual(got.response, wire.response);
     assert.deepEqual(got.body.tools, wire.body.tools, 'blob backfill intact');
     assert.deepEqual(got.body.system, wire.body.system);
+    assert.equal(got.body.max_tokens, 32000, 'residual params reach the detail-view entry');
   });
 
   it('prevMain is the preceding mainAgent entry, also promoted', async () => {

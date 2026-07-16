@@ -158,6 +158,31 @@ describe('convertProject golden round-trip', () => {
     assert.deepEqual(promptLines.flatMap((l) => l.texts), ['u1', 'u2'], 'main-conv user prompts cached during conversion');
   });
 
+  it('v1→v2 upgrade preserves residual body params and response statusText (no info loss)', async () => {
+    const e = entryOf({ messages: [textMsg('user', 'params survive upgrade')] });
+    e.body = { ...e.body, max_tokens: 32000, temperature: 0.5, stream: true, thinking: { type: 'enabled', budget_tokens: 2048 } };
+    e.response = { ...e.response, statusText: 'OK' };
+    writeV1('proj_20260101_000000.jsonl', [e]);
+
+    const state = await convertProject(logDir, PROJECT, { statfs: () => ({ bavail: 1e9, bsize: 4096 }) });
+    assert.equal(state.status, 'done');
+    assert.equal(state.sessionsConverted, 1, 'session promoted, not quarantined — golden verify passes with params present');
+
+    const req = readJournal(SID).find(l => l.ph === 'req');
+    assert.deepEqual(req.params, {
+      model: 'claude-fable-5',
+      metadata: { user_id: jsonUid(SID) },
+      max_tokens: 32000,
+      temperature: 0.5,
+      stream: true,
+      thinking: { type: 'enabled', budget_tokens: 2048 },
+    }, 'converter rides the same writer path: params land on the journal req line');
+
+    const respLine = readFileSync(join(sessionsDir(SID), 'responses.jsonl'), 'utf8')
+      .trim().split('\n').map(l => JSON.parse(l))[0];
+    assert.equal(respLine.statusText, 'OK');
+  });
+
   it('converts sessions spanning rotation files with a continuous journal', async () => {
     writeV1('proj_20260101_000000.jsonl', [
       entryOf({ messages: [textMsg('user', 'u1')], uid: jsonUid(SID2) }),

@@ -111,6 +111,8 @@ describe('wire-v2 唯一写路径', () => {
     assert.equal(req.conv, 'main');
     assert.equal(req.evt, 'snapshot');
     assert.ok(req.blobs.tools && req.blobs.sys, 'tools/system extracted to blob refs');
+    assert.deepEqual(req.params, { metadata: { user_id: USER_ID } },
+      'residual body params inlined on the req line (minus messages/system/tools)');
     assert.equal(typeof req.headers, 'object', 'redacted headers captured on the req line');
     assert.match(req.headers['x-api-key'], /\*\*\*\*/, 'x-api-key 已脱敏');
     assert.equal(done.seq, 1);

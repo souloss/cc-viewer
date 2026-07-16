@@ -75,6 +75,7 @@ LOG_DIR/<project>/sessions/<session_id>/
   "model": "claude-fable-5",
   "isStream": true,
   "headers": { …redacted… },      // v1 同款脱敏后 headers（~1KB，DetailPanel 需要）
+  "params": { "max_tokens": 32000, "temperature": 1, "metadata": {…}, … },  // body 除 messages/system/tools 外的全部顶层字段整体内联（对齐 headers 模式；空对象/非对象 body 省略。2026-07-16 追加，旧行缺失时读侧回退旧规则）
   "blobs": { "tools": "sha256-a1b2…", "sys": "sha256-c3d4…" },  // 缺失字段省略
   "msgFrom": 903, "msgTo": 905,   // 本事件对应 wire messages 的 [from,to) 计数（物化完整性校验）
   "evt": "append" | "snapshot" | "ctl",  // 对应 conversation 行类型（§6，replace-tail 等控制行为 ctl）；无 conv 写入则省略
@@ -103,7 +104,7 @@ LOG_DIR/<project>/sessions/<session_id>/
 
 ## §5 responses.jsonl
 
-每完成请求一行：`{ seq, rid, body: <完整 response body>, headers?: <response headers> }`。
+每完成请求一行：`{ seq, rid, body: <完整 response body>, headers?: <response headers>, statusText?: <HTTP statusText> }`。
 
 - 流式请求：body = `assembleStreamMessage` 组装结果（v1 同源）；组装失败时 `body: {"assembleError": "...", "head": <前1000字符>}`（对应 v1 :1106/:1191 兜底路径）。
 - heartbeat/countTokens：同样落一行（体积小、保真）。
@@ -193,8 +194,9 @@ wire 上存在两种编码，**解析器与 S8 转换器必须都支持**：
 | `body.model` | journal req.model |
 | `body.system` / `body.tools` | blobs 按该行 ref 回填（逐请求，绝不沿用） |
 | `body.messages` | epoch 起点 → 物化全量（合成 checkpoint）；其余 → append 切片（合成 delta）。snapshot/ctl 行 → 物化器先解决，再按"该请求的物化态"输出 checkpoint（含 §3.3：合成 `_isCheckpoint:true`+`_inPlaceReplaceDetected:true` 成对信号） |
-| `body.metadata.user_id` | meta.userIdRaw **原样**（客户端等值边界检测依赖） |
-| `response` | responses.jsonl 按 seq；req-without-done → 无 response + `inProgress:true` + `requestId:rid` |
+| body 其余顶层字段（max_tokens/temperature/thinking/…） | journal req.params 整体展开（2026-07-16 追加；旧行缺 params → 仅上述字段，与追加前行为一致）。专用字段覆盖 params 同名键：model/system/tools 以专用来源为准 |
+| `body.metadata.user_id` | meta.userIdRaw **原样**（客户端等值边界检测依赖——`-c` 采纳目录内真实 user_id 会变化，params.metadata 的其余键合并保留，但 user_id 恒取 meta.userIdRaw） |
+| `response` | responses.jsonl 按 seq（statusText 同行回填）；req-without-done → 无 response + `inProgress:true` + `requestId:rid` |
 | `duration` / `isStream` | journal done.dur / req.isStream |
 | `isHeartbeat` / `isCountTokens` | journal kind 映射 |
 | `mainAgent` | kind==main → true；teammate 条目按 v1 双标语义（re-join 时依 meta 复原） |

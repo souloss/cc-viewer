@@ -500,3 +500,101 @@ describe('messagesDigest normalization', () => {
       'cache_control on a NON-FIRST block must be invisible to exactFps equality');
   });
 });
+
+// ─── request params fidelity (journal req.params, 2026-07-16) ─────────────────
+describe('request params fidelity', () => {
+  it('reconstructed body carries all residual params; response.statusText restored', async () => {
+    const w = newWriter();
+    const e = mainEntry([textMsg('user', 'p1')]);
+    e.body = { ...e.body, max_tokens: 32000, temperature: 0.7, stop_sequences: ['###'], thinking: { type: 'enabled', budget_tokens: 1024 } };
+    const h = w.ingestRequest(e, e.body.messages);
+    w.ingestCompletion(h, {
+      ...e,
+      response: { status: 200, statusText: 'OK', headers: { 'x-req': '1' }, body: { content: [], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } } },
+      duration: 5,
+    });
+    await w.flush();
+
+    const [entry] = readAdapted(sessionDirOf(SID));
+    assert.equal(entry.body.max_tokens, 32000);
+    assert.equal(entry.body.temperature, 0.7);
+    assert.deepEqual(entry.body.stop_sequences, ['###']);
+    assert.deepEqual(entry.body.thinking, { type: 'enabled', budget_tokens: 1024 });
+    assert.equal(entry.body.model, 'claude-fable-5', 'dedicated req.model agrees with params.model');
+    assert.deepEqual(entry.body.system, SYSTEM, 'blob-backed fields still come from blobs');
+    assert.deepEqual(entry.body.tools, TOOLS);
+    assert.equal(entry.body.metadata.user_id, userIdOf(SID));
+    assert.equal(entry.response.statusText, 'OK');
+  });
+
+  it('params-less journal (pre-params session) reconstructs exactly as before', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'old session')]));
+    await w.flush();
+
+    // Simulate a session recorded before params existed: strip them from disk.
+    const sdir = sessionDirOf(SID);
+    const jPath = join(sdir, 'journal.jsonl');
+    const stripped = readFileSync(jPath, 'utf-8').trim().split('\n')
+      .map((l) => { const { params, ...rest } = JSON.parse(l); return JSON.stringify(rest); })
+      .join('\n') + '\n';
+    writeFileSync(jPath, stripped);
+
+    const [entry] = readAdapted(sdir);
+    assert.deepEqual(Object.keys(entry.body).sort(), ['messages', 'metadata', 'model', 'system', 'tools'],
+      'legacy reconstruction shape unchanged');
+    assert.deepEqual(entry.body.metadata, { user_id: userIdOf(SID) });
+  });
+
+  it('user_id always comes from meta.userIdRaw even when params.metadata differs (-c adoption)', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'adopted')]));
+    await w.flush();
+
+    // A `-c` adopted folder mixes real user_ids: rewrite the on-disk params
+    // to carry a different user_id plus an extra metadata key.
+    const sdir = sessionDirOf(SID);
+    const jPath = join(sdir, 'journal.jsonl');
+    const rewritten = readFileSync(jPath, 'utf-8').trim().split('\n')
+      .map((l) => {
+        const line = JSON.parse(l);
+        if (line.ph === 'req') line.params = { ...line.params, metadata: { user_id: userIdOf(SID_TM), custom: 'kept' } };
+        return JSON.stringify(line);
+      })
+      .join('\n') + '\n';
+    writeFileSync(jPath, rewritten);
+
+    const [entry] = readAdapted(sdir);
+    assert.equal(entry.body.metadata.user_id, userIdOf(SID),
+      'meta.userIdRaw wins — a params user_id must never split the client timeline');
+    assert.equal(entry.body.metadata.custom, 'kept', 'other params.metadata keys are merged');
+  });
+
+  it('noid session (no meta.userIdRaw): raw params user_id is dropped, other metadata keys kept', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'noid')]));
+    await w.flush();
+
+    // Simulate a noid session: no userIdRaw in meta, an unparseable raw
+    // user_id in params.metadata (varying per request in the wild).
+    const sdir = sessionDirOf(SID);
+    const metaPath = join(sdir, 'meta.json');
+    const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+    delete meta.userIdRaw;
+    writeFileSync(metaPath, JSON.stringify(meta));
+    const jPath = join(sdir, 'journal.jsonl');
+    const rewritten = readFileSync(jPath, 'utf-8').trim().split('\n')
+      .map((l) => {
+        const line = JSON.parse(l);
+        if (line.ph === 'req') line.params = { ...line.params, metadata: { user_id: 'garbage-varies-per-request', custom: 'kept' } };
+        return JSON.stringify(line);
+      })
+      .join('\n') + '\n';
+    writeFileSync(jPath, rewritten);
+
+    const [entry] = readAdapted(sdir);
+    assert.equal(entry.body.metadata.user_id, undefined,
+      'no userIdRaw → raw user_id dropped (would spuriously split the client timeline)');
+    assert.equal(entry.body.metadata.custom, 'kept');
+  });
+});

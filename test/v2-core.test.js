@@ -519,6 +519,54 @@ describe('V2Writer', () => {
     assert.ok(!existsSync(join(dir, 'proj')));
   });
 
+  it('journal req line carries residual body params; responses line carries statusText', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkEntry();
+    e.body = { ...e.body, max_tokens: 32000, temperature: 1, stream: true, thinking: { type: 'enabled', budget_tokens: 4096 } };
+    const h = w.ingestRequest(e, e.body.messages);
+    w.ingestCompletion(h, { ...e, duration: 5, response: { status: 200, statusText: 'OK', headers: { 'x-h': '1' }, body: { usage: {}, content: [] } } });
+    await w.flush();
+
+    const paths = sp('proj', SID);
+    const req = readLines(paths.journalPath).find(l => l.ph === 'req');
+    assert.deepEqual(req.params, {
+      model: 'claude-fable-5',
+      metadata: { user_id: jsonUserId },
+      max_tokens: 32000,
+      temperature: 1,
+      stream: true,
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+    }, 'params = whole body minus messages/system/tools');
+    const resp = readLines(paths.responsesPath)[0];
+    assert.equal(resp.statusText, 'OK');
+  });
+
+  it('params omitted for non-object bodies and bodies with only decomposed fields', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e1 = mkEntry(); // binds the session (params present: model + metadata)
+    w.ingestRequest(e1, e1.body.messages);
+    // only decomposed fields → empty rest → no params key
+    const e2 = mkEntry({ requestId: 'req_2' });
+    e2.body = { system: e1.body.system, tools: e1.body.tools, messages: [textMsg('user', 'bare')] };
+    w.ingestRequest(e2, e2.body.messages);
+    // non-object body → no params key (and no crash)
+    const e3 = mkEntry({ requestId: 'req_3' });
+    e3.body = 'not-json';
+    w.ingestRequest(e3, null);
+    // array body → no params key (arrays are typeof 'object')
+    const e4 = mkEntry({ requestId: 'req_4' });
+    e4.body = [textMsg('user', 'array body')];
+    w.ingestRequest(e4, null);
+    await w.flush();
+
+    const reqs = readLines(sp('proj', SID).journalPath).filter(l => l.ph === 'req');
+    assert.equal(reqs.length, 4);
+    assert.ok(reqs[0].params, 'first request carries params');
+    assert.equal(reqs[1].params, undefined, 'empty rest emits no params key');
+    assert.equal(reqs[2].params, undefined, 'string body emits no params key');
+    assert.equal(reqs[3].params, undefined, 'array body emits no params key');
+  });
+
   it('prompts.jsonl: snapshot writes all prompts, append writes only the new slice, dedup holds', async () => {
     const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
     const e1 = mkEntry(); // snapshot: ['hello']

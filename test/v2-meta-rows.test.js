@@ -180,3 +180,44 @@ describe('teammate fold + sid disambiguation (review F2)', () => {
     assert.equal(tMsg, 'teammate work');
   });
 });
+
+// ─── quota-check classification via restored params (2026-07-16) ──────────────
+// isQuotaCheck reads body.max_tokens; before req.params existed the v2-rebuilt
+// body lacked it, so quota probes fell through to SubAgent. With params the
+// row re-classifies as Count:Quota — matching V1, where the body was full.
+describe('quota probe typeTag via req.params', () => {
+  const qProject = 'quotaproj';
+  let qDir;
+
+  before(async () => {
+    const w = new V2Writer({ logDir: tmpRoot, project: qProject, enabled: true, minFreeBytes: 0 });
+    const main = entryOf(0, [textMsg('user', 'bind session')]);
+    const hm = w.ingestRequest(main, main.body.messages);
+    w.ingestCompletion(hm, { ...main, response: { status: 200, headers: {}, body: { content: [], usage: {} } }, duration: 1 });
+    const quota = {
+      timestamp: '2026-07-16T10:20:00.000Z',
+      project: qProject,
+      url: 'https://api.anthropic.com/v1/messages',
+      method: 'POST',
+      headers: {},
+      body: { model: 'claude-haiku-4-5-20251001', max_tokens: 1, metadata: { user_id: USER_ID }, messages: [{ role: 'user', content: 'quota' }] },
+      response: null, duration: 0, isStream: false, isHeartbeat: false, isCountTokens: false,
+      mainAgent: false, requestId: 'rid_quota',
+    };
+    const hq = w.ingestRequest(quota, quota.body.messages);
+    w.ingestCompletion(hq, { ...quota, response: { status: 200, headers: {}, body: { content: [], usage: {} } }, duration: 1 });
+    await w.flush();
+    const basename = resolveSessionDirName(join(tmpRoot, qProject), SID) || SID;
+    qDir = join(tmpRoot, qProject, 'sessions', basename);
+  });
+
+  after(() => { rmSync(join(tmpRoot, qProject), { recursive: true, force: true }); });
+
+  it('quota probe row classifies as Count:Quota (V1 parity)', async () => {
+    const { rows } = await readV2RequestsMeta(qDir, {});
+    const quotaRow = rows.find((r) => r.url.endsWith('/v1/messages') && r.seq === 2);
+    assert.ok(quotaRow, 'quota row present');
+    assert.equal(quotaRow.typeTag?.type, 'Count');
+    assert.equal(quotaRow.typeTag?.subType, 'Quota');
+  });
+});

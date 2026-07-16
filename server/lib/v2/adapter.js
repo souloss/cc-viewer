@@ -402,12 +402,30 @@ export class SessionSynthesizer {
     // ---- body (blob backfill is per-request by journal ref — never carried) --
     const tools = this._loadBlob(req.blobs && req.blobs.tools);
     const system = this._loadBlob(req.blobs && req.blobs.sys);
+    // req.params carries every residual body field (params-era journals);
+    // dedicated fields override it so precedence is deterministic. user_id is
+    // ALWAYS meta.userIdRaw — the client does equality-based session-boundary
+    // detection on it, and a `-c` adopted folder mixes real user_ids that
+    // would otherwise split the timeline mid-session.
+    const params = req.params && typeof req.params === 'object' ? req.params : null;
     const body = {
+      ...params,
       ...(req.model && { model: req.model }),
       ...(system !== undefined && { system }),
       ...(tools !== undefined && { tools }),
-      ...(meta.userIdRaw && { metadata: { user_id: meta.userIdRaw } }),
     };
+    if (meta.userIdRaw) {
+      const extra = body.metadata && typeof body.metadata === 'object' ? body.metadata : null;
+      body.metadata = { ...extra, user_id: meta.userIdRaw };
+    } else if (body.metadata && typeof body.metadata === 'object' && body.metadata.user_id !== undefined) {
+      // noid session (no parseable user_id at write time): a raw params
+      // user_id may vary per request, and surfacing it would re-open the
+      // spurious client boundary-split this block exists to prevent. Drop
+      // ONLY user_id; other metadata keys keep full fidelity.
+      const { user_id, ...restMeta } = body.metadata;
+      if (Object.keys(restMeta).length > 0) body.metadata = restMeta;
+      else delete body.metadata;
+    }
 
     const isTeammateEntry = isTeammate;
     const isMainKind = isMain;
@@ -523,6 +541,7 @@ export class SessionSynthesizer {
     }
     entry.response = {
       ...(typeof done.http === 'number' && { status: done.http }),
+      ...(resp && resp.statusText && { statusText: resp.statusText }),
       ...(resp && resp.headers && { headers: resp.headers }),
       body: resp ? resp.body : null,
     };

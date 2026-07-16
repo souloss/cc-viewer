@@ -332,6 +332,19 @@ export class V2Writer {
       convResult = s.convs.ingest(convKey, msgs, { seq, rid });
     }
 
+    // Residual body params — every top-level body field except the three that
+    // already have dedicated stores (messages → conv, system/tools → blobs).
+    // Inlined whole on the req line like headers, so the adapter can rebuild
+    // the full v1 body (max_tokens, temperature, thinking, metadata, …).
+    let params = null;
+    if (entry.body && typeof entry.body === 'object' && !Array.isArray(entry.body)) {
+      const rest = { ...entry.body };
+      delete rest.messages;
+      delete rest.system;
+      delete rest.tools;
+      if (Object.keys(rest).length > 0) params = rest;
+    }
+
     // 3. Journal req line — LAST, so it never references missing content.
     s.journal.writeReq({
       seq,
@@ -345,6 +358,7 @@ export class V2Writer {
       ...(entry.body && entry.body.model && { model: entry.body.model }),
       ...(entry.isStream && { isStream: true }),
       ...(entry.headers && { headers: entry.headers }),
+      ...(params && { params }),
       ...((toolsRef || sysRef) && { blobs: { ...(toolsRef && { tools: toolsRef }), ...(sysRef && { sys: sysRef }) } }),
       ...(convResult && { msgFrom: convResult.msgFrom, msgTo: convResult.msgTo }),
       ...(convResult && convResult.evt && { evt: convResult.evt }),
@@ -431,6 +445,7 @@ export class V2Writer {
           rid,
           body: respBody,
           ...(resp && resp.headers && { headers: resp.headers }),
+          ...(resp && resp.statusText && { statusText: resp.statusText }),
         }) + '\n'
       );
 
