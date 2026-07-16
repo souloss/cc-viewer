@@ -7386,6 +7386,26 @@ const i18nData = {
     "tr": "Taşıma tamamlandı: {sessions} oturum dönüştürüldü, {skipped} atlandı (zaten v2'de)",
     "uk": "Міграцію завершено: перетворено {sessions} сесій, пропущено {skipped} (вже у v2)"
   },
+  "ui.wireV2ConvertQuarantined": {
+    "zh": "{count} 个会话未通过校验，已暂存待检查（悬停查看）",
+    "en": "{count} sessions held for review (hover for details)",
+    "zh-TW": "{count} 個會話未通過校驗，已暫存待檢查（懸停查看）",
+    "ko": "{count}개 세션이 검증을 통과하지 못해 검토 대기 중(마우스를 올려 확인)",
+    "ja": "{count} 件のセッションが検証に通らず保留中（ホバーで詳細）",
+    "de": "{count} Sitzungen zur Prüfung zurückgehalten (Details per Hover)",
+    "es": "{count} sesiones retenidas para revisión (pase el cursor para más detalles)",
+    "fr": "{count} sessions mises de côté pour vérification (survolez pour les détails)",
+    "it": "{count} sessioni trattenute per revisione (passa il mouse per i dettagli)",
+    "da": "{count} sessioner tilbageholdt til gennemgang (hold musen over for detaljer)",
+    "pl": "{count} sesji wstrzymano do sprawdzenia (najedź, aby zobaczyć szczegóły)",
+    "ru": "{count} сессий отложено для проверки (наведите курсор для деталей)",
+    "ar": "تم الاحتفاظ بـ {count} جلسة للمراجعة (مرر المؤشر لمعرفة التفاصيل)",
+    "no": "{count} økter holdt tilbake for gjennomgang (hold musepekeren over for detaljer)",
+    "pt-BR": "{count} sessões retidas para revisão (passe o mouse para detalhes)",
+    "th": "{count} เซสชันถูกพักไว้เพื่อตรวจสอบ (วางเมาส์เพื่อดูรายละเอียด)",
+    "tr": "{count} oturum inceleme için bekletildi (ayrıntılar için üzerine gelin)",
+    "uk": "{count} сесій відкладено для перевірки (наведіть курсор для деталей)"
+  },
   "ui.wireV2ConvertError": {
     "zh": "迁移失败（悬停查看原因）",
     "en": "Migration failed (hover for the reason)",

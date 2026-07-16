@@ -81,7 +81,24 @@ export async function verifyV1File(v1File, opts = {}) {
     v1Completed: 0, v1Skipped: 0, matched: 0, v1Only: 0, v1DuplicateKey: 0,
     heartbeatsV1: 0, countTokensV1: 0, teammateV1: 0, staleOrBroken: 0,
   };
-  const addDiff = (d) => { if (diffs.length < MAX_REPORTED_DIFFS) diffs.push(d); };
+  // Per-session suspicion tally, keyed by the v2 session dir name (the same
+  // value `listSessionIds` / the converter's promote loop iterate). UNCAPPED —
+  // unlike `diffs` (bounded by MAX_REPORTED_DIFFS for memory/reporting), this
+  // must hold EVERY suspect session so the converter can quarantine the full
+  // set; capping it would silently promote corrupt sessions past diff #50.
+  const suspectSessions = new Map(); // sessionId → { count, reasons: string[] }
+  const MAX_REASONS = 5;
+  const flagSession = (sessionId, reason) => {
+    if (!sessionId) return;
+    let rec = suspectSessions.get(sessionId);
+    if (!rec) suspectSessions.set(sessionId, rec = { count: 0, reasons: [] });
+    rec.count++;
+    if (rec.reasons.length < MAX_REASONS) rec.reasons.push(reason);
+  };
+  const addDiff = (d) => {
+    flagSession(d.sessionId, `${d.type}@seq${d.seq}`);
+    if (diffs.length < MAX_REPORTED_DIFFS) diffs.push(d);
+  };
 
   const onScan = (raw) => {
     let entry;
@@ -119,20 +136,20 @@ export async function verifyV1File(v1File, opts = {}) {
     // ① wire-messages digest (skip heartbeats — no conversation on either side)
     if (v2.conv && v1Digest != null) {
       if (v1Digest !== v2.digest) {
-        addDiff({ type: 'messages-digest', key, seq: v2.seq, conv: v2.conv, v1: v1Digest, v2: v2.digest, v1Len: entry.body.messages.length, v2Len: v2.len });
+        addDiff({ type: 'messages-digest', sessionId: v2.sessionId, key, seq: v2.seq, conv: v2.conv, v1: v1Digest, v2: v2.digest, v1Len: entry.body.messages.length, v2Len: v2.len });
       }
     }
     // ② tools/system CAS equality
     const v1Tools = blobRefOf(entry.body && entry.body.tools);
     const v1Sys = blobRefOf(entry.body && entry.body.system);
-    if (v1Tools !== v2.toolsRef) addDiff({ type: 'tools-ref', key, seq: v2.seq, v1: v1Tools, v2: v2.toolsRef });
-    if (v1Sys !== v2.sysRef) addDiff({ type: 'system-ref', key, seq: v2.seq, v1: v1Sys, v2: v2.sysRef });
+    if (v1Tools !== v2.toolsRef) addDiff({ type: 'tools-ref', sessionId: v2.sessionId, key, seq: v2.seq, v1: v1Tools, v2: v2.toolsRef });
+    if (v1Sys !== v2.sysRef) addDiff({ type: 'system-ref', sessionId: v2.sessionId, key, seq: v2.seq, v1: v1Sys, v2: v2.sysRef });
     // ③ teammate attribution
     if (!!entry.teammate !== (v2.kind === 'teammate')) {
-      addDiff({ type: 'teammate-kind', key, seq: v2.seq, v1: !!entry.teammate, v2: v2.kind });
+      addDiff({ type: 'teammate-kind', sessionId: v2.sessionId, key, seq: v2.seq, v1: !!entry.teammate, v2: v2.kind });
     }
     // ④ completion accounting
-    if (!v2.done) addDiff({ type: 'missing-done', key, seq: v2.seq });
+    if (!v2.done) addDiff({ type: 'missing-done', sessionId: v2.sessionId, key, seq: v2.seq });
   };
 
   // Single streaming pass (1MB chunks): verify must stay memory-bounded on
@@ -151,6 +168,12 @@ export async function verifyV1File(v1File, opts = {}) {
     }
   }
 
+  // Integrity violations and unsupported-wire sessions are collected during the
+  // v2-side indexing pass above (before `flagSession` exists), so fold them into
+  // the per-session tally here — they condemn a session just as a diff does.
+  for (const v of integrity) flagSession(v.sessionId, `integrity@seq${v.seq}`);
+  for (const u of unsupportedSessions) flagSession(u.sessionId, `unsupported:${u.wireFormat}`);
+
   const fileSize = (() => { try { return statSync(v1File).size; } catch { return 0; } })();
   const report = {
     v1File,
@@ -161,6 +184,8 @@ export async function verifyV1File(v1File, opts = {}) {
     diffs,
     integrity,
     unsupportedSessions,
+    // Complete (uncapped) set of suspect sessions for the converter to quarantine.
+    suspectSessions: [...suspectSessions.entries()].map(([sessionId, r]) => ({ sessionId, count: r.count, reasons: r.reasons })),
     ok: diffs.length === 0 && integrity.length === 0 && unsupportedSessions.length === 0,
   };
   return report;

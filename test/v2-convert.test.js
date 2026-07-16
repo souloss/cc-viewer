@@ -15,9 +15,10 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { convertProject, listV1Files, listConvertibleProjects, readConvertState, STAGING_DIR_NAME } from '../server/lib/v2/convert.js';
+import { convertProject, listV1Files, listConvertibleProjects, readConvertState, STAGING_DIR_NAME, QUARANTINE_DIR_NAME } from '../server/lib/v2/convert.js';
 import { startConvert, stopConvert, convertStatus, isConvertRunning } from '../server/lib/v2/convert-manager.js';
 import { verifyV1File } from '../server/lib/v2/verify.js';
+import { listSessionIds } from '../server/lib/v2/replay.js';
 import { ensureSessionDirSync } from '../server/lib/v2/layout.js';
 import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { _resetForTest } from '../server/lib/error-report.js';
@@ -175,6 +176,64 @@ describe('convertProject golden round-trip', () => {
     assert.deepEqual(events.map(e => e.t), ['snapshot', 'append'], 'cross-file wire state prefix-extends');
     const meta = JSON.parse(readFileSync(join(sessionsDir(SID2), 'meta.json'), 'utf8'));
     assert.deepEqual(meta.sources, ['proj_20260101_000000.jsonl', 'proj_20260102_000000.jsonl']);
+  });
+});
+
+describe('convertProject quarantine (weak, per-session verify)', () => {
+  // Injected verifier flagging one session by its staged dir name (found via uuid).
+  const flagVerifier = (flagUuid) => async (v1File, o) => {
+    const projectDir = join(logDir, PROJECT);
+    let suspectDir = null;
+    for (const dir of listSessionIds(projectDir, o.sessionsDirName)) {
+      try {
+        const m = JSON.parse(readFileSync(join(projectDir, o.sessionsDirName, dir, 'meta.json'), 'utf8'));
+        if (m.sessionId === flagUuid) suspectDir = dir;
+      } catch { /* torn meta — not our target */ }
+    }
+    const suspectSessions = suspectDir ? [{ sessionId: suspectDir, count: 4, reasons: ['messages-digest@seq1'] }] : [];
+    return { diffs: [], integrity: [], unsupportedSessions: [], suspectSessions, ok: suspectSessions.length === 0 };
+  };
+
+  it('holds only the flagged session and still promotes the rest (no abort)', async () => {
+    writeV1('proj_20260101_000000.jsonl', [
+      entryOf({ messages: [textMsg('user', 'good')], uid: jsonUid(SID) }),
+      entryOf({ messages: [textMsg('user', 'bad')], uid: jsonUid(SID2) }),
+    ]);
+
+    const state = await convertProject(logDir, PROJECT, {
+      verifyFn: flagVerifier(SID2),
+      statfs: () => ({ bavail: 1e9, bsize: 4096 }),
+    });
+
+    // A verify failure must NOT abort the batch.
+    assert.equal(state.status, 'done', 'one bad session never aborts the migration');
+    assert.equal(state.sessionsQuarantined, 1);
+    assert.equal(state.quarantined.length, 1);
+    assert.equal(state.quarantined[0].uuid, SID2);
+    assert.ok(state.quarantined[0].reasons.length >= 1, 'quarantine record carries reasons');
+
+    // Clean session went live; flagged session was held aside.
+    assert.ok(resolveSessionDirName(join(logDir, PROJECT), SID), 'clean session promoted to sessions/');
+    assert.ok(!resolveSessionDirName(join(logDir, PROJECT), SID2), 'flagged session NOT promoted to sessions/');
+    const held = listSessionIds(join(logDir, PROJECT), QUARANTINE_DIR_NAME);
+    assert.equal(held.length, 1, 'flagged session lives in sessions-quarantine/');
+    const heldMeta = JSON.parse(readFileSync(join(logDir, PROJECT, QUARANTINE_DIR_NAME, held[0], 'meta.json'), 'utf8'));
+    assert.equal(heldMeta.sessionId, SID2);
+    // Staging fully drained (promoted or moved to quarantine).
+    assert.ok(!existsSync(join(logDir, PROJECT, STAGING_DIR_NAME)), 'staging removed after promote/quarantine');
+  });
+
+  it('a crash inside the verifier is soft — migration completes, nothing quarantined', async () => {
+    writeV1('proj_20260101_000000.jsonl', [
+      entryOf({ messages: [textMsg('user', 'a')], uid: jsonUid(SID) }),
+    ]);
+    const state = await convertProject(logDir, PROJECT, {
+      verifyFn: async () => { throw new Error('verifier blew up'); },
+      statfs: () => ({ bavail: 1e9, bsize: 4096 }),
+    });
+    assert.equal(state.status, 'done', 'verifier crash must not sink the migration');
+    assert.equal(state.sessionsQuarantined, 0);
+    assert.ok(resolveSessionDirName(join(logDir, PROJECT), SID), 'session still promoted');
   });
 });
 

@@ -68,6 +68,8 @@ ccv convert --all       # 迁移所有项目
 ccv verify <v1-file>    # 对照转换后的会话校验某个 v1 文件
 ```
 
+某个会话未通过 golden 校验时，会被暂存到 `sessions-quarantine/` 待检查，而不会让整次迁移失败——其余会话照常迁移。
+
 ### 日志模式
 
 如果你仍然习惯使用claude 原生工具，或者VS code插件，请使用该模式。

@@ -68,6 +68,8 @@ ccv convert --all       # tüm projeleri taşı
 ccv verify <v1-file>    # bir v1 dosyasını dönüştürülmüş oturumlarıyla karşılaştır
 ```
 
+Bir oturum golden doğrulamasını geçemezse, tüm taşımayı başarısız kılmak yerine incelenmek üzere `sessions-quarantine/` içinde tutulur; diğer oturumlar yine de taşınır.
+
 ### Log modu
 
 Hâlâ claude'un native aracını veya VS Code eklentisini kullanmaya alışkınsanız bu modu kullanın.

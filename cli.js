@@ -936,7 +936,7 @@ if (imPlatform) {
   //        [--log-dir <dir>] — chronological per project, file-level resume,
   // staging + golden verify + promote. Strictly additive: v1 files untouched.
   (async () => {
-    const { convertProject, listConvertibleProjects } = await import('./server/lib/v2/convert.js');
+    const { convertProject, listConvertibleProjects, QUARANTINE_DIR_NAME } = await import('./server/lib/v2/convert.js');
     const rest = args.slice(1);
     const dirIdx = rest.indexOf('--log-dir');
     let logDir = LOG_DIR;
@@ -960,7 +960,15 @@ if (imPlatform) {
             console.error(`  [${p.phase}] ${p.file} (${p.fileIndex}/${p.filesTotal}) entries=${p.entries} sessions=${p.sessionsConverted} skipped=${p.sessionsSkipped}`);
           },
         });
-        console.error(`  ${project}: ${state.status} — ${state.sessionsConverted} sessions converted, ${state.sessionsSkipped} skipped, ${state.entries} entries`);
+        const quarantined = state.sessionsQuarantined || 0;
+        console.error(`  ${project}: ${state.status} — ${state.sessionsConverted} sessions converted, ${state.sessionsSkipped} skipped${quarantined ? `, ${quarantined} quarantined` : ''}, ${state.entries} entries`);
+        if (quarantined > 0) {
+          // Non-blocking: the good sessions promoted; only the flagged ones are held.
+          console.error(`  WARNING: ${quarantined} session(s) failed golden verify and were held in ${QUARANTINE_DIR_NAME}/ (not promoted). Suspect sessions:`);
+          for (const q of state.quarantined || []) {
+            console.error(`    - ${q.sessionId}${q.reasons && q.reasons.length ? ` (${q.reasons.slice(0, 5).join(', ')})` : ''}`);
+          }
+        }
         if (state.status !== 'done') allOk = false;
       } catch (err) {
         console.error(`  ${project}: FAILED — ${err.message}`);

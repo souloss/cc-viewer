@@ -37,6 +37,10 @@ import { listSessionIds } from './replay.js';
 import { resolveSessionDirName } from './session-select.js';
 
 export const STAGING_DIR_NAME = 'sessions-migrating';
+// Sessions that fail golden verify are moved here instead of being promoted into
+// `sessions/`. The migration still completes — a single bad session is held for
+// inspection, never a batch-wide abort (weak verify dependency, user 2026-07-15).
+export const QUARANTINE_DIR_NAME = 'sessions-quarantine';
 export const STATE_FILE_NAME = 'wire-v2-convert-state.json';
 const STATE_VERSION = 1;
 const STOP_CHECK_EVERY = 50; // entries between shouldStop() polls
@@ -95,7 +99,9 @@ function doneTsOf(entry) {
  * @param {object} [opts]
  * @param {Function} [opts.onProgress] - ({phase, file, fileIndex, filesTotal, entries, sessionsConverted, sessionsSkipped})
  * @param {Function} [opts.shouldStop] - polled between entries; true → persist 'stopped' and return
- * @param {boolean}  [opts.verify=true] - golden verify before promote
+ * @param {boolean}  [opts.verify=true] - golden verify before promote (non-fatal:
+ *   failing sessions are quarantined, not aborted; the migration still completes)
+ * @param {Function} [opts.verifyFn] - injected verifyV1File (tests)
  * @param {Function} [opts.statfs] - injected statfsSync (tests)
  * @param {number}   [opts.spaceFactor=2] - free-space assertion multiplier
  * @returns {Promise<object>} final state object
@@ -108,6 +114,7 @@ export async function convertProject(logDir, project, opts = {}) {
   const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
   const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
   const doVerify = opts.verify !== false;
+  const verifyFn = typeof opts.verifyFn === 'function' ? opts.verifyFn : verifyV1File;
   const statfs = opts.statfs || statfsSync;
   const spaceFactor = typeof opts.spaceFactor === 'number' ? opts.spaceFactor : 2;
 
@@ -133,6 +140,8 @@ export async function convertProject(logDir, project, opts = {}) {
     }),
     sessionsConverted: prev && prev.status !== 'done' ? (prev.sessionsConverted || 0) : 0,
     sessionsSkipped: 0,
+    sessionsQuarantined: 0,
+    quarantined: [], // [{ sessionId (dir name), uuid, reasons: string[] }] — held-back sessions
     entries: 0,
     lastError: null,
   };
@@ -260,21 +269,34 @@ export async function convertProject(logDir, project, opts = {}) {
     }
     await writer.flush();
 
-    // ---- golden verify (staging) -------------------------------------------
+    // ---- golden verify (staging) — weak, per-session dependency -------------
+    // Verify no longer gates the whole batch: a diff/integrity violation flags
+    // only the SPECIFIC staged session that produced it (verify attributes every
+    // diff to its sessionId). Those sessions are quarantined below; everything
+    // clean still promotes. One bad session never aborts the migration
+    // (user 2026-07-15). `suspectSessions` is uncapped, so a >50-diff file still
+    // yields the complete quarantine set.
+    const quarantineSids = new Map(); // staged dir name → reasons[] (merged across files)
     if (doVerify && listSessionIds(projectDir, STAGING_DIR_NAME).length > 0) {
       state.status = 'verifying';
       writeConvertState(projectDir, state);
       for (let i = 0; i < state.files.length; i++) {
         const f = state.files[i];
-        const report = await verifyV1File(join(projectDir, f.name), { sessionsDirName: STAGING_DIR_NAME });
-        if (report.diffs.length > 0 || report.integrity.length > 0) {
-          state.status = 'error';
-          state.lastError = `golden verify failed on ${f.name}: ${report.diffs.length} diffs, ${report.integrity.length} integrity violations (staging kept at ${STAGING_DIR_NAME}/ for inspection)`;
-          state.finishedAt = new Date().toISOString();
-          writeConvertState(projectDir, state);
-          throw new Error(state.lastError);
+        let report;
+        try {
+          report = await verifyFn(join(projectDir, f.name), { sessionsDirName: STAGING_DIR_NAME });
+        } catch (err) {
+          // Verify is a soft check — a crash in the verifier itself (e.g. an
+          // unreadable staged session) must not sink the migration. Skip this
+          // file's attribution and keep going; unverified sessions still promote.
+          reportSwallowed('v2-convert.verify', err);
+          continue;
         }
-        onProgress({ phase: 'verify', file: f.name, fileIndex: i + 1, filesTotal: state.files.length, entries: state.entries, sessionsConverted: state.sessionsConverted, sessionsSkipped: state.sessionsSkipped });
+        for (const s of report.suspectSessions || []) {
+          const prev = quarantineSids.get(s.sessionId) || [];
+          quarantineSids.set(s.sessionId, [...prev, ...(s.reasons || [])].slice(0, 10));
+        }
+        onProgress({ phase: 'verify', file: f.name, fileIndex: i + 1, filesTotal: state.files.length, entries: state.entries, sessionsConverted: state.sessionsConverted, sessionsSkipped: state.sessionsSkipped, quarantined: quarantineSids.size });
         if (shouldStop()) {
           state.status = 'stopped';
           state.finishedAt = new Date().toISOString();
@@ -286,6 +308,7 @@ export async function convertProject(logDir, project, opts = {}) {
 
     // ---- promote staging → sessions/ (same volume, per-session atomic) ------
     const stagingRoot = join(projectDir, STAGING_DIR_NAME);
+    const quarantineRoot = join(projectDir, QUARANTINE_DIR_NAME);
     if (listSessionIds(projectDir, STAGING_DIR_NAME).length > 0) {
       mkdirSync(join(projectDir, 'sessions'), { recursive: true }); // fresh project: parent may not exist yet
     }
@@ -297,8 +320,21 @@ export async function convertProject(logDir, project, opts = {}) {
       let stagedUuid = sid;
       try { stagedUuid = JSON.parse(readFileSync(join(staged, 'meta.json'), 'utf-8')).sessionId || sid; } catch { /* fall back to name */ }
       if (resolveSessionDirName(projectDir, stagedUuid)) {
-        // A dual-write session appeared for this uuid mid-conversion — live data wins.
+        // A dual-write session appeared for this uuid mid-conversion — live data
+        // wins (authoritative), so drop the staged copy even if it was flagged.
         rmSync(staged, { recursive: true, force: true });
+        continue;
+      }
+      // Verify flagged this session: hold it in `sessions-quarantine/` for
+      // inspection instead of promoting corrupt data into the live view. The
+      // migration still completes; the user is told which sessions were held.
+      if (quarantineSids.has(sid)) {
+        mkdirSync(quarantineRoot, { recursive: true });
+        const held = join(quarantineRoot, sid);
+        rmSync(held, { recursive: true, force: true }); // idempotent across re-runs
+        renameSync(staged, held);
+        state.sessionsQuarantined++;
+        state.quarantined.push({ sessionId: sid, uuid: stagedUuid, reasons: quarantineSids.get(sid) });
         continue;
       }
       const target = sessionPaths(logDir, project, sid).dir;
@@ -328,7 +364,7 @@ export async function convertProject(logDir, project, opts = {}) {
     state.status = 'done';
     state.finishedAt = new Date().toISOString();
     writeConvertState(projectDir, state);
-    onProgress({ phase: 'done', filesTotal: state.files.length, entries: state.entries, sessionsConverted: state.sessionsConverted, sessionsSkipped: state.sessionsSkipped });
+    onProgress({ phase: 'done', filesTotal: state.files.length, entries: state.entries, sessionsConverted: state.sessionsConverted, sessionsSkipped: state.sessionsSkipped, quarantined: state.sessionsQuarantined });
     return state;
   } catch (err) {
     if (state.status !== 'error') {

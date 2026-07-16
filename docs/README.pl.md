@@ -68,6 +68,8 @@ ccv convert --all       # migruj wszystkie projekty
 ccv verify <v1-file>    # sprawdź plik v1 względem jego skonwertowanych sesji
 ```
 
+Jeśli sesja nie przejdzie weryfikacji golden, zostaje wstrzymana w `sessions-quarantine/` do sprawdzenia, zamiast unieważniać całą migrację — pozostałe sesje są migrowane normalnie.
+
 ### Tryb loggera
 
 Jeśli nadal wolisz natywne narzędzie claude lub rozszerzenie VS Code, użyj tego trybu.

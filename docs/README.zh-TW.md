@@ -68,6 +68,8 @@ ccv convert --all       # 遷移所有專案
 ccv verify <v1-file>    # 對照轉換後的工作階段校驗某個 v1 檔案
 ```
 
+某個工作階段未通過 golden 校驗時，會被暫存到 `sessions-quarantine/` 待檢查，而不會讓整次遷移失敗——其餘工作階段照常遷移。
+
 ### 日誌模式
 
 如果你仍習慣使用 claude 原生工具，或 VS Code 擴充功能，請使用此模式。

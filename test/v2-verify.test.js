@@ -176,4 +176,30 @@ describe('verifier end-to-end over converted sessions (migration golden gate)', 
       writeFileSync(journalFile, original, 'utf-8');
     }
   });
+
+  // Per-session attribution powers the converter's quarantine: every diff must
+  // name the session that produced it, and suspectSessions must be COMPLETE
+  // (uncapped) so the converter never promotes a corrupt session past diff #50.
+  it('diffs and suspectSessions attribute to the exact session (dir name)', async () => {
+    writeV1(standardEntries());
+    await convertAll();
+    const dirName = resolveSessionDirName(join(logDir, PROJECT), SID);
+    const convFile = join(logDir, PROJECT, 'sessions', dirName, 'conversations', 'main', 'e0.jsonl');
+    const original = readFileSync(convFile, 'utf-8');
+    try {
+      appendFileSync(convFile, JSON.stringify({ seq: 3, rid: 'tamper', t: 'ctl', op: 'replace-tail', msg: textMsg('user', 'TAMPERED') }) + '\n');
+      const report = await verifyV1File(v1Path());
+      assert.equal(report.ok, false);
+      // Every reported diff names its session.
+      assert.ok(report.diffs.length > 0 && report.diffs.every(d => d.sessionId === dirName), 'each diff carries the session dir name');
+      // suspectSessions folds them into a per-session tally keyed by dir name.
+      assert.equal(report.suspectSessions.length, 1, 'exactly one suspect session');
+      assert.equal(report.suspectSessions[0].sessionId, dirName);
+      assert.ok(report.suspectSessions[0].count >= 1 && report.suspectSessions[0].reasons.length >= 1, 'suspect carries count + reasons');
+    } finally {
+      writeFileSync(convFile, original, 'utf-8');
+    }
+    const clean = await verifyV1File(v1Path());
+    assert.deepEqual(clean.suspectSessions, [], 'restored state has no suspects');
+  });
 });

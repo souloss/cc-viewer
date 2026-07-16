@@ -737,6 +737,11 @@ class App extends AppBase {
                   {st && st.status === 'done' && (
                     <span className={styles.pendingHint}> {t('ui.wireV2ConvertDone', { sessions: st.sessionsConverted || 0, skipped: st.sessionsSkipped || 0 })}</span>
                   )}
+                  {st && st.status === 'done' && st.sessionsQuarantined > 0 && (
+                    <Tooltip title={<span>{(st.quarantined || []).map(q => <div key={q.sessionId}>{q.sessionId}</div>)}</span>}>
+                      <span className={styles.pendingHint}> {t('ui.wireV2ConvertQuarantined', { count: st.sessionsQuarantined })}</span>
+                    </Tooltip>
+                  )}
                   {st && (st.status === 'error' || st.status === 'stopped') && (
                     <Tooltip title={st.lastError || ''}>
                       <span className={styles.pendingHint}> {t(st.status === 'error' ? 'ui.wireV2ConvertError' : 'ui.wireV2ConvertStopped')}</span>
