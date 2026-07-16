@@ -1,7 +1,7 @@
 // Workspace routes (moved verbatim from server.js handleRequest).
 import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
-import { initForWorkspace, resetWorkspace, getLiveLogSource, markContinuedLaunch, isContinuedLaunch } from '../interceptor.js';
+import { initForWorkspace, resetWorkspace, getLiveLogSource, markContinuedLaunch, markForkSession, markResumeSession, isContinuedLaunch } from '../interceptor.js';
 import { LOG_DIR } from '../../findcc.js';
 import { migrationStatus } from '../lib/v2/migrate-prompt.js';
 import { reportSwallowed } from '../lib/error-report.js';
@@ -10,6 +10,10 @@ import { reportSwallowed } from '../lib/error-report.js';
 // (WorkspaceList's logCount heuristic), so argv scanning in cli.js never sees
 // it; this is detection channel ② of interceptor.isContinuedLaunch().
 const CONTINUE_FLAGS = new Set(['-c', '--continue', '-r', '--resume']);
+// Explicit resume flags — continued for the migrate prompt, but `-c` folder
+// adoption must NOT fire (it targets the latest main session, not the user's
+// chosen one). Mirrors cli.js's CCV_CLAUDE_RESUME channel.
+const RESUME_FLAGS = new Set(['-r', '--resume']);
 import { unwatchAllWorkflows } from '../lib/workflow-watcher.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
@@ -67,6 +71,12 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       // 是否走 PTY 分支都要打标——迁移提示的 continued 语义只取决于参数本身）。
       const mergedArgs = [...deps.workspaceClaudeArgs, ...(Array.isArray(launchExtraArgs) ? launchExtraArgs : [])];
       if (mergedArgs.some((a) => CONTINUE_FLAGS.has(a))) markContinuedLaunch();
+      // `--fork-session`: a continuation that mints a NEW session id on purpose —
+      // `-c` folder adoption must NOT fire for it.
+      if (mergedArgs.includes('--fork-session')) markForkSession();
+      // `-r`/`--resume`: user-chosen target session — adoption must not redirect
+      // it to the latest main session.
+      if (mergedArgs.some((a) => RESUME_FLAGS.has(a))) markResumeSession();
 
       // 启动 PTY
       const proxyPort = process.env.CCV_PROXY_PORT;

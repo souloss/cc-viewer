@@ -135,6 +135,19 @@ describe('continuation detection channels', () => {
     interceptor.markContinuedLaunch();
     assert.equal(interceptor.isContinuedLaunch(), true, 'workspace-route channel (sticky)');
   });
+
+  it('markForkSession flips isForkSession, but a workspace switch clears it (fork must not leak into a later -c)', () => {
+    assert.equal(interceptor.isForkSession(), false, 'no fork by default');
+    interceptor.markForkSession();
+    assert.equal(interceptor.isForkSession(), true, 'workspace-route fork channel');
+    // A later workspace launch must NOT inherit the fork intent — otherwise one
+    // `--fork-session` launch would permanently suppress `-c` adoption for the
+    // rest of a long-lived server process.
+    interceptor.initForWorkspace(join(tmpDir, 'wsFork', PROJECT));
+    assert.equal(interceptor.isForkSession(), false, 'initForWorkspace clears the fork mark');
+    // …while the continuation mark stays sticky (the migrate prompt relies on it).
+    assert.equal(interceptor.isContinuedLaunch(), true, 'continued mark survives the workspace switch');
+  });
 });
 
 describe('/events migrate_prompt frame', () => {

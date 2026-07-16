@@ -17,7 +17,7 @@ import { LOG_DIR } from '../findcc.js';
 import { assembleStreamMessage, createStreamAssembler, isAnthropicApiPath, isMainAgentRequest, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs } from './lib/interceptor-core.js';
 import { V2Writer } from './lib/v2/v2-writer.js';
 import { reportSwallowed } from './lib/error-report.js';
-import { latestMainSessionDir, sessionHasMainTurn } from './lib/v2/session-select.js';
+import { latestMainSessionDir, sessionHasCompletedMainTurn } from './lib/v2/session-select.js';
 import { sanitizePathComponent } from './lib/v2/layout.js';
 
 
@@ -293,10 +293,20 @@ export { _v2Writer };
 // (/events, /api/requests, workspace reload) route through here.
 export function getLiveLogSource() {
   const dir = _v2Writer.currentSessionDir();
-  if (dir && sessionHasMainTurn(dir)) return dir; // activated current session
+  // "Activated" requires a COMPLETED main turn, not merely a written main
+  // request line: a session with only an in-flight first request has nothing a
+  // cold load can render yet, so keep falling back to the previous conversation
+  // (which CAN render) until the current one has a done. Removes the blank flash
+  // between "first `-c`/fresh main request written" and "its response emitted".
+  if (dir && sessionHasCompletedMainTurn(dir)) return dir; // activated current session
   if (!_projectName) return ''; // no project bound yet (mirrors v2-writer's guard)
   try {
-    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)));
+    // excludeDir: the current session just failed the completed-turn gate, but
+    // the picker's weaker has-a-main-req gate would re-select it (it is the
+    // newest dir once its first main req is written) — handing back exactly the
+    // blank in-flight session the strict gate rejected. Excluding it makes the
+    // fallback actually land on the previous, renderable conversation.
+    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)), { excludeDir: dir });
     // A current-but-empty session with nothing else on disk: '' (still empty,
     // but the live feed fills it in place — no worse than before the fix).
     return fallback || dir || '';
@@ -317,12 +327,49 @@ export function getLiveLogSource() {
 //   ③ wire-level fallback in V2Writer: a brand-new session whose FIRST main
 //     snapshot already contains assistant turns can only be a continuation.
 let _continuedLaunchMarked = false;
-export function markContinuedLaunch() { _continuedLaunchMarked = true; }
+let _forkLaunchMarked = false;
+export function markContinuedLaunch() { _continuedLaunchMarked = true; _syncContinuationMode(); }
 export function isContinuedLaunch() {
   return process.env.CCV_CLAUDE_CONTINUE === '1'
     || _continuedLaunchMarked
     || _v2Writer.sawContinuedSession();
 }
+// `--fork-session` (resume/continue but mint a NEW session id) — the user
+// explicitly wants a fresh session, so `-c` folder adoption must NOT fire.
+// Detected two ways, mirroring the continuation channels: ① cli.js sets
+// CCV_CLAUDE_FORK_SESSION from the claude argv; ② the workspace launcher calls
+// markForkSession().
+export function markForkSession() { _forkLaunchMarked = true; _syncContinuationMode(); }
+export function isForkSession() {
+  return process.env.CCV_CLAUDE_FORK_SESSION === '1' || _forkLaunchMarked;
+}
+// Explicit `-r`/`--resume` — the user targets a session of THEIR choosing (an
+// id or the interactive picker), while adoption always targets the LATEST main
+// session; if Claude mints a fresh wire sid for the resume, adoption would
+// misroute the resumed conversation into whatever session happens to be newest.
+// So an explicit resume keeps the pre-adoption behavior (its own folder);
+// adoption serves `-c`/`--continue` only. Same two channels as fork: ① cli.js
+// sets CCV_CLAUDE_RESUME from the claude argv; ② the workspace launcher calls
+// markResumeSession(). The launch still counts as "continued" for the migrate
+// prompt (isContinuedLaunch is unchanged).
+let _resumeLaunchMarked = false;
+export function markResumeSession() { _resumeLaunchMarked = true; _syncContinuationMode(); }
+export function isResumeSession() {
+  return process.env.CCV_CLAUDE_RESUME === '1' || _resumeLaunchMarked;
+}
+// Push the launch's continuation/fork/resume intent into the writer so `-c`
+// folder adoption can decide before the first request. Uses ONLY the
+// pre-request continuation signals (env / workspace marker) — never the
+// wire-level sawContinuedSession, which is known too late to avoid minting the
+// folder.
+function _syncContinuationMode() {
+  _v2Writer.setContinuationMode({
+    continued: process.env.CCV_CLAUDE_CONTINUE === '1' || _continuedLaunchMarked,
+    fork: isForkSession(),
+    resume: isResumeSession(),
+  });
+}
+_syncContinuationMode(); // seed from the CLI env at module load (`ccv -c`)
 
 // 现在 _projectName/_logDir 已初始化，可以安全加载 proxy profile（含 workspace override）
 // 并挂载 watchFile 同步列表变化。
@@ -348,7 +395,17 @@ export function initForWorkspace(projectPath, { forceNew = false } = {}) { // es
   // Fresh workspace context — no carried names apply; future requests must
   // create session dirs under the NEW project.
   _agentSpawnRegistry.clear();
-  _v2Writer.resetSessions();
+  _v2Writer.resetSessions(); // also clears the per-process `-c` adoption latch
+  // A `--fork-session` / `-r` launch marks fork/resume intent; neither must
+  // leak into a LATER workspace's `-c` (in a long-lived server that would
+  // permanently suppress adoption). Clear both marks per launch and re-sync —
+  // the workspace launcher re-marks right after if THIS launch is itself a
+  // fork/resume. (`_continuedLaunchMarked` stays sticky on purpose: the migrate
+  // prompt relies on it, and a stale continued flag is harmless — adoption also
+  // requires the wire to actually replay assistant history.)
+  _forkLaunchMarked = false;
+  _resumeLaunchMarked = false;
+  _syncContinuationMode();
   _loadProxyProfile(); // 重读该 workspace 的 active-profile.json
 
   return { filePath: '', dir, projectName, resumed: false };

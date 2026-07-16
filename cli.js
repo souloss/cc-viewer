@@ -313,8 +313,22 @@ async function runProxyCommand(args) {
 // CCV_CLAUDE_CONTINUE at prompt time, so setting it before the server module
 // loads is sufficient — claude's own -c semantics are untouched.
 function markContinueEnv(claudeArgs) {
-  if (Array.isArray(claudeArgs) && claudeArgs.some((a) => a === '-c' || a === '--continue' || a === '-r' || a === '--resume')) {
+  if (!Array.isArray(claudeArgs)) return;
+  if (claudeArgs.some((a) => a === '-c' || a === '--continue' || a === '-r' || a === '--resume')) {
     process.env.CCV_CLAUDE_CONTINUE = '1';
+  }
+  // Explicit `-r`/`--resume` targets a session of the user's choosing, while
+  // folder adoption always targets the LATEST main session — so a resume must
+  // keep its pre-adoption behavior (own folder). The CONTINUE env above still
+  // marks the launch for the migrate prompt.
+  if (claudeArgs.some((a) => a === '-r' || a === '--resume')) {
+    process.env.CCV_CLAUDE_RESUME = '1';
+  }
+  // `--fork-session` continues/resumes but mints a NEW session id on purpose —
+  // the interceptor reads this before the server module loads so `-c` folder
+  // adoption is suppressed (claude's own semantics are untouched).
+  if (claudeArgs.includes('--fork-session')) {
+    process.env.CCV_CLAUDE_FORK_SESSION = '1';
   }
 }
 

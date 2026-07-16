@@ -17,11 +17,11 @@
 // correctness dependency.
 
 import { statfsSync, existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { AsyncWriteQueue } from '../async-write-queue.js';
 import { reportSwallowed } from '../error-report.js';
 import { ensureSessionDirSync, compactLocalTs14, sanitizePathComponent } from './layout.js';
-import { resolveSessionDirName } from './session-select.js';
+import { resolveSessionDirName, latestMainSession } from './session-select.js';
 import { BlobStore } from './blob-store.js';
 import { Journal } from './journal.js';
 import { ConversationStore } from './conversation-store.js';
@@ -84,11 +84,31 @@ export class V2Writer {
     this._lateHandles = new Map(); // rid → handle for held requests whose completion arrives after the flush
     this._diskGuardTripped = false;
     this._continuedSeen = false;   // P2: wire-level `claude -c` continuation marker
+    // `-c` folder adoption (Claude 2.1.210 hands a fresh wire session_id on every
+    // continue, so a new folder would otherwise be minted each time). Set from
+    // the launch flags via setContinuationMode(); adoption fires at most once per
+    // process (the first main request that proves a continuation on the wire).
+    this._continuationLaunch = false;
+    this._forkSession = false;
+    this._resumeSession = false;
+    this._adopted = false;
   }
 
   /** P2: true once any session's FIRST main wire already carried assistant
    *  turns — the wire-level signature of a continued (-c/-r) conversation. */
   sawContinuedSession() { return this._continuedSeen; }
+
+  /** Launch flags for `-c` folder adoption (set by the interceptor before any
+   *  request flows). `continued` = a pre-request continuation signal
+   *  (CCV_CLAUDE_CONTINUE / workspace launcher); `fork` = `--fork-session`
+   *  (user wants a NEW session — never adopt); `resume` = explicit `-r`/
+   *  `--resume` (user-chosen target session — adoption would misroute it to
+   *  the LATEST main session, so it keeps its own folder). */
+  setContinuationMode({ continued, fork, resume } = {}) {
+    this._continuationLaunch = !!continued;
+    this._forkSession = !!fork;
+    this._resumeSession = !!resume;
+  }
 
   // 1.7.0: v2 is the only format — the writer is always on. The getter is kept
   // because read-side helpers key off it; the sole write inhibitor left is the
@@ -99,7 +119,34 @@ export class V2Writer {
    *  writer exists (module init order), so the nudge callback arrives here. */
   setOnActivity(fn) { this._onActivity = typeof fn === 'function' ? fn : null; }
 
-  _session(sessionId, userIdRaw, encoding, project, startTsIso) {
+  /**
+   * If this request should adopt the previous main session's folder — a `-c`
+   * continuation launch that Claude handed a FRESH wire session_id — return
+   * `{ dirName, identityUUID }` of the folder to reuse, else null. Decided at
+   * most once per process, before the folder is created. All conditions must
+   * hold: continuation launch via `-c`/`--continue` ONLY (not `--fork-session`,
+   * not an explicit `-r`/`--resume` — both keep their own folder); main
+   * (non-leader) writer; not already adopted; the wire sid has no folder of its
+   * own (never hijack a same-UUID restart); the wire actually replays assistant
+   * history (excludes the pty-manager `-c`-stripped retry and stray
+   * history-less requests); and a previous main session exists.
+   * @returns {{dirName:string, identityUUID:string}|null}
+   */
+  _resolveAdoption(sid, project, msgs, entry) {
+    if (this._adopted || this._leader) return null;
+    if (!this._continuationLaunch || this._forkSession || this._resumeSession) return null;
+    if (this._sessions.has(sid)) return null;
+    const m = Array.isArray(msgs) ? msgs
+      : (entry && entry.body && Array.isArray(entry.body.messages) ? entry.body.messages : null);
+    if (!m || m.length <= 1 || !m.some((x) => x && x.role === 'assistant')) return null;
+    const projectDir = join(this._logDir, sanitizePathComponent(project));
+    if (resolveSessionDirName(projectDir, sid, this._sessionsDirName)) return null; // same-UUID restart
+    const prev = latestMainSession(projectDir);
+    if (!prev || !prev.sessionId) return null;
+    return { dirName: basename(prev.dir), identityUUID: prev.sessionId };
+  }
+
+  _session(sessionId, userIdRaw, encoding, project, startTsIso, adoptTarget = null) {
     let s = this._sessions.get(sessionId);
     if (s) return s; // hot path: map hit is O(1), the scan below only runs on miss
 
@@ -119,12 +166,24 @@ export class V2Writer {
       ...(this._metaExtra || {}),
     };
     const projectDir = join(this._logDir, sanitizePathComponent(project));
-    let dirName = resolveSessionDirName(projectDir, sessionId, this._sessionsDirName);
-    if (!dirName) {
-      const ts = compactLocalTs14(startTs) || compactLocalTs14(new Date().toISOString());
-      dirName = `${ts}_${sessionId}`;
+    // Identity (meta.sessionId + journal sentinel) — normally the wire UUID; on
+    // `-c` adoption it stays the ADOPTED folder's UUID so the frontend session
+    // identity (`_seqEpoch = v2:<meta.sessionId>`) and all reuse machinery see
+    // one continuous session. meta.json/sentinel are first-write-wins, so writing
+    // into the existing adopted folder never overwrites its identity.
+    let identityId = sessionId;
+    let dirName;
+    if (adoptTarget) {
+      dirName = adoptTarget.dirName;
+      identityId = adoptTarget.identityUUID;
+    } else {
+      dirName = resolveSessionDirName(projectDir, sessionId, this._sessionsDirName);
+      if (!dirName) {
+        const ts = compactLocalTs14(startTs) || compactLocalTs14(new Date().toISOString());
+        dirName = `${ts}_${sessionId}`;
+      }
     }
-    const paths = ensureSessionDirSync(this._logDir, project, sessionId, meta, this._sessionsDirName, dirName);
+    const paths = ensureSessionDirSync(this._logDir, project, identityId, meta, this._sessionsDirName, dirName);
     s = {
       paths,
       blobs: new BlobStore(paths),
@@ -193,11 +252,21 @@ export class V2Writer {
         this._currentSid = sid;
       }
 
+      // `-c` folder adoption: when this launch is a real continuation but Claude
+      // handed a fresh wire session_id, route the writes into the previous main
+      // session's folder instead of minting a new (blank) one. Resolved once,
+      // before the folder is created; null on every non-adoption path.
+      let adoptTarget = null;
+      if (parsed) {
+        adoptTarget = this._resolveAdoption(sid, project, originalMessages, entry);
+        if (adoptTarget) this._adopted = true;
+      }
+
       // entry.timestamp = this session's first-request time → meta.startTs +
       // the dir-name ts prefix (task C). First-write-wins: meta is only written
       // when the dir is first created, so this is the session's creation time
       // (live ≈ now; convert = the historical first-entry ts).
-      const s = this._session(sid, parsed && entry.body.metadata.user_id, parsed && parsed.encoding, project, entry.timestamp);
+      const s = this._session(sid, parsed && entry.body.metadata.user_id, parsed && parsed.encoding, project, entry.timestamp, adoptTarget);
 
       // Flush requests that arrived before the first sid (they belong here).
       // Their handles are parked in _lateHandles so a completion that arrives
@@ -425,6 +494,9 @@ export class V2Writer {
       this._pendingNoSid.length = 0;
       this._lateHandles.clear();
       this._currentSid = null;
+      // A second workspace's `-c` must be able to adopt afresh — the previous
+      // workspace's adoption doesn't carry over.
+      this._adopted = false;
     } catch (err) {
       reportSwallowed('v2-write.reset-sessions', err);
     }
