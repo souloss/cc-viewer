@@ -26,8 +26,10 @@ import { watch, existsSync, readdirSync, statSync, openSync, readSync, closeSync
 import { join } from 'node:path';
 import { reportSwallowed } from '../error-report.js';
 import { createIncrementalReconstructor } from '../delta-reconstructor.js';
-import { processWatchedEntry } from '../log-watcher.js';
+import { processWatchedEntry, sendEventToClients, sendEventRawToClients } from '../log-watcher.js';
 import { SessionSynthesizer } from './adapter.js';
+import { computeCacheLoss } from './meta-rows.js';
+import { classifyRequest } from '../../../src/utils/requestType.js';
 
 const FSWATCH_DEBOUNCE_MS = 80;
 const SAFETY_POLL_MS = 5000;
@@ -91,6 +93,10 @@ export class V2LiveFeed {
     this._safetyPollMs = typeof opts.safetyPollMs === 'number' ? opts.safetyPollMs : SAFETY_POLL_MS;
     this._deferMs = typeof opts.deferMs === 'number' ? opts.deferMs : DEFER_MS;
     this._now = opts.now || Date.now;
+    // Wire v3 (V3.S2): when on, every emitted item ALSO broadcasts a metadata
+    // row (v2_requests_delta). Explicit ctor param — this module has no access
+    // to the server deps object.
+    this._wireV3 = !!opts.wireV3;
     this._sessions = new Map(); // dir → cursor bundle
     this._seenDirs = new Map(); // dir → last observed journal mtimeMs (attached or not)
     this._sessionsRoot = null;
@@ -299,7 +305,13 @@ export class V2LiveFeed {
         this._feedConvFiles(cur);
         const respLines = readNewLines(cur.responses);
         if (respLines === null) { this._rebuildCursor(cur); return; }
-        for (const raw of respLines) cur.synth.ingestResponseLine(raw);
+        for (const raw of respLines) {
+          cur.synth.ingestResponseLine(raw);
+          // Wire v3 (V3.S4): forward the raw stored line — the flagged client
+          // assembles v1-shape entries from native lines locally. Suppressed
+          // during seed (history is covered by the cold-load channel).
+          if (this._wireV3 && !cur.suppress) this._forwardNative(cur, 'resp', null, raw);
+        }
         const journalLines = readNewLines(cur.journal);
         if (journalLines === null) { this._rebuildCursor(cur); return; }
         for (const raw of journalLines) {
@@ -351,7 +363,10 @@ export class V2LiveFeed {
           try { ev = JSON.parse(raw); } catch (err) {
             reportSwallowed('v2-live.conv-parse', new Error(`${cur.dir}/${key}: ${err.message}`));
           }
-          if (ev) cur.synth.ingestConvLine(key, ev);
+          if (ev) {
+            cur.synth.ingestConvLine(key, ev);
+            if (this._wireV3 && !cur.suppress) this._forwardNative(cur, 'conv', key, raw);
+          }
         }
       }
     }
@@ -403,15 +418,107 @@ export class V2LiveFeed {
           clients: this._clients,
           getClaudePid: this._getClaudePid,
           runParallelHook: this._runParallelHook,
+          suppressEntryBroadcast: this._wireV3,
         });
         emitted++;
       } catch (err) {
         reportSwallowed('v2-live.emit', err);
       }
+      // Wire v3: derive the metadata row from the post-reconstruction entry
+      // (main deltas carry full messages here — classification/cacheLoss get
+      // the same inputs the legacy list sees). Row-level errors must not
+      // disturb the legacy broadcast above.
+      if (this._wireV3) {
+        try {
+          this._emitRow(cur, item, parsed);
+        } catch (err) {
+          reportSwallowed('v2-live.row', err);
+        }
+      }
     }
     if (emitted > 0 && this._notifyStatsWorker) {
       try { this._notifyStatsWorker(cur.dir); } catch (err) { reportSwallowed('v2-live.stats-notify', err); }
     }
+  }
+
+  /** Wire v3 (V3.S4): broadcast one raw native line (conv event or responses
+   *  line) — the flagged client's assembler replays these into v1-shape
+   *  entries. `raw` is forwarded verbatim inside a JSON envelope carrying the
+   *  session identity + channel. sessionId comes from the synthesizer (the
+   *  UUID, matching the rows' sessionId and the entries' _seqEpoch). */
+  _forwardNative(cur, kind, channel, raw) {
+    try {
+      const payload = kind === 'conv'
+        ? `{"sessionId":${JSON.stringify(cur.synth.sessionId)},"channel":${JSON.stringify(channel)},"line":${raw}}`
+        : `{"sessionId":${JSON.stringify(cur.synth.sessionId)},"line":${raw}}`;
+      const eventName = kind === 'conv' ? 'v3_conv' : 'v3_resp';
+      sendEventRawToClients(this._clients, eventName, payload);
+    } catch (err) {
+      reportSwallowed('v2-live.native-forward', err);
+    }
+  }
+
+  /** Wire v3 (V3.S2): one metadata row per emitted item, derived from the
+   *  post-reconstruction entry. Rows upsert client-side by (sessionId, seq):
+   *  a placeholder row precedes its completed row, and a correction re-send
+   *  follows when the NEXT request's arrival changes the previous row's
+   *  classification (classifyRequest's Preflight/Plan cases read nextReq). */
+  _rowFrom(item, parsed) {
+    const usage = parsed.response?.body?.usage || null;
+    return {
+      seq: item.seq,
+      sessionId: item.sessionId,
+      timestamp: parsed.timestamp || '',
+      url: parsed.url || '',
+      method: parsed.method || 'POST',
+      kind: item.isMain ? 'main' : (parsed.teammate ? 'teammate' : 'sub'),
+      mainAgent: parsed.mainAgent === true,
+      teammate: parsed.teammate || undefined,
+      model: parsed.body?.model,
+      proxyUrl: parsed.proxyUrl || undefined,
+      status: parsed.response?.status,
+      duration: parsed.duration,
+      usage: usage ? {
+        input_tokens: usage.input_tokens || 0,
+        output_tokens: usage.output_tokens || 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+      } : null,
+      inProgress: !!parsed.inProgress,
+      typeTag: null,
+      cacheLoss: null,
+    };
+  }
+
+  _emitRow(cur, item, parsed) {
+    const row = this._rowFrom(item, parsed);
+    try {
+      const tag = classifyRequest(parsed, null);
+      row.typeTag = tag ? { type: tag.type, subType: tag.subType ?? null } : null;
+    } catch (err) { reportSwallowed('v2-live.row-classify', err); }
+    if (row.mainAgent && !row.inProgress) {
+      const u = parsed.response?.body?.usage;
+      const cw = (u && u.cache_creation_input_tokens) || 0;
+      const cr = (u && u.cache_read_input_tokens) || 0;
+      if (cur._v3PrevMain && cw > 0 && cw > cr) {
+        try { row.cacheLoss = computeCacheLoss(cur._v3PrevMain, parsed); } catch (err) { reportSwallowed('v2-live.row-cacheloss', err); }
+      }
+      cur._v3PrevMain = parsed; // one full entry retained per cursor (bounded)
+    }
+    // Lookahead correction: this entry is the previous row's nextReq.
+    const prev = cur._v3Last;
+    if (prev && (prev.row.sessionId !== row.sessionId || prev.row.seq !== row.seq)) {
+      try {
+        const tag = classifyRequest(prev.entry, parsed);
+        const corrected = tag ? { type: tag.type, subType: tag.subType ?? null } : null;
+        if (JSON.stringify(corrected) !== JSON.stringify(prev.row.typeTag)) {
+          prev.row.typeTag = corrected;
+          sendEventToClients(this._clients, 'v2_requests_delta', prev.row);
+        }
+      } catch (err) { reportSwallowed('v2-live.row-classify', err); }
+    }
+    cur._v3Last = { row, entry: parsed };
+    sendEventToClients(this._clients, 'v2_requests_delta', row);
   }
 
   // ── safety poll ────────────────────────────────────────────────────────────

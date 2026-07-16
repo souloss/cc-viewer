@@ -646,7 +646,7 @@ export function findTeammateSessionDirs(sessionDir, leaderUuid) {
  * Item-level iteration of one v2 session with teammate re-join — the shared
  * core of the raw-string generators and the window reader below.
  */
-function* iterateV2Items(sessionDir, opts = {}) {
+export function* iterateV2Items(sessionDir, opts = {}) {
   const streams = [iterateSessionItems(sessionDir, opts)];
   const ownMeta = (() => {
     try { return JSON.parse(readFileSync(join(sessionDir, 'meta.json'), 'utf-8')); } catch { return null; }
@@ -735,7 +735,7 @@ export function _v2WindowStatsForTest(reset = false) {
  * The result is IMMUTABLE and shared across coalesced callers — window
  * selection must not mutate `recs`/`ring`.
  */
-async function scanV2Descriptors(sessionDir) {
+export async function scanV2Descriptors(sessionDir) {
   _windowStats.scanRuns++;
   const dedup = new Map(); // key → descriptor (insertion order = output order)
   const ring = []; // newest ≤3 isMain descriptors, pre-dedup iteration order
@@ -796,7 +796,7 @@ function selectV2Window(scan, opts = {}) {
 
 /** Level-1 shared Pass A + per-caller selection. `cached` gates the TTL
  *  micro-cache read (F5b: /events live-attach must never consume it). */
-async function computeV2Window(sessionDir, opts = {}) {
+export async function computeV2Window(sessionDir, opts = {}) {
   const scan = await _scanFlight.run(`scan:${sessionDir}`, () => scanV2Descriptors(sessionDir), { cached: !!opts.cached });
   return selectV2Window(scan, opts);
 }
@@ -813,7 +813,7 @@ async function computeV2Window(sessionDir, opts = {}) {
  * equivalent (algorithm review F6). `collect` mode fills a slot array in
  * Pass A output order instead: byte-identical to the historical single pass.
  */
-async function materializeV2Window(sessionDir, win, { collect = false, onEntry = null } = {}) {
+async function materializeV2Window(sessionDir, win, { collect = false, onEntry = null, promoteKeys = null } = {}) {
   const memberIdx = new Map();
   win.members.forEach((d, i) => memberIdx.set(itemKey(d.sessionId, d.seq), i));
   const ringKeys = new Set(win.ring.map((d) => itemKey(d.sessionId, d.seq)));
@@ -837,7 +837,12 @@ async function materializeV2Window(sessionDir, win, { collect = false, onEntry =
       // replayed state (item.stateRef aliases the live conversation state at
       // this seq — used transiently, never retained). Same construction as the
       // historical end-of-window rebuild, byte-for-byte.
-      if (k === win.baselineKey) {
+      // `promoteKeys` (V3.S1): per-member force-checkpoint for single-entry
+      // reads — a mid-session main delta carries only its appended slice, but
+      // the detail view needs the full replayed state for BOTH the target and
+      // its prevMain (Body Diff / cacheLoss compare whole messages arrays).
+      // The window baseline promotes only win.baselineKey (the window start).
+      if (k === win.baselineKey || (promoteKeys && promoteKeys.has(k))) {
         const state = item.stateRef || [];
         const rebuilt = { ...item.entry, body: { ...item.entry.body, messages: state } };
         rebuilt._isCheckpoint = true;
@@ -889,6 +894,47 @@ async function materializeV2Window(sessionDir, win, { collect = false, onEntry =
  * @param {{limit?: number, before?: string|null, cached?: boolean}} [opts]
  * @returns {Promise<{entries: string[], hasMore: boolean, oldestTimestamp: string, totalCount: number, mainAgentRing: string[]}>}
  */
+/**
+ * V3.S1: on-demand single-entry read — the detail view's data source once the
+ * request list is metadata rows. Locates the target (sessionId, seq) in the
+ * shared descriptor scan, pairs it with its preceding isMain descriptor
+ * (Body Diff / Context tab need the previous mainAgent, raw-seq adjacency),
+ * and materializes exactly those members with per-member checkpoint promotion
+ * (main deltas come back with the full replayed state, matching what the
+ * client holds after reconstruction on the legacy channel).
+ *
+ * @param {string} sessionDir - leader session dir (teammate rows resolve
+ *   through the leader's k-way fold so tags/order match the list)
+ * @param {{seq: number, sessionId?: string|null, cached?: boolean}} opts -
+ *   sessionId (UUID) disambiguates teammate rows; null = any session's seq
+ * @returns {Promise<{entry: string, prevMain: string|null}|null>} raw JSON
+ *   strings (never re-parsed here), or null when the seq is unknown / gated
+ *   out by synthesis (crash-orphan) — callers answer 404.
+ */
+export async function readV2SingleEntry(sessionDir, opts = {}) {
+  const seq = opts.seq;
+  const sessionId = opts.sessionId || null;
+  const key = `entry:${sessionDir}|${sessionId || ''}|${seq}`;
+  return _windowFlight.run(key, async () => {
+    const scan = await _scanFlight.run(`scan:${sessionDir}`, () => scanV2Descriptors(sessionDir), { cached: true });
+    const recs = scan.recs;
+    const idx = recs.findIndex((d) => d.seq === seq && (!sessionId || d.sessionId === sessionId));
+    if (idx === -1) return null;
+    const target = recs[idx];
+    let prevMain = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (recs[i].isMain) { prevMain = recs[i]; break; }
+    }
+    const members = prevMain ? [prevMain, target] : [target];
+    const win = { members, ring: [], baselineKey: null };
+    const promoteKeys = new Set(members.filter((d) => d.isMainDelta).map((d) => itemKey(d.sessionId, d.seq)));
+    const { slots } = await materializeV2Window(sessionDir, win, { collect: true, promoteKeys });
+    const entry = slots[members.length - 1];
+    if (entry === undefined) return null; // synthesis gate dropped it between passes
+    return { entry, prevMain: prevMain ? (slots[0] ?? null) : null };
+  }, { cached: opts.cached !== false });
+}
+
 export async function readV2WindowedEntries(sessionDir, opts = {}) {
   const cached = !!opts.cached;
   const key = `win:${sessionDir}|${opts.limit || 0}|${opts.before || ''}`;

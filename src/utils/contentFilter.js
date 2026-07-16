@@ -15,7 +15,8 @@ const SUBAGENT_BILLING_RE = /cc_is_subagent=true\b/;
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
 
 // Native teammate 检测（同进程内 Agent 子代理），独立模块便于版本兼容
-import { isNativeTeammate, extractNativeTeammateName } from './teammateDetector';
+// Extensioned for server-side reuse (see requestType.js header note).
+import { isNativeTeammate, extractNativeTeammateName } from './teammateDetector.js';
 
 // ============== 跨会话 / teammate「协议通知」识别 ==============
 // harness 把跨会话 / teammate 通知作为 role=user 文本注入主会话。既有逻辑只认 <teammate-message>

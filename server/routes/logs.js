@@ -7,6 +7,7 @@ import { LOG_DIR } from '../../findcc.js';
 import { _projectName, _v2Writer } from '../interceptor.js';
 import { listV2Logs, listLocalLogs, countListedV1Files, deleteLogFiles, validateLogPath } from '../lib/log-management.js';
 import { countLogEntries, streamRawEntriesAsync, readTailEntries } from '../lib/log-stream.js';
+import { sseHead, sseWrite, wireEnd } from '../lib/wire-compress.js';
 import { dirSizeSync } from '../lib/v2/layout.js';
 import { extractV2Zip } from '../lib/log-zip.js';
 import { startConvert, stopConvert, convertStatus } from '../lib/v2/convert-manager.js';
@@ -191,7 +192,9 @@ async function localLog(req, res, parsedUrl) {
     const filePath = validateLogPath(LOG_DIR, file);
     const limitVal = Math.min(parseInt(parsedUrl.searchParams.get('limit'), 10) || 0, 500);
 
-    res.writeHead(200, {
+    // Negotiated Content-Encoding (br|identity) — every subsequent byte MUST
+    // go through sseWrite/wireEnd (see server/lib/wire-compress.js).
+    sseHead(req, res, 200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
@@ -200,24 +203,24 @@ async function localLog(req, res, parsedUrl) {
     if (limitVal > 0) {
       // 尾部加载模式：跳过 countLogEntries，只读文件末尾
       const { entries, hasMore, oldestTimestamp, estimatedTotal } = await readTailEntries(filePath, { limit: limitVal });
-      res.write(`event: load_start\ndata: ${JSON.stringify({ total: estimatedTotal, incremental: false, hasMore, oldestTs: oldestTimestamp })}\n\n`);
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify({ total: estimatedTotal, incremental: false, hasMore, oldestTs: oldestTimestamp })}\n\n`);
       for (const raw of entries) {
-        res.write('event: load_chunk\ndata: [');
-        res.write(raw.includes('\n') ? raw.replace(/\n/g, '') : raw);
-        res.write(']\n\n');
+        sseWrite(res, 'event: load_chunk\ndata: [');
+        sseWrite(res, raw.includes('\n') ? raw.replace(/\n/g, '') : raw);
+        sseWrite(res, ']\n\n');
       }
     } else {
       // 全量加载模式（向后兼容）
       const total = await countLogEntries(filePath);
-      res.write(`event: load_start\ndata: ${JSON.stringify({ total, incremental: false })}\n\n`);
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify({ total, incremental: false })}\n\n`);
       await streamRawEntriesAsync(filePath, (raw) => {
-        res.write('event: load_chunk\ndata: [');
-        res.write(raw.includes('\n') ? raw.replace(/\n/g, '') : raw);
-        res.write(']\n\n');
+        sseWrite(res, 'event: load_chunk\ndata: [');
+        sseWrite(res, raw.includes('\n') ? raw.replace(/\n/g, '') : raw);
+        sseWrite(res, ']\n\n');
       });
     }
-    res.write(`event: load_end\ndata: {}\n\n`);
-    res.end();
+    sseWrite(res, `event: load_end\ndata: {}\n\n`);
+    wireEnd(res);
   } catch (err) {
     // 如果 headers 未发送，返回 JSON 错误；否则关闭连接
     // 落 stderr 让用户在 ccv 终端能看到具体原因（SSE onerror 在客户端
@@ -228,7 +231,7 @@ async function localLog(req, res, parsedUrl) {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     } else {
-      res.end();
+      wireEnd(res); // flush the encoder trailer if the stream was compressed
     }
   }
 }

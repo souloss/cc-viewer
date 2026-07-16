@@ -522,7 +522,7 @@ class Mobile extends AppBase {
   };
 
   render() {
-    const { filteredRequests, fileLoading, fileLoadingCount, mainAgentSessions } = this.renderPrepare();
+    const { filteredRequests, deepRequests, fileLoading, fileLoadingCount, mainAgentSessions } = this.renderPrepare();
     const prefs = this._prefValues();
     // 「仅展示当前会话」锁定：切到「以 pin 会话结尾」（与 App 同口径，见 _displaySessionsFor）。
     const { sessions: displaySessions, upperBoundTs: sessionUpperBoundTs } = this._displaySessionsFor(mainAgentSessions);
@@ -830,13 +830,13 @@ class Mobile extends AppBase {
               {fileLoading && (
                 <div className={styles.mobileLoadingOverlay}>
                   <div className={styles.mobileLoadingSpinner} />
-                  <div className={styles.mobileLoadingLabel}>{t('ui.loadingChat')}{fileLoadingCount > 0 ? ` (${fileLoadingCount})` : ''}</div>
+                  <div className={styles.mobileLoadingLabel}>{t('ui.loadingChat')} {this._loadingProgressText()}</div>
                 </div>
               )}
                 <div className={styles.mobileChatInner}>
                   <ChatView
                     {...this._settingsProps()}
-                    requests={filteredRequests}
+                    requests={deepRequests}
                     mainAgentSessions={displaySessions}
                     sessionUpperBoundTs={sessionUpperBoundTs}
                     streamingLatest={this.state.streamingLatest}
@@ -921,7 +921,7 @@ class Mobile extends AppBase {
                 {this.state.mobileCachePanelVisible && (
                   <CachePopoverContent
                     inDrawer
-                    requests={filteredRequests}
+                    requests={deepRequests}
                     serverCachedContent={this.state.serverCachedContent}
                     contextPercent={mobileContextPercent}
                     contextTokens={mobileContextTokens}
@@ -993,7 +993,7 @@ class Mobile extends AppBase {
           <div className={`${styles.mobileStatsOverlay} ${this.state.mobileStatsVisible ? styles.mobileStatsOverlayVisible : ''}`}>
             <div className={styles.mobileStatsInner}>
               <MobileStats
-                requests={filteredRequests}
+                requests={deepRequests}
                 visible={this.state.mobileStatsVisible}
                 onClose={() => this.setState({ mobileStatsVisible: false })}
               />

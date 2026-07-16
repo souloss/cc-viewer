@@ -9,6 +9,7 @@ import { execFile, exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { isPathContained } from './lib/file-api.js';
+import { sseWrite, isWireV3Enabled } from './lib/wire-compress.js';
 import { setEntry as askStoreSetEntry, deleteEntry as askStoreDeleteEntry, pruneStale as askStorePruneStale, markAnswered as askStoreMarkAnswered, markCancelled as askStoreMarkCancelled, loadAskStore as askStoreLoad } from './lib/ask-store.js';
 import { ASK_TIMEOUT_MS, ASK_WAITER_REAP_INTERVAL_MS, ASK_WAITER_LIVENESS_MS } from './lib/ask-constants.js';
 import { reapDeadAskWaiters, sweepOrphanedDiskAsks } from './lib/ask-reaper.js';
@@ -33,6 +34,7 @@ import { searchRoutes } from './routes/search.js';
 import { workspacesRoutes } from './routes/workspaces.js';
 import { expertRoutes } from './routes/expert.js';
 import { eventsRoutes } from './routes/events.js';
+import { v2Routes } from './routes/v2.js';
 import { askPermRoutes } from './routes/ask-perm.js';
 import { teamRoutes } from './routes/team.js';
 import { authRoutes } from './routes/auth.js';
@@ -315,6 +317,22 @@ const MAX_POST_BODY = 10 * 1024 * 1024;
 // 防止长会话把数十 MB 历史一次性灌进浏览器导致 renderer OOM。
 // 用户显式 ?limit=0 可恢复全量加载（power-user 逃生口）。
 const DEFAULT_EVENTS_LIMIT = 1000;
+// Wire v3 flag (V3.S6: DEFAULT ON) — read ONCE at startup; a read/UI-shape
+// toggle the server and client must agree on per process, not per request
+// (unlike wire-compress's per-connection content negotiation). Broadcast to
+// clients via the server_config SSE frame; tests inject deps.wireV3 directly.
+// CCV_WIRE_V3=0 (or =off) is the escape hatch back to the legacy full-entry
+// wire — kept (not deleted) for one release cycle before the legacy live UI
+// path is removed; v1 legacy FILES always use the legacy pipeline regardless.
+const WIRE_V3 = isWireV3Enabled(process.env.CCV_WIRE_V3);
+// Build stamp broadcast in server_config: a tab that survives a server
+// upgrade reconnects with a STALE JS bundle that lacks the new wire's
+// listeners (silent empty session). The fresh bundle compares this stamp on
+// reconnect and reloads itself on mismatch (review P2-a; heals upgrades from
+// this version onward — older bundles predate the guard).
+const SERVER_BUILD = (() => {
+  try { return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8')).version || ''; } catch { return ''; }
+})();
 // SSE 单客户端 backpressure 容忍上限：连续未排空 > 此时长则视为 dead 客户端剔除。
 // 调高至 30s：大会话首屏/重连重放时，渲染器（尤其 Windows 浏览器，大 DOM layout 更重）
 // 可能短暂忙到来不及排空 socket。过早剔除会触发「断开→EventSource 自动重连→再次重放」
@@ -427,6 +445,7 @@ function _ensureV2LiveFeed() {
       runParallelHook,
       // The stats worker's v2 units are session dirs (stats-worker.js v9).
       notifyStatsWorker,
+      wireV3: WIRE_V3,
     });
   }
   return _v2LiveFeed;
@@ -591,6 +610,8 @@ const deps = {
   WINDOWS_RESERVED_NAMES,
   DEFAULT_EVENTS_LIMIT,
   SSE_BACKPRESSURE_TIMEOUT_MS,
+  wireV3: WIRE_V3,
+  serverBuild: SERVER_BUILD,
   IGNORED_PATTERNS,
   isCliMode,
   isSdkMode,
@@ -623,6 +644,7 @@ const _routes = [
   ...workspacesRoutes,
   ...expertRoutes,
   ...eventsRoutes,
+  ...v2Routes,
   ...askPermRoutes,
   ...teamRoutes,
   ...dingtalkRoutes,
@@ -2375,7 +2397,7 @@ if (!isWorkspaceMode) {
             pendingMajorUpdate = { version: result.remoteVersion, source: result.status };
             const payload = JSON.stringify(pendingMajorUpdate);
             clients.forEach(client => {
-              try { client.write(`event: update_major_available\ndata: ${payload}\n\n`); } catch { }
+              try { sseWrite(client, `event: update_major_available\ndata: ${payload}\n\n`); } catch { }
             });
           } else if (result.status === 'upgrading_in_background') {
             console.error(`[CC Viewer] background upgrade to ${result.remoteVersion} started (active after next launch)`);

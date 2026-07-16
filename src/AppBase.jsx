@@ -24,6 +24,8 @@ import { mergeMainAgentSessions as _mergeMainAgentSessions, isMergeBlockedEntry 
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
 import { createEntrySlimmer, createIncrementalSlimmer, internEntryBigFields } from './utils/entry-slim.js';
 import { yieldToMain, runChunkedPass, INGEST_BATCH_SIZE } from './utils/ingestPipeline.js';
+import { rowToListItem } from './utils/v3Rows.js';
+import { createV3Assembler } from './utils/v3Assembler.js';
 import { reinitializeMermaid } from './hooks/useMermaidRender';
 import styles from './App.module.css';
 
@@ -84,6 +86,12 @@ class AppBase extends React.Component {
     const cacheType = cacheExpireAt ? savedCacheType : null;
     this.state = {
       requests: [],
+      // Wire v3 (flagged): request-list metadata rows — the list's data source
+      // when the server announces wireV3 via server_config. Row identity for
+      // live upserts is (sessionId, seq); timestamp|url stays the cross-channel
+      // locate/dedup identity shared with `requests`.
+      v2Rows: [],
+      v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
       selectedIndex: null,
       viewMode: 'raw',
       cacheExpireAt,
@@ -123,6 +131,7 @@ class AppBase extends React.Component {
       updateModalVisible: false,
       fileLoading: false,
       fileLoadingCount: 0,
+      fileLoadingBytes: null,
       isDragging: false,
       selectedLogs: new Set(),   // Set<file>
       githubStars: null,
@@ -690,7 +699,7 @@ class AppBase extends React.Component {
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
     if (core.empty) {
-      const st = { fileLoading: false, fileLoadingCount: 0 };
+      const st = { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null };
       if (unlockContextBar) st.contextBarLocked = false;
       this._commitColdIngest(myToken, st);
       return;
@@ -703,6 +712,7 @@ class AppBase extends React.Component {
       mainAgentSessions,
       fileLoading: false,
       fileLoadingCount: 0,
+      fileLoadingBytes: null,
     };
     if (unlockContextBar) newState.contextBarLocked = false;
     this._commitColdIngest(myToken, newState, () => {
@@ -720,7 +730,7 @@ class AppBase extends React.Component {
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
     if (core.empty) {
-      this._commitColdIngest(myToken, { fileLoading: false, fileLoadingCount: 0, serverCachedContent: null });
+      this._commitColdIngest(myToken, { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null, serverCachedContent: null });
       return;
     }
     this._commitColdIngest(myToken, {
@@ -729,6 +739,7 @@ class AppBase extends React.Component {
       mainAgentSessions: core.mainAgentSessions,
       fileLoading: false,
       fileLoadingCount: 0,
+      fileLoadingBytes: null,
       serverCachedContent: null,
     });
   }
@@ -943,6 +954,131 @@ class AppBase extends React.Component {
     this._liveGateBuffer = [];
   };
 
+  /** Loading progress fragment: byte progress on the v3 wire (server sends
+   *  the exact frame byte total in load_start), legacy count-up otherwise. */
+  _loadingProgressText() {
+    const b = this.state.fileLoadingBytes;
+    if (b && b.total > 0) {
+      const mb = (n) => (n / 1048576).toFixed(1);
+      const pct = Math.min(100, Math.round((b.recv / b.total) * 100));
+      return `${mb(b.recv)}/${mb(b.total)} MB (${pct}%)`;
+    }
+    return `(${this.state.fileLoadingCount})`;
+  }
+
+  /** Wire v3 loading progress: accumulate received frame bytes, rAF-throttled
+   *  into state (mirrors the legacy count-up throttling). */
+  _v3TrackBytes(event) {
+    if (!this._v3BytesTotal || this._isIncremental) return;
+    this._v3RecvBytes += (event?.data?.length || 0);
+    if (!this._v3BytesRafId) {
+      this._v3BytesRafId = requestAnimationFrame(() => {
+        this._v3BytesRafId = null;
+        if (this.state.fileLoading) {
+          this.setState({ fileLoadingBytes: { recv: Math.min(this._v3RecvBytes, this._v3BytesTotal), total: this._v3BytesTotal } });
+        }
+      });
+    }
+  }
+
+  /** Wire v3 (V3.S5): lazy assembler — replays native conv/responses lines
+   *  into v1-shape entries for the existing ingest pipeline. */
+  _v3Assembler() {
+    if (!this._v3AssemblerInst) this._v3AssemblerInst = createV3Assembler();
+    return this._v3AssemblerInst;
+  }
+
+  /** Wire v3 baseline reset (review P0-2): every path that resets the entry
+   *  baseline (fresh cold reset frame, workspace switch, full_reload) must
+   *  also drop the v3 client state, or the assembler's channel pointers, the
+   *  live dedup set and the rows list leak across cycles — stale-project rows
+   *  in the list, 404 detail fetches, unbounded growth on reconnecting tabs. */
+  _v3ResetClientState() {
+    try { this._v3AssemblerInst?.reset(); } catch (e) { reportSwallowed('v3.reset', e); }
+    this._v3SeenLive?.clear();
+    this._v3ColdRows = null;
+    this._v3PendingLive = [];
+    this._v3AdaptSource = null;
+    this._v3Adapted = null;
+  }
+
+  /** Apply one live v3 frame to the assembler. Split out from the SSE
+   *  handlers so frames buffered during the async cold assembly (review
+   *  P1-1: a live delta advancing the shared channel ptr mid-assembly
+   *  corrupts the remaining cold rows) replay through identical logic. */
+  _applyV3Conv(data) {
+    if (data.lines) this._v3Assembler().addConvLines(data.sessionId, data.channel, data.lines);
+    else if (data.line) this._v3Assembler().addConvLines(data.sessionId, data.channel, data.line);
+  }
+
+  _applyV3Resp(data) {
+    this._v3Assembler().addRespLines(data.sessionId, data.lines ?? data.line);
+  }
+
+  _applyV3Delta(row) {
+    this._ingestV2Rows([row], { reset: false });
+    // Correction re-sends replace the ROW (typeTag/cacheLoss); only new
+    // seqs or the placeholder→completed transition rebuild an entry.
+    const k = `${row.sessionId}\x00${row.seq}\x00${row.inProgress ? 1 : 0}`;
+    if (this._v3SeenLive?.has(k)) return;
+    (this._v3SeenLive ??= new Set()).add(k);
+    this._ingestLiveEntry(this._v3Assembler().buildEntry(row));
+  }
+
+  /** Drain frames buffered while the cold assembly owned the assembler. */
+  _v3DrainPendingLive() {
+    const pending = this._v3PendingLive || [];
+    this._v3PendingLive = [];
+    for (const p of pending) {
+      try {
+        if (p.kind === 'conv') this._applyV3Conv(p.data);
+        else if (p.kind === 'resp') this._applyV3Resp(p.data);
+        else if (p.kind === 'delta') this._applyV3Delta(p.data);
+      } catch (e) { reportSwallowed('v3.pending-drain', e); }
+    }
+  }
+
+  /** Live entry injection shared by the legacy `data:` frames (via
+   *  handleEventMessage) and the V3.S5 assembler-built entries. Gated during
+   *  the ingest pipeline AND the v3 chunked cold assembly (both commit via
+   *  the pipeline, which drains the gate buffer). */
+  _ingestLiveEntry(entry) {
+    if (this._ingestRunning || this._v3Assembling) {
+      this._liveGateBuffer.push(entry);
+      return;
+    }
+    this._pendingEntries.push(entry);
+    if (!this._flushRafId) {
+      this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
+    }
+  }
+
+  /** Wire v3 (V3.S3a): ingest metadata rows. `reset` replaces the whole list
+   *  (cold v2_requests frame — reconnects re-send it, so replace is idempotent);
+   *  otherwise upsert by (sessionId, seq) — live deltas send a placeholder row,
+   *  its completed upgrade, and possibly a classification correction. */
+  _ingestV2Rows(rows, { reset = false, totalCount, hasMore, oldestTs } = {}) {
+    this.setState((prev) => {
+      let next;
+      if (reset) {
+        next = rows;
+      } else {
+        next = prev.v2Rows.slice();
+        const idx = new Map(next.map((r, i) => [`${r.sessionId}\x00${r.seq}`, i]));
+        for (const row of rows) {
+          const k = `${row.sessionId}\x00${row.seq}`;
+          const at = idx.get(k);
+          if (at !== undefined) next[at] = row;
+          else { idx.set(k, next.length); next.push(row); }
+        }
+      }
+      const meta = reset
+        ? { totalCount: totalCount ?? rows.length, hasMore: !!hasMore, oldestTs: oldestTs || '' }
+        : { ...prev.v2RowsMeta, totalCount: prev.v2RowsMeta.totalCount + (next.length - prev.v2Rows.length) };
+      return { v2Rows: next, v2RowsMeta: meta };
+    });
+  }
+
   _reconnectSSE() {
     // SSE 连接真死（心跳超时 / 重试上限），清除流式 overlay 避免卡死
     if (this.state.streamingLatest) this.setState({ streamingLatest: null });
@@ -1130,9 +1266,13 @@ class AppBase extends React.Component {
           this._chunkedEntries = [];
           this._chunkedTotal = data.total || 0;
           this._isIncremental = !!data.incremental;
+          // Wire v3: the server pre-computes the exact frame byte total —
+          // progress is received/total bytes instead of the legacy count-up.
+          this._v3BytesTotal = data.v3Bytes || 0;
+          this._v3RecvBytes = 0;
           // 增量模式下已有缓存数据在显示，不需要 loading 遮罩
           if (!this._isIncremental) {
-            this.setState({ fileLoading: true, fileLoadingCount: 0 });
+            this.setState({ fileLoading: true, fileLoadingCount: 0, fileLoadingBytes: this._v3BytesTotal > 0 ? { recv: 0, total: this._v3BytesTotal } : null });
           }
         } catch (e) { reportSwallowed('sse.load_start', e); }
       });
@@ -1155,6 +1295,15 @@ class AppBase extends React.Component {
       this.eventSource.addEventListener('load_end', () => {
         this._resetSSETimeout();
         if (this._loadingCountRafId) { cancelAnimationFrame(this._loadingCountRafId); this._loadingCountRafId = null; }
+        // Wire v3 (V3.S5): flagged cold loads carry no legacy chunks — build
+        // the window's entries from rows + native lines instead. All v3
+        // frames precede load_end on the wire, so the assembler is complete.
+        // Assembly is CHUNKED with main-thread yields (a synchronous build
+        // over the whole window blocks paint — the loading UI would freeze);
+        // live entries arriving during the async window are gated into
+        // _liveGateBuffer (drained by the pipeline commit, same as during
+        // the ingest pipeline itself).
+        const finish = () => {
         const delta = this._chunkedEntries;
         this._chunkedEntries = [];
         this._chunkedTotal = 0;
@@ -1181,7 +1330,7 @@ class AppBase extends React.Component {
         if (isIncremental && isMobile && this.state.requests.length > 0) {
           if (delta.length === 0) {
             // 无新数据，缓存已是最新，跳过重建
-            const st = { fileLoading: false, fileLoadingCount: 0 };
+            const st = { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null };
             if (unlockContextBar) st.contextBarLocked = false;
             this.setState(st);
             return;
@@ -1201,12 +1350,46 @@ class AppBase extends React.Component {
         // 分帧管线：reconstruct → 分帧 slim → 分帧 process → 原子提交。
         // async 不 await（EventSource 回调）；在途期间 live 条目入闸门缓冲（handleEventMessage）。
         this._runSseColdIngest(rawEntries, { isIncremental, unlockContextBar });
+        };
+
+        if (this._wireV3 && this._v3ColdRows && this._chunkedEntries.length === 0) {
+          const rows = this._v3ColdRows;
+          this._v3ColdRows = null;
+          this._v3Assembling = true;
+          (async () => {
+            const entries = [];
+            const asm = this._v3Assembler();
+            try {
+              for (let i = 0; i < rows.length; i++) {
+                try { entries.push(asm.buildEntry(rows[i])); } catch (e) { reportSwallowed('v3.cold-assemble', e); }
+                if ((i + 1) % 100 === 0) await yieldToMain();
+              }
+            } finally {
+              this._v3Assembling = false;
+            }
+            this._chunkedEntries = entries;
+            // finish() enters the ingest pipeline synchronously (sets
+            // _ingestRunning before any await), so draining the buffered live
+            // frames AFTER it routes their entries into the pipeline's gate
+            // buffer — no window where a live entry merges against the
+            // pre-commit baseline (review P1-1).
+            finish();
+            this._v3DrainPendingLive();
+          })();
+          return;
+        }
+        this._v3ColdRows = null;
+        finish();
       });
       this.eventSource.addEventListener('full_reload', (event) => {
         this._resetSSETimeout();
         // 服务端要求整体重载 = baseline 重置：废弃在途分帧管线（防其稍后提交陈旧基线），
         // 闸门缓冲泄回 _pendingEntries（dedup 兜底与重载数据的重复）。
         this._abortColdIngest({ drain: true });
+        // Baseline reset also drops the v3 client state (review P0-2): stale
+        // rows would keep feeding _listSource after the reload's new baseline.
+        this._v3ResetClientState();
+        this.setState({ v2Rows: [], v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' } });
         // animateLoadingCount 回调有数百 ms 窗口：期间若新分帧管线启动（token 再 bump），
         // 本次 full_reload 的延迟 setState 不得覆盖新管线提交 —— 回调内按 token 失配丢弃。
         const reloadToken = this._ingestToken;
@@ -1265,6 +1448,7 @@ class AppBase extends React.Component {
           // workspace 切换 = baseline 重置：废弃在途分帧管线，防旧项目的巨型基线
           // 在切换后才提交、覆盖新项目数据（闸门缓冲属旧项目，直接丢弃不泄洪）
           this._abortColdIngest();
+          this._v3ResetClientState(); // review P0-2: old project's rows/assembler must not survive the switch
           this._rebuildRequestIndex([]);
           // 切项目要连 _currentSessionId 一并清掉：否则 _maintainPinState 的 lazy-lock 兜底
           // (getSessionStableId(null) || this._currentSessionId) 会拿旧项目的会话 id 误锁新项目，
@@ -1288,6 +1472,8 @@ class AppBase extends React.Component {
             viewMode: 'chat',
             cliMode: true,
             requests: [],
+            v2Rows: [],
+            v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
             mainAgentSessions: [],
             // 切项目：清空旧项目 pin，由 App.componentDidUpdate 按新 projectName 重新 hydrate
             pinnedSessionTs: null,
@@ -1304,10 +1490,13 @@ class AppBase extends React.Component {
       this.eventSource.addEventListener('workspace_stopped', () => {
         this._resetSSETimeout();
         this._teardownTransientLiveState();
+        this._v3ResetClientState(); // review P0-2
         this._rebuildRequestIndex([]);
         this._currentSessionId = null; // 同 workspace_started：清旧会话 id，避免 lazy-lock 误锁
         this.setState({
           workspaceMode: true,
+          v2Rows: [],
+          v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
           requests: [],
           mainAgentSessions: [],
           projectName: '',
@@ -1369,7 +1558,77 @@ class AppBase extends React.Component {
         try {
           const cfg = JSON.parse(event?.data || '{}');
           if (typeof cfg.turnEndDebounceMs === 'number') setTurnEndCooldownMs(cfg.turnEndDebounceMs);
+          // Wire v3 flag: synchronous instance field (NOT React state) — the
+          // load_chunk/v2_requests handlers in this same load cycle must read
+          // the fresh value; setState would lag a task behind. A forceUpdate
+          // is unnecessary: rows arriving (setState) re-render, and flag-off
+          // keeps v2Rows empty so _listSource stays on the legacy source.
+          this._wireV3 = cfg.wireV3 === true;
+          // Version-skew guard (review P2-a): a reconnect that reaches an
+          // UPGRADED server would feed this stale bundle a wire it may not
+          // understand — reload to pull the matching dist (index.html is
+          // no-store, assets content-hashed, so this always heals).
+          if (cfg.build) {
+            if (this._serverBuild && this._serverBuild !== cfg.build) {
+              window.location.reload();
+              return;
+            }
+            this._serverBuild = cfg.build;
+          }
         } catch { /* tolerate parse error */ }
+      });
+      // Wire v3 (V3.S2/S3a): request-list metadata rows. Cold frame replaces
+      // the row source wholesale; live deltas upsert by (sessionId, seq).
+      // V3.S5: the same rows drive the entry assembler — the cold frame's
+      // entries land in _chunkedEntries (the legacy chunk buffer, processed at
+      // load_end by the existing pipeline); live rows inject one entry each.
+      this.eventSource.addEventListener('v2_requests', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          const rows = Array.isArray(data.rows) ? data.rows : [];
+          // Full reset frame (fresh cold load / reconnect replay): drop every
+          // piece of v3 client state FIRST — a reconnect re-sends the window
+          // and the assembler/seen-set/rows must not accumulate across cycles
+          // (review P0-2: stale rows after workspace switch; unbounded growth;
+          // stale channel ptr mis-assembly). Incremental frames (since-scoped
+          // delta window, review P1-2) upsert instead.
+          if (data.incremental) {
+            this._ingestV2Rows(rows, { reset: false });
+          } else {
+            this._v3ResetClientState();
+            this._ingestV2Rows(rows, { reset: true, totalCount: data.totalCount, hasMore: data.hasMore, oldestTs: data.oldestTs });
+          }
+          this._v3ColdRows = rows; // consumed at load_end (after v3_conv/v3_resp frames land)
+        } catch (e) { reportSwallowed('sse.v2_requests', e); }
+      });
+      this.eventSource.addEventListener('v2_requests_delta', (event) => {
+        this._resetSSETimeout();
+        try {
+          const row = JSON.parse(event?.data || '{}');
+          if (!row || !Number.isInteger(row.seq)) return;
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'delta', data: row }); return; }
+          this._applyV3Delta(row);
+        } catch (e) { reportSwallowed('sse.v2_requests_delta', e); }
+      });
+      this.eventSource.addEventListener('v3_conv', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'conv', data }); return; }
+          this._applyV3Conv(data);
+        } catch (e) { reportSwallowed('sse.v3_conv', e); }
+      });
+      this.eventSource.addEventListener('v3_resp', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'resp', data }); return; }
+          this._applyV3Resp(data);
+        } catch (e) { reportSwallowed('sse.v3_resp', e); }
       });
       // session_pin SSE — 本进程任一端改了「当前会话」pin 后广播，让同实例多端（电脑+手机）实时一致。
       // 采纳服务端值时置 _applyingRemotePin，避免 _maintainPinState 把它当本地改动回 POST（防回环）。
@@ -1515,14 +1774,7 @@ class AppBase extends React.Component {
       // 冷启动分帧管线在途：live 条目入闸门缓冲，提交后统一泄洪（_commitColdIngest）。
       // 否则 live flush 会基于旧 prev.requests 合并、随后被管线的基线提交整体覆盖，
       // 且 _sseSlimmer/_sseReconstructor 会对错误基线初始化（sessionMerge 脆弱区）。
-      if (this._ingestRunning) {
-        this._liveGateBuffer.push(entry);
-        return;
-      }
-      this._pendingEntries.push(entry);
-      if (!this._flushRafId) {
-        this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
-      }
+      this._ingestLiveEntry(entry);
     } catch (error) {
       console.error('处理事件消息失败:', error);
     }
@@ -2382,8 +2634,25 @@ class AppBase extends React.Component {
   // ─── 共享渲染辅助 ─────────────────────────────────────
 
   /** render() 前置计算，子类在 render 开头调用 */
+  /** Wire v3 (V3.S3a): the request-list data source — metadata rows (adapted
+   *  to list-item shape, memoized by rows-array reference) when the server
+   *  announced wireV3 and rows have arrived; the legacy entries otherwise.
+   *  EVERY selectedIndex-coupled call site must use this, not state.requests,
+   *  or selection desynchronizes between the two shapes. */
+  _listSource() {
+    const rows = this.state.v2Rows;
+    if (!this._wireV3 || !rows || rows.length === 0) return this.state.requests;
+    if (this._v3AdaptSource !== rows) {
+      this._v3AdaptSource = rows;
+      this._v3Adapted = rows.map(rowToListItem);
+    }
+    return this._v3Adapted;
+  }
+
   renderPrepare() {
-    const { requests, selectedIndex, showAll, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.state;
+    const { selectedIndex, showAll, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.state;
+    const requests = this._listSource();
+    const useRows = requests !== this.state.requests;
 
     // 过滤心跳请求
     if (this._filteredSource !== requests || this._filteredShowAll !== showAll) {
@@ -2393,29 +2662,50 @@ class AppBase extends React.Component {
     }
     const filteredRequests = this._filteredRequests;
 
-    // 增量 cache loss map
-    if (this._cacheLossShowAll !== showAll) {
-      this._cacheLossShowAll = showAll;
+    // 增量 cache loss map — legacy path only: rows carry server-computed
+    // cacheLoss inline (adapted items have no bodies for the client compute).
+    if (useRows) {
       this._cacheLossMap = new Map();
       this._cacheLossLastMainAgent = null;
       this._cacheLossProcessedCount = 0;
-    }
-    if (filteredRequests.length < this._cacheLossProcessedCount) {
-      this._cacheLossMap = new Map();
-      this._cacheLossLastMainAgent = null;
-      this._cacheLossProcessedCount = 0;
-    }
-    if (filteredRequests.length > this._cacheLossProcessedCount) {
-      this._cacheLossLastMainAgent = appendCacheLossMap(
-        this._cacheLossMap, filteredRequests,
-        this._cacheLossProcessedCount, this._cacheLossLastMainAgent
-      );
-      this._cacheLossProcessedCount = filteredRequests.length;
+    } else {
+      if (this._cacheLossShowAll !== showAll) {
+        this._cacheLossShowAll = showAll;
+        this._cacheLossMap = new Map();
+        this._cacheLossLastMainAgent = null;
+        this._cacheLossProcessedCount = 0;
+      }
+      if (filteredRequests.length < this._cacheLossProcessedCount) {
+        this._cacheLossMap = new Map();
+        this._cacheLossLastMainAgent = null;
+        this._cacheLossProcessedCount = 0;
+      }
+      if (filteredRequests.length > this._cacheLossProcessedCount) {
+        this._cacheLossLastMainAgent = appendCacheLossMap(
+          this._cacheLossMap, filteredRequests,
+          this._cacheLossProcessedCount, this._cacheLossLastMainAgent
+        );
+        this._cacheLossProcessedCount = filteredRequests.length;
+      }
     }
 
     const selectedRequest = selectedIndex !== null ? filteredRequests[selectedIndex] : null;
 
-    return { filteredRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode };
+    // Wire v3 (V3.S5): deep consumers (ChatView bubbles, AppHeader stats and
+    // prompts, team modal, tool-result maps) need entry bodies. On the rows
+    // path those live in state.requests (assembler-built entries), NOT in the
+    // adapted rows the list renders — hand them a separate filtered view.
+    let deepRequests = filteredRequests;
+    if (useRows) {
+      if (this._deepSource !== this.state.requests || this._deepShowAll !== showAll) {
+        this._deepSource = this.state.requests;
+        this._deepShowAll = showAll;
+        this._deepRequests = visibleRequests(this.state.requests, showAll);
+      }
+      deepRequests = this._deepRequests;
+    }
+
+    return { filteredRequests, deepRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode };
   }
 
   /** 工作区选择器渲染（PC/Mobile 共用） */

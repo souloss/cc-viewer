@@ -531,6 +531,7 @@ class ChatView extends React.Component {
       nextProps.lang !== this.props.lang ||
       nextProps.showThinkingSummaries !== this.props.showThinkingSummaries ||
       nextProps.fileLoading !== this.props.fileLoading ||
+      nextProps.loadingProgress !== this.props.loadingProgress ||
       nextProps.claudeSettings !== this.props.claudeSettings ||
       nextProps.preferences !== this.props.preferences ||
       // 审批档位值要直达终端工具栏快捷菜单：不能只依赖 preferences 引用同批变化放行
@@ -3091,9 +3092,17 @@ class ChatView extends React.Component {
     const noData = (!allItems || allItems.length === 0) && (noMainAgent || this.props.onlyCurrentSession);
 
     if (noData && !cliMode) {
-      // 初始 SSE 加载期间不显示"暂无对话"，避免 Empty→内容 的两阶段闪烁
+      // 初始 SSE 加载期间复用既有 Spin 占位（wire v3 下列表首帧即达、
+      // 只有对话区仍在装配——无需全局遮罩，就地显示加载与字节进度）。
       if (this.props.fileLoading) {
-        return null;
+        return (
+          <div className={styles.centerEmpty}>
+            <Spin size="large" />
+            {this.props.loadingProgress && (
+              <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>{this.props.loadingProgress}</div>
+            )}
+          </div>
+        );
       }
       return (
         <div className={styles.centerEmpty}>

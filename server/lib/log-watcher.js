@@ -4,6 +4,7 @@ import { buildContextWindowEvent, getContextSizeForModel } from './context-watch
 import { reconstructEntries } from './delta-reconstructor.js';
 import { enrichEntry } from './enrich-plan-input.js';
 import { enrichEntry as enrichWorkflowEntry } from './enrich-workflow.js';
+import { sseWrite } from './wire-compress.js';
 
 // 1.7.0: the v1 log-file tail (fs.watch + byte cursors + rotation follow)
 // retired with the v1 write path — the live channel is server/lib/v2/
@@ -60,7 +61,11 @@ function _safeSseWrite(clients, client, payload) {
   }
   let ok;
   try {
-    ok = client.write(payload);
+    // sseWrite routes through the client's negotiated Content-Encoding
+    // (wire-compress.js) — a bare client.write here would corrupt compressed
+    // streams. The drain listener below stays on the res: the encoder is
+    // piped into it, so socket drain still propagates.
+    ok = sseWrite(client, payload);
   } catch {
     _removeClient(clients, client);
     return false;
@@ -68,9 +73,18 @@ function _safeSseWrite(clients, client, payload) {
   if (!ok) {
     if (!client._sseBackpressureSince) {
       client._sseBackpressureSince = Date.now();
-      client.once('drain', () => { client._sseBackpressureSince = 0; });
+      // On compressed clients the false write() came from the ENCODER (its
+      // input buffer), whose own 'drain' fires when compression catches up —
+      // the res may never emit 'drain' at all (compressed output is 20-80x
+      // smaller than what the socket can absorb). Arming the reset on the
+      // wrong stream would let the timeout below kill healthy clients.
+      const pressured = client._wireEnc || client;
+      pressured.once('drain', () => { client._sseBackpressureSince = 0; });
     } else if (Date.now() - client._sseBackpressureSince > SSE_BACKPRESSURE_TIMEOUT_MS) {
       _removeClient(clients, client);
+      // Destroy the encoder first: end() alone leaves the 16MB brotli window
+      // alive until TCP teardown of the already-stuck socket.
+      try { if (client._wireEnc) client._wireEnc.destroy(); } catch {}
       try { client.end(); } catch {}
       return false;
     }
@@ -87,6 +101,15 @@ export function sendToClients(clients, entry) {
 
 export function sendEventToClients(clients, eventName, data) {
   const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (let i = clients.length - 1; i >= 0; i--) {
+    _safeSseWrite(clients, clients[i], payload);
+  }
+}
+
+/** Like sendEventToClients but `json` is an ALREADY-serialized JSON string —
+ *  wire v3 forwards raw stored lines verbatim without a parse/stringify trip. */
+export function sendEventRawToClients(clients, eventName, json) {
+  const payload = `event: ${eventName}\ndata: ${json}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
   }
@@ -115,7 +138,10 @@ export function processWatchedEntry(parsed, ctx) {
   reconstructor.reconstruct(parsed);
   try { enrichEntry(parsed); } catch {}
   try { enrichWorkflowEntry(parsed); } catch {}
-  sendToClients(clients, parsed);
+  // Wire v3 (V3.S5): the flagged v2 live feed suppresses the full-entry
+  // broadcast — clients rebuild entries from native lines + rows. The kv/
+  // context side events below still fire (they are slim and file-agnostic).
+  if (!ctx.suppressEntryBroadcast) sendToClients(clients, parsed);
   runParallelHook('onNewEntry', parsed).catch(() => {});
   if (isMainAgentEntry(parsed) && !parsed.inProgress) {
     const cached = extractCachedContent(parsed);

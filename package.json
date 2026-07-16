@@ -66,6 +66,7 @@
     "findcc.js",
     "interceptor.js",
     "server/",
+    "src/utils/",
     "plugins/",
     "concepts/",
     "ultraAgents/"

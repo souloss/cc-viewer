@@ -17,6 +17,7 @@ const RESUME_FLAGS = new Set(['-r', '--resume']);
 import { unwatchAllWorkflows } from '../lib/workflow-watcher.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
+import { sseWrite } from '../lib/wire-compress.js';
 
 function workspacesList(req, res, parsedUrl, isLocal, deps) {
   import('../workspace-registry.js').then(async ({ getWorkspaces }) => {
@@ -91,7 +92,7 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       const startedPayload = `event: workspace_started\ndata: ${JSON.stringify({ projectName: result.projectName, path: wsPath, claudeProjectModel: readClaudeProjectModel(wsPath) })}\n\n`;
       deps.clients.forEach(client => {
         try {
-          client.write(startedPayload);
+          sseWrite(client, startedPayload);
         } catch {}
       });
 
@@ -102,15 +103,15 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       const wsReloadSource = getLiveLogSource();
       const wsReloadTotal = await countLogEntries(wsReloadSource);
       deps.clients.forEach(client => {
-        try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: wsReloadTotal, incremental: false })}\n\n`); } catch {}
+        try { sseWrite(client, `event: load_start\ndata: ${JSON.stringify({ total: wsReloadTotal, incremental: false })}\n\n`); } catch {}
       });
       await streamRawEntriesAsync(wsReloadSource, (raw) => {
         deps.clients.forEach(client => {
-          try { client.write('event: load_chunk\ndata: ['); client.write(raw.replace(/\n/g, '')); client.write(']\n\n'); } catch {}
+          try { sseWrite(client, 'event: load_chunk\ndata: ['); sseWrite(client, raw.replace(/\n/g, '')); sseWrite(client, ']\n\n'); } catch {}
         });
       });
       deps.clients.forEach(client => {
-        try { client.write(`event: load_end\ndata: {}\n\n`); } catch {}
+        try { sseWrite(client, `event: load_end\ndata: {}\n\n`); } catch {}
       });
 
       // 1.7.0 迁移引导（P2）：切进的项目仍有未转换 v1 日志 → 对存量连接广播
@@ -119,7 +120,7 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
         const mig = migrationStatus(LOG_DIR, result.projectName || '');
         if (mig.pending) {
           const frame = `event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`;
-          deps.clients.forEach(client => { try { client.write(frame); } catch {} });
+          deps.clients.forEach(client => { try { sseWrite(client, frame); } catch {} });
         }
       } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
 
@@ -185,7 +186,7 @@ function workspacesStop(req, res, parsedUrl, isLocal, deps) {
     // 通知所有 SSE 客户端
     deps.clients.forEach(client => {
       try {
-        client.write(`event: workspace_stopped\ndata: {}\n\n`);
+        sseWrite(client, `event: workspace_stopped\ndata: {}\n\n`);
       } catch {}
     });
 

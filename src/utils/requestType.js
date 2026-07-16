@@ -10,7 +10,10 @@
 // SYNTHETIC_PROMPTS 已抬到 contentFilter.js，让 isSystemText 也能共用（ChatView 字符串分支过滤）。
 // requestType.js 继续维护 getSyntheticSubType —— 走的是"last user message + isMainAgent 门槛"的更强
 // 形式判断（用于 RequestList 打 Synthetic tag）；isSystemText 走的是"纯文本起首匹配"（用于对话流隐藏）。
-import { isMainAgent, isTeammate, getSystemText, extractTeammateName, SYNTHETIC_PROMPTS } from './contentFilter';
+// Extensioned import: this module chain (requestType → contentFilter →
+// teammateDetector) is shared with the server (wire-v3 typeTag computation in
+// server/lib/v2/meta-rows.js) — Node ESM requires explicit extensions.
+import { isMainAgent, isTeammate, getSystemText, extractTeammateName, SYNTHETIC_PROMPTS } from './contentFilter.js';
 
 function getMessageText(msg) {
   const c = msg?.content;

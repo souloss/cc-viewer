@@ -4,6 +4,11 @@
 > 本文档保留为：① `ccv convert` / `ccv verify` 迁移工具的读取契约参考；
 > ② v2→v1 适配器（`server/lib/v2/adapter.js`）合成的 entry 形态仍遵循本文的
 > envelope 协议（客户端重建器不变）。写入端章节描述的是已退役的历史行为。
+>
+> **Wire v3（默认开启）**：`/events` 的 v2 会话源已改发元数据行 + 原生
+> conv/responses 行（见 `docs/refactor/WIRE_FORMAT_V3.md`）；本文的 entry
+> envelope 协议仍约束 legacy 通道（`CCV_WIRE_V3=0` 逃生舱、v1 遗留文件、
+> `/api/local-log`）与客户端组装器产出的 entry 形态。§3.7 双层重建不变量继续有效。
 
 服务端到客户端 (`AppBase.jsx` + `sessionManager.js` + `sessionMerge.js`) 的 mainAgent entry 协议规约（v1 时代由 `server/interceptor.js` 写入；1.7.0 起由 v2 适配器合成）。
 

@@ -6,7 +6,9 @@ import { LOG_DIR } from '../../findcc.js';
 import { streamRawEntriesAsync } from '../lib/log-stream.js';
 import { migrationStatus } from '../lib/v2/migrate-prompt.js';
 import { reportSwallowed } from '../lib/error-report.js';
-import { awaitDrainOrClose } from '../lib/sse-backpressure.js';
+import { sseHead, sseWrite, needsDrain, wireEnd, awaitWireDrain } from '../lib/wire-compress.js';
+import { readV2ColdBundle } from '../lib/v2/meta-rows.js';
+import { readV2SingleEntry } from '../lib/v2/adapter.js';
 import { enrichRawIfNeeded } from '../lib/enrich-plan-input.js';
 import { validateLogPath } from '../lib/log-management.js';
 import { isMainAgentEntry, extractCachedContent } from '../lib/kv-cache-analyzer.js';
@@ -60,7 +62,10 @@ export function sseUpdateBadgeFrame(pending) {
 }
 
 async function events(req, res, parsedUrl, isLocal, deps) {
-  res.writeHead(200, {
+  // Negotiated Content-Encoding (br|identity). From here on, every byte of
+  // this response MUST go through sseWrite — a bare res.write would corrupt
+  // the compressed stream (see server/lib/wire-compress.js).
+  sseHead(req, res, 200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
@@ -74,7 +79,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 
   // SSE 心跳保活：每 30s 发送 ping 事件，防止连接被 OS/代理/浏览器静默断开
   const pingTimer = setInterval(() => {
-    try { res.write('event: ping\ndata: {}\n\n'); } catch {}
+    try { sseWrite(res, 'event: ping\ndata: {}\n\n'); } catch {}
   }, 30000);
 
   // server_config: 给前端推一次性的关键运行时常量，让前端 cooldown / debounce 等
@@ -82,7 +87,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   // 见 server.js 顶部 turnEnd debounce 的 SUNSET-MARKER 注释。
   // write 失败要 warn：之前静默吞会让 env override 漂移到前端硬常量 10s 而无人发觉。
   try {
-    res.write(`event: server_config\ndata: ${JSON.stringify({ turnEndDebounceMs: deps.turnEndDebounceMs })}\n\n`);
+    sseWrite(res, `event: server_config\ndata: ${JSON.stringify({ turnEndDebounceMs: deps.turnEndDebounceMs, wireV3: !!deps.wireV3, build: deps.serverBuild || '' })}\n\n`);
   } catch (err) {
     console.warn(`[server_config] SSE write failed (turnEndDebounceMs=${deps.turnEndDebounceMs}):`, err && err.message);
   }
@@ -90,7 +95,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   // 补推「有新版」徽标：复用启动检查缓存的结果，让刷新/新标签页连上即恢复徽标。
   // 置于 deps.clients.push(res) 之前 → 新客户端仅得一份，不与一次性广播竞态。
   const updFrame = sseUpdateBadgeFrame(deps.pendingMajorUpdate);
-  if (updFrame) res.write(updFrame);
+  if (updFrame) sseWrite(res, updFrame);
 
   // 1.7.0 迁移引导（P2）：当前项目仍有未转换的 v1 日志 → 连接即推 migrate_prompt。
   // 是否弹窗由客户端决定（「不再提醒」偏好在客户端；continued=true 时无视 dismissed
@@ -99,7 +104,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   try {
     const mig = migrationStatus(LOG_DIR, _projectName || '');
     if (mig.pending) {
-      res.write(`event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`);
+      sseWrite(res, `event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`);
     }
   } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
 
@@ -144,9 +149,15 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   const MAINAGENT_SCAN_RING = 3;
   const mainAgentRawRing = [];
 
+  // Wire v3 (V3.S5): flagged + v2 source ⇒ the legacy full-entry cold stream
+  // is REPLACED by rows + native lines (the byte win); the client assembler
+  // rebuilds entries locally. v1 legacy files keep the entry pipeline.
+  const _v3Src = deps.wireV3 ? getLiveLogSource() : null;
+  const v3Cold = !!(_v3Src && existsSync(join(_v3Src, 'journal.jsonl')));
+
   // S6b: the cold-load source is the current v2 session dir when the v2
   // writer is active (adapter stream), else the v1 file.
-  const coldLoadResult = await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
+  const coldLoadResult = v3Cold ? null : await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
     // 直接发送原始 JSON 字符串，不做 parse/reconstruct/stringify
     // ExitPlanMode V2 空 input 的条目按需补全 plan / planFilePath，其它原样透传
     if (res.destroyed || !res.writable) return;
@@ -156,9 +167,15 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     // 把 EPIPE 抛穿 async callback；res.on('close'|'error') 已会做 clients 数组清理。
     let drained = true;
     try {
-      res.write('event: load_chunk\ndata: [');
-      drained = res.write(out.includes('\n') ? out.replace(/\n/g, '') : out);
-      res.write(']\n\n');
+      sseWrite(res, 'event: load_chunk\ndata: [');
+      const ok = sseWrite(res, out.includes('\n') ? out.replace(/\n/g, '') : out);
+      sseWrite(res, ']\n\n');
+      // Two pressure signals: `ok` is the write target's input buffer (the
+      // ENCODER on compressed paths — its backlog would otherwise be invisible
+      // because compressed output is 20-80x smaller and rarely fills the
+      // socket), needsDrain(res) is the socket itself. awaitWireDrain below
+      // waits on whichever stream actually applies the pressure.
+      drained = ok && !needsDrain(res);
     } catch {
       return;
     }
@@ -166,7 +183,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     // helper 内部会在 fulfill 时把另外两个监听器从 res 上摘掉，避免 N 次 backpressure
     // 累积出 N 个 stale close/error listener 触发 MaxListenersExceededWarning。
     if (!drained) {
-      await awaitDrainOrClose(res, deps.SSE_BACKPRESSURE_TIMEOUT_MS);
+      await awaitWireDrain(res, deps.SSE_BACKPRESSURE_TIMEOUT_MS);
     }
   }, {
     since: useIncremental ? sinceParam : undefined,
@@ -190,11 +207,54 @@ async function events(req, res, parsedUrl, isLocal, deps) {
         loadStartData.hasMore = !!hasMore;
         loadStartData.oldestTs = oldestTs || '';
       }
-      res.write(`event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
     },
   });
 
-  res.write(`event: load_end\ndata: {}\n\n`);
+  // Wire v3 (V3.S2/S4/S5): cold rows + native lines land BEFORE load_end so
+  // the flagged client can assemble its window in the same load cycle. The
+  // legacy chunk stream was skipped above (v3Cold) — load_start is emitted
+  // here from the rows metadata instead.
+  if (v3Cold) {
+    try {
+      const src = _v3Src;
+      // Single-flighted bundle (review P2-b): a reconnect storm coalesces to
+      // one journal fold + one native read per (dir, window). `since` scopes
+      // an incremental reconnect to the delta window (review P1-2) — the
+      // client upserts those rows instead of resetting the list.
+      const { meta, native } = await readV2ColdBundle(src, {
+        limit: useLimit ? effectiveLimit : 0,
+        since: useIncremental ? sinceParam : null,
+      });
+      // Build every payload BEFORE load_start so it can carry the exact byte
+      // total — the client renders a real received/total progress (the legacy
+      // wire's per-entry count-up has no per-frame granularity here).
+      const rowsPayload = JSON.stringify({ rows: meta.rows, totalCount: meta.totalCount, hasMore: meta.hasMore, oldestTs: meta.oldestTimestamp, incremental: !!useIncremental });
+      let v3Bytes = rowsPayload.length;
+      for (const p of native.convPayloads) v3Bytes += p.length;
+      for (const p of native.respPayloads) v3Bytes += p.length;
+      const loadStartData = { total: meta.totalCount, incremental: !!useIncremental, v3Bytes };
+      if (useLimit) {
+        loadStartData.hasMore = !!meta.hasMore;
+        loadStartData.oldestTs = meta.oldestTimestamp || '';
+      }
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
+      sseWrite(res, `event: v2_requests\ndata: ${rowsPayload}\n\n`);
+      for (const payload of native.convPayloads) sseWrite(res, `event: v3_conv\ndata: ${payload}\n\n`);
+      for (const payload of native.respPayloads) sseWrite(res, `event: v3_resp\ndata: ${payload}\n\n`);
+      // kv-cache / context_window sources: rebuild the newest completed
+      // mainAgent rows. Depth 3 mirrors the legacy scan-ring fallback (review
+      // P2-e): the newest main may lack usage/cached-content or be a
+      // synthesis-gated orphan — earlier candidates then provide the values.
+      const mains = meta.rows.filter((r) => r.mainAgent && !r.inProgress).slice(-3);
+      for (const m of mains) {
+        const detail = await readV2SingleEntry(src, { seq: m.seq, sessionId: m.sessionId });
+        if (detail && detail.entry) mainAgentRawRing.push(detail.entry);
+      }
+    } catch (err) { reportSwallowed('sse.v2_requests', err); }
+  }
+
+  sseWrite(res, `event: load_end\ndata: {}\n\n`);
 
   // S10a: v2 sources no longer invoke onScan (the two-pass window never
   // stringifies out-of-window entries) — the adapter returns the newest-main
@@ -227,10 +287,10 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 
   // 发送最新 MainAgent 的 KV-Cache 和 context_window
   if (latestKvCache) {
-    res.write(`event: kv_cache_content\ndata: ${JSON.stringify(latestKvCache)}\n\n`);
+    sseWrite(res, `event: kv_cache_content\ndata: ${JSON.stringify(latestKvCache)}\n\n`);
   }
   if (latestContextWindow) {
-    res.write(`event: context_window\ndata: ${JSON.stringify(latestContextWindow)}\n\n`);
+    sseWrite(res, `event: context_window\ndata: ${JSON.stringify(latestContextWindow)}\n\n`);
     pushedContextWindow = true;
   }
   // Fallback: no MainAgent in log (e.g. fresh session after -c), read context-window.json
@@ -250,7 +310,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
         const effectiveSize = adaptContextWindow(contextSize, inputTokens);
         const usedPct = effectiveSize > 0 ? Math.round((totalTokens / effectiveSize) * 100) : 0;
         const data = { ...cw, context_window_size: effectiveSize, used_percentage: usedPct, remaining_percentage: 100 - usedPct };
-        res.write(`event: context_window\ndata: ${JSON.stringify(data)}\n\n`);
+        sseWrite(res, `event: context_window\ndata: ${JSON.stringify(data)}\n\n`);
       }
     } catch { }
   }
@@ -274,16 +334,26 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 // API endpoint
 async function requests(req, res) {
   // 异步流式 JSON 数组输出，不做 reconstruct，发原始条目
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.write('[');
-  let first = true;
-  await streamRawEntriesAsync(getLiveLogSource(), (raw) => {
-    if (!first) res.write(',');
-    res.write(enrichRawIfNeeded(raw));
-    first = false;
-  });
-  res.write(']');
-  res.end();
+  // flush:false —— whole-stream response: the client parses the array only
+  // when complete, so per-macrotask flush boundaries would just cost ratio.
+  sseHead(req, res, 200, { 'Content-Type': 'application/json' }, { flush: false });
+  try {
+    sseWrite(res, '[');
+    let first = true;
+    await streamRawEntriesAsync(getLiveLogSource(), (raw) => {
+      if (!first) sseWrite(res, ',');
+      sseWrite(res, enrichRawIfNeeded(raw));
+      first = false;
+    });
+    sseWrite(res, ']');
+    wireEnd(res);
+  } catch (err) {
+    // Mid-stream failure (e.g. session dir converted/removed while streaming):
+    // without this catch the rejection propagates through the dispatcher and
+    // kills the process. Headers are already sent — close the stream cleanly.
+    console.error('[api-requests]', err && err.stack || err);
+    wireEnd(res);
+  }
 }
 
 export const eventsRoutes = [

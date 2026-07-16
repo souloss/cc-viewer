@@ -94,6 +94,7 @@ class App extends AppBase {
   // 避免第一条请求碰巧未带 Authorization(走 x-api-key/Unknown) 时永久压住 pill。
   componentDidUpdate(prevProps, prevState) {
     if (super.componentDidUpdate) super.componentDidUpdate(prevProps, prevState);
+    this._syncDetailFetch(prevState);
     if (this._isLocalLog) return;
     const reqs = this.state.requests;
     if (!reqs || reqs.length === 0) return;
@@ -158,22 +159,79 @@ class App extends AppBase {
     this.setState({ viewMode: 'raw', selectedIndex: index, scrollCenter: true });
   };
 
+  // ─── Wire v3 (V3.S3b): on-demand detail fetch ─────────────────────────
+  // Driven from componentDidUpdate so EVERY selection path (click, keyboard,
+  // cache-msg navigation, chat jump-back) funnels through one fetch. A row's
+  // live upgrade (placeholder→completed / classification correction) replaces
+  // its object in v2Rows, which changes the signature and refreshes the open
+  // detail. Rapid row switching aborts the in-flight fetch.
+  _detailRowSig(row) {
+    return row ? `${row.sessionId}\x00${row.seq}\x00${row.inProgress ? 1 : 0}\x00${row.status ?? ''}` : null;
+  }
+
+  _syncDetailFetch(prevState) {
+    const source = this._listSource();
+    if (source === this.state.requests) {
+      if (this.state.detailEntry || this.state.detailLoading || this.state.detailError) {
+        this.setState({ detailEntry: null, detailPrevMain: null, detailLoading: false, detailError: null });
+      }
+      this._detailSig = null;
+      return;
+    }
+    const filtered = visibleRequests(source, this.state.showAll);
+    const row = this.state.selectedIndex != null ? filtered[this.state.selectedIndex]?._v3Row : null;
+    const sig = this._detailRowSig(row);
+    if (sig === this._detailSig) return;
+    this._detailSig = sig;
+    if (this._detailAbort) { this._detailAbort.abort(); this._detailAbort = null; }
+    if (!row) {
+      this.setState({ detailEntry: null, detailPrevMain: null, detailLoading: false, detailError: null });
+      return;
+    }
+    const ctrl = new AbortController();
+    this._detailAbort = ctrl;
+    this.setState({ detailLoading: true, detailError: null });
+    const file = `v2:${this.state.projectName}/${row.sessionId}`;
+    fetch(apiUrl(`/api/v2-entry?file=${encodeURIComponent(file)}&seq=${row.seq}&sid=${encodeURIComponent(row.sessionId)}`), { signal: ctrl.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (ctrl.signal.aborted) return;
+        this.setState({ detailLoading: false, detailError: null, detailEntry: data.entry || null, detailPrevMain: data.prevMain || null });
+      })
+      .catch((e) => {
+        if (e && e.name === 'AbortError') return; // benign: user switched rows
+        reportSwallowed('v3.detail-fetch', e);
+        if (!ctrl.signal.aborted) this.setState({ detailLoading: false, detailEntry: null, detailPrevMain: null, detailError: String((e && e.message) || e) });
+      });
+  }
+
+  handleDetailRetry = () => {
+    this._detailSig = null; // force refetch of the same row
+    this._syncDetailFetch(this.state);
+  };
+
   handleViewInChat = () => {
     this.setState(prev => {
-      const filteredRequests = visibleRequests(prev.requests, prev.showAll);
+      // Wire v3: selection indexes into the ACTIVE list source (metadata rows
+      // when flagged) — prev.requests would desynchronize the two shapes.
+      const source = this._listSource();
+      const filteredRequests = visibleRequests(source, prev.showAll);
       const selectedReq = filteredRequests[prev.selectedIndex];
       if (!selectedReq) return null;
       let targetTs = null;
       if (isMainAgent(selectedReq) && selectedReq.timestamp) {
         targetTs = selectedReq.timestamp;
       } else {
-        const cls = classifyRequest(selectedReq);
+        const cls = selectedReq._v3Row?.typeTag || classifyRequest(selectedReq);
         if ((cls.type === 'SubAgent' || cls.type === 'Teammate') && selectedReq.timestamp) {
           targetTs = selectedReq.timestamp;
         } else {
-          const idx = prev.requests.indexOf(selectedReq);
+          const idx = source.indexOf(selectedReq);
           if (idx >= 0) {
-            targetTs = findPrevMainAgentTimestamp(prev.requests, idx);
+            targetTs = findPrevMainAgentTimestamp(source, idx);
           }
         }
         if (!targetTs) {
@@ -187,9 +245,12 @@ class App extends AppBase {
   handleToggleViewMode = () => {
     this.setState(prev => {
       const newMode = prev.viewMode === 'raw' ? 'chat' : 'raw';
+      // Wire v3 (review P1-5): selectedIndex indexes the ACTIVE list source
+      // (adapted rows when flagged) — prev.requests would mis-select.
+      const source = this._listSource();
       if (newMode === 'raw') {
         if (prev.selectedIndex === null) {
-          const filtered = visibleRequests(prev.requests, prev.showAll);
+          const filtered = visibleRequests(source, prev.showAll);
           return {
             viewMode: newMode,
             selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
@@ -198,20 +259,20 @@ class App extends AppBase {
         }
         return { viewMode: newMode, scrollCenter: true };
       }
-      const filtered = visibleRequests(prev.requests, prev.showAll);
+      const filtered = visibleRequests(source, prev.showAll);
       const selectedReq = prev.selectedIndex != null ? filtered[prev.selectedIndex] : null;
       if (selectedReq) {
         let targetTs = null;
         if (isMainAgent(selectedReq) && selectedReq.timestamp) {
           targetTs = selectedReq.timestamp;
         } else {
-          const cls = classifyRequest(selectedReq);
+          const cls = selectedReq._v3Row?.typeTag || classifyRequest(selectedReq);
           if ((cls.type === 'SubAgent' || cls.type === 'Teammate') && selectedReq.timestamp) {
             targetTs = selectedReq.timestamp;
           } else {
-            const idx = prev.requests.indexOf(selectedReq);
+            const idx = source.indexOf(selectedReq);
             if (idx >= 0) {
-              targetTs = findPrevMainAgentTimestamp(prev.requests, idx);
+              targetTs = findPrevMainAgentTimestamp(source, idx);
             }
             if (!targetTs) {
               message.info(t('ui.cannotMap'));
@@ -238,7 +299,7 @@ class App extends AppBase {
   handleCacheHighlightDone = () => { this.setState({ pendingCacheHighlight: null }); };
 
   handleNavigateCacheMsg = (msgIdx) => {
-    const filteredRequests = visibleRequests(this.state.requests, this.state.showAll);
+    const filteredRequests = visibleRequests(this._listSource(), this.state.showAll);
     let targetIdx = -1;
     for (let i = filteredRequests.length - 1; i >= 0; i--) {
       if (isMainAgent(filteredRequests[i])) { targetIdx = i; break; }
@@ -375,7 +436,7 @@ class App extends AppBase {
   // ─── PC 渲染 ──────────────────────────────────────────
 
   render() {
-    const { filteredRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.renderPrepare();
+    const { filteredRequests, deepRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.renderPrepare();
     // 「仅展示当前会话」锁定：把传给 ChatView 的会话切到「以 pin 会话结尾」，
     // 让 pin 会话从 ChatView 视角即最后一个会话（LR 卡片 / 审批 modal 等既有逻辑原样可用）。
     const { sessions: displaySessions, upperBoundTs: sessionUpperBoundTs } = this._displaySessionsFor(mainAgentSessions);
@@ -406,11 +467,9 @@ class App extends AppBase {
           onJumpTab={this.handleApprovalJumpTab}
           otherTabs={this.state.approvalOtherTabs}
         >
-        {fileLoading && (
-          <div className={styles.loadingOverlay}>
-            <div className={styles.loadingText}>Loading...({fileLoadingCount})</div>
-          </div>
-        )}
+        {/* Wire v3: no loading mask — rows land in the first frame so the
+            list/detail are interactive immediately; the chat area shows its
+            own inline Spin + byte progress (ChatView loadingProgress prop). */}
         {this.state.isDragging && (
           <div className={styles.dragOverlay}>
             <div className={styles.dragOverlayContent}>
@@ -424,7 +483,7 @@ class App extends AppBase {
             <AppHeader
               ref={this.appHeaderRef}
               requestCount={filteredRequests.length}
-              requests={filteredRequests}
+              requests={deepRequests}
               viewMode={viewMode}
               cacheExpireAt={this.state.cacheExpireAt}
               cacheType={this.state.cacheType}
@@ -484,7 +543,16 @@ class App extends AppBase {
           )}
           <Layout.Content className={styles.content}>
             {viewMode === 'raw' && (
-              filteredRequests.length === 0 ? (
+              filteredRequests.length === 0 && fileLoading ? (
+                // Legacy wire / v1 files populate the list only at load_end —
+                // show a loading state instead of flashing the onboarding
+                // guide during the cold load (review P1-3; the v3 path fills
+                // rows in the first frame so this rarely shows).
+                <div className={styles.centerLoading}>
+                  <Spin size="large" />
+                  <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>{this._loadingProgressText()}</div>
+                </div>
+              ) : filteredRequests.length === 0 ? (
                 <div className={styles.guideContainer}>
                   <div className={styles.guideContent}>
                     <h2 className={styles.guideTitle}>{t('ui.guide.title')}</h2>
@@ -540,7 +608,7 @@ class App extends AppBase {
 
                 <div className={styles.rightPanel}>
                   <DetailPanel
-                    request={selectedRequest}
+                    request={selectedRequest?._v3Row ? this.state.detailEntry : selectedRequest}
                     requests={filteredRequests}
                     allRequests={this.state.requests}
                     selectedIndex={selectedIndex}
@@ -550,13 +618,18 @@ class App extends AppBase {
                     expandDiff={prefs.expandDiff}
                     pendingCacheHighlight={this.state.pendingCacheHighlight}
                     onCacheHighlightDone={this.handleCacheHighlightDone}
+                    hasPrevMainOverride={!!selectedRequest?._v3Row}
+                    prevMainOverride={this.state.detailPrevMain}
+                    detailLoading={!!(selectedRequest?._v3Row && this.state.detailLoading)}
+                    detailError={selectedRequest?._v3Row ? this.state.detailError : null}
+                    onDetailRetry={this.handleDetailRetry}
                   />
                 </div>
               </div>
               )
             )}
             <div className={styles.chatViewWrapper} style={{ display: viewMode === 'chat' ? 'flex' : 'none' }}>
-              <ChatView {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={filteredRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={!this._isLocalLog} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
+              <ChatView loadingProgress={fileLoading ? this._loadingProgressText() : null} {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={deepRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={!this._isLocalLog} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
             </div>
           </Layout.Content>
           <div className={styles.footer}>

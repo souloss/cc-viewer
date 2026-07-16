@@ -25,6 +25,14 @@
 | S10b | 两级 in-flight 合流 + 受限 TTL 微缓存 | ✅ | 2026-07-15 | (未提交) | `server/lib/v2/singleflight.js`：一级按 sessionDir 共享 Pass A、二级按 (dir,limit,before) 共享全窗 Pass B；500ms TTL 微缓存**只服务只读历史面**（/api/local-log、IM 弹窗），**绝不服务 /events live-attach**（陈旧窗口会放大冷加载→attach 广播丢失窗口，F5b）。readTailEntries 默认 cached=true、streamRawEntriesAsync 默认 cached=false。测试 test/v2-singleflight.test.js（Pass A 计数=1 断言、live-attach 拿不到缓存断言） |
 | S10c | 收口 limit=0 无界面 | ✅ | 2026-07-15 | (未提交) | 三个 limit=0 路径（/api/local-log 全量、workspaces 重载广播、/api/requests）已随 S10a 流式 Pass B 自动治住——Pass A 只留轻量 descriptor、Pass B 逐条流式，683MB 全量流实测常驻 ~2MB（**手工实测,非 CI 守卫**;CI 用合成夹具锁全流式增量输出正确性）。无需人为截断（原计划的 DEFAULT_EVENTS_LIMIT 前提「仍全量物化」已不成立，/api/requests 保持完整流式输出）。**已知可接受差异**:无界流按合成序发射,重复 ts\|url 时幸存者位置晚于历史首现序——客户端序不敏感,详见 WIRE_FORMAT_V2.md §11。 |
 
+| B | brotli 传输压缩（br\|identity 协商 + 逐事件 flush，wire-compress.js 单缝） | ✅ | 2026-07-16 | c8c6c25 | 实测冷载 20.8×/live 80×；含评审 6 项修复（encoder 感知背压 awaitWireDrain、q=0 拒绝、/api/requests try/catch、no-flush 整流、双分支 Vary、踢除时 destroy encoder）。逃生舱 CCV_WIRE_COMPRESSION=off。**已知边界：浏览器仅在 HTTPS/localhost 发 br——远程明文 http 回退 identity（由 V3 补位）** |
+| V3.S1 | `/api/v2-entry` 单条详情（target+prevMain，逐成员 checkpoint 提升） | ✅ | 2026-07-16 | c94c28e | promoteKeys 物化模式；UUID/basename 双寻址（先 resolve 再 validate）；test/v2-entry-endpoint.test.js |
+| V3.S2 | `v2_requests` 元数据行通道（journal 折叠 + 有界 Pass B typeTag/cacheLoss） | ✅ | 2026-07-16 | add9835 | classifyRequest 服务端复用（requestType 链补 .js 扩展名单源）；三处有意偏移测试钉死；旗标 deps.wireV3 启动读一次 + server_config 广播 |
+| V3.S3 | 旗标前端：列表自行渲染 + 按需详情 | ✅ | 2026-07-16 | a43ffb6 | _listSource() 单缝（桌面/移动共用）；componentDidUpdate 驱动 fetch + abort；entryCache protocolVersion 单门（不 bump DB_VERSION——暗着陆保命） |
+| V3.S4 | 原生 conv/responses 行转发（冷窗 + live 三钩子） | ✅ | 2026-07-16 | 43fb6f1 | 冷载自"最近 snapshot ≤ 窗口起点"；**架构改道（用户批准）：废弃摘录帧方案** |
+| V3.S5 | 客户端组装器；旗标线缆停发全量 entry | ✅ | 2026-07-16 | 08bac13 | v3Assembler 重建 v1 形状 entry 喂现有管线（parity oracle 钉死）；深读消费者走 deepRequests；live 停发 data: 帧（kv/context 侧事件保留）。实测冷载明文 176.8→42.5MB（÷4.2） |
+| V3.S6 | 翻转默认 + 文档收尾 | ✅ | 2026-07-16 | (本次提交) | CCV_WIRE_V3 默认开、=0/off 逃生舱；WIRE_FORMAT_V3.md 新建；entry-slim **保留**（方案 B 下 v1 遗留/逃生舱仍需，v3 路径天然闲置——取代原"退役"项）；legacy live UI 路径留一个发布周期后再删 |
+
 **恢复协议**：新 session 开始 → 读记忆 `wire-format-v2-progress.md` 指针 → 读本表找到第一个非 ✅ 步骤 → **先跑上一完成步的 named tests 确认仍绿** → 再开工。步骤内中断：状态记 🔄 + 在"下一步动作备注"写明断点。
 
 **全系列评审 P3 backlog（2026-07-13 六人团评审，P1+P2 已全部修复）**：

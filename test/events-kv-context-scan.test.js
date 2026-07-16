@@ -20,6 +20,11 @@ process.env.CCV_LOG_DIR = tmpDir;
 process.env.CLAUDE_CONFIG_DIR = tmpDir;
 process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
+// This suite pins the LEGACY /events scan semantics (load_chunk passthrough +
+// mainAgentRing-driven kv/context). Wire v3 is default-on since V3.S6 and
+// replaces those frames on v2 sources — pin the escape hatch explicitly.
+// The v3 path's kv/context coverage lives in test/v3-assembler.test.js.
+process.env.CCV_WIRE_V3 = '0';
 // 私有高位端口窗,避免与用户真实 ccv 服务(7008-7099)抢端口(2026-06-06 审计 port-clash)。
 // server.js 顶层把 CCV_START_PORT/MAX_PORT 冻结为 const,故必须在 import server.js 之前设好(本文件 before() 内动态 import,此处即生效)。
 process.env.CCV_START_PORT = '17930';
