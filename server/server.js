@@ -76,11 +76,20 @@ function execWithStdin(cmd, args, input, options) {
     child.stdin.end();
   });
 }
-import { _initPromise, _projectName, _logDir, _v2Writer, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText, markSessionStart } from './interceptor.js';
+import { _initPromise, _projectName, _logDir, _v2Writer, streamingState, resetStreamingState, PROFILE_PATH, RETRY_CONFIG_PATH, _retryConfigState, setLivePort, getImLiveText, resetImLiveText, markSessionStart } from './interceptor.js';
 import { V2LiveFeed } from './lib/v2/live-feed.js';
 import { sanitizePathComponent } from './lib/v2/layout.js';
 import { maybeResumeConvert } from './lib/v2/convert-manager.js';
 import { LOG_DIR, setLogDir, getClaudeConfigDir, isBrowserOpenSuppressed } from '../findcc.js';
+import { loadRetryConfig } from './lib/proxy-retry.js';
+
+// 代理重试配置：由 interceptor._retryConfigState 提供（live binding，watchFile 热刷新）。
+// mode 默认 off（向后兼容，不重试）。env 是启动默认/兜底，retry-config.json 覆盖 env。
+// 启动日志读一次首屏值；运行时 proxy.js 每请求读 interceptor._retryConfigState 取最新。
+const _startupRetryConfig = _retryConfigState || loadRetryConfig();
+if (_startupRetryConfig.mode !== 'off' && process.env.CCV_DEBUG) {
+  console.error(`[CC Viewer] Proxy retry: mode=${_startupRetryConfig.mode}, maxRetries=${_startupRetryConfig.maxRetries}, interval=${_startupRetryConfig.retryIntervalMs}ms`);
+}
 import { t, getLang, setLang } from './i18n.js';
 import { loadAuthConfig, loadAuthState, saveAuthConfig, clearProjectOverride, generatePassword, decideAuth, parseCookies, renderLoginPage, localeFromAcceptLanguage } from './lib/auth.js';
 import { checkAndUpdate } from './lib/updater.js';
@@ -520,6 +529,7 @@ const deps = {
   get writeToPty() { return _writeToPty; },
   get onPtyData() { return _onPtyData; },
   get statsWorker() { return statsWorker; },
+  get retryConfig() { return _retryConfigState; },
   get workspaceLaunched() { return _workspaceLaunched; },
   setWorkspaceLaunched(v) { _workspaceLaunched = v; },
   get launchCallback() { return _launchCallback; },
@@ -2306,6 +2316,7 @@ async function _doStop() {
   // 早期请求向已关闭的端口 POST 丢包。新 startViewer 的 listen 回调会再次 setLivePort
   setLivePort(null);
   try { unwatchFile(PROFILE_PATH); } catch {} // 清理 interceptor 的 StatWatcher
+  try { unwatchFile(RETRY_CONFIG_PATH); } catch {} // 清理 retry-config 的 StatWatcher
 }
 
 // ─── SDK Mode Exports ──────────────────────────────────────────
