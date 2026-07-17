@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { listSessionIds } from './replay.js';
 import { isSupportedWireFormat } from './layout.js';
+import { isForeignLiveOwned } from './session-owner.js';
 
 /**
  * Find the on-disk dir NAME of an existing session for `sessionId` (a UUID), or
@@ -247,16 +248,26 @@ export function isDiscardableSession(dir, meta) {
  * has-a-main-req gate would otherwise re-select exactly the dir the caller's
  * completed-turn gate just rejected (it IS the newest once its first main req
  * is written), nullifying the fallback.
+ *
+ * `skipForeignLive` (multi-window isolation, 2026-07-17) drops candidates
+ * whose `owner.lock` is held by ANOTHER live process — a parallel ccv window's
+ * in-flight session. Without it, the cold-load fallback serves the other
+ * window's conversation and `-c` adoption writes into its journal. A dead
+ * owner's claim expires with its pid (kernel liveness), so crashed windows'
+ * sessions stay selectable — never a permanent lock. Both consumers
+ * (getLiveLogSource fallback, _resolveAdoption) pass true; default false keeps
+ * the raw picker semantics for everything else.
  * @param {string} projectDir - absolute LOG_DIR/<project>
- * @param {{excludeDir?: string}} [opts]
+ * @param {{excludeDir?: string, skipForeignLive?: boolean}} [opts]
  * @returns {{dir:string, sessionId:string}|null}
  */
-export function latestMainSession(projectDir, { excludeDir = '' } = {}) {
+export function latestMainSession(projectDir, { excludeDir = '', skipForeignLive = false } = {}) {
   if (!projectDir) return null;
   const candidates = []; // { dir, sessionId, startTs }
   for (const name of listSessionIds(projectDir)) {
     const dir = join(projectDir, 'sessions', name);
     if (excludeDir && dir === excludeDir) continue;
+    if (skipForeignLive && isForeignLiveOwned(dir)) continue;
     if (!existsSync(join(dir, 'journal.jsonl'))) continue;
     let meta = null;
     try { meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf-8')); } catch { continue; }

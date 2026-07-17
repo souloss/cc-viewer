@@ -22,7 +22,10 @@ LOG_DIR/<project>/sessions/<session_id>/
   responses.jsonl    # 每完成请求一行：response body + headers 等大字段（见 §5）
   conversations/<convKey>/e<N>.jsonl   # wire 事件行（见 §6）
   blobs/sha256-<hex16>.json            # tools/system CAS（见 §7）
+  owner.lock         # 运行时活性 sidecar（多窗口隔离，2026-07-17）——非 wire 协议组成
 ```
+
+- `owner.lock`（`server/lib/v2/session-owner.js`）：`{pid, startedAt}`，MAIN leader 写进程创建/收养目录时 `wx` 原子抢占写入，正常退出/workspace 切换时删除。**不属于 wire 格式**：`readSession`/replay/verify 不读取它，声明有效性 = 持有 pid 存活（`kill(pid,0)`），进程崩溃即自动失效——它只影响"live 归属"判定（live-feed 跟随、冷加载兜底、`-c` 收养候选），历史读取面一律无视。teammate / IM worker / 离线转换器不写此文件。
 
 - `<project>`：与 v1 相同的 project 目录名（`basename(cwd)` 清洗后），v1 平铺 `.jsonl` 与 v2 `sessions/` 子目录**共存于同一 project 目录**，双写期互不干扰。
 - `<session_id>`：从 `body.metadata.user_id` 解析出的 UUID（§8）；无法解析时的兜底见 §8.3。

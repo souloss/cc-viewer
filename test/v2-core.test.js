@@ -14,7 +14,8 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { sanitizePathComponent, sessionPaths, ensureSessionDirSync, convEpochPath, writeFileAtomicSync } from '../server/lib/v2/layout.js';
+import { sanitizePathComponent, sessionPaths, ensureSessionDirSync, convEpochPath, writeFileAtomicSync, dirSizeSync } from '../server/lib/v2/layout.js';
+import { listV2Sessions } from '../server/lib/v2/adapter.js';
 import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { parseUserId, ConvResolver, classifyKind, firstUserPromptText } from '../server/lib/v2/identity.js';
 import { BlobStore } from '../server/lib/v2/blob-store.js';
@@ -869,5 +870,83 @@ describe('write-order protocol', () => {
     const kinds = journal.filter(l => l.ph === 'req').map(l => l.kind);
     assert.deepEqual(kinds, ['countTokens', 'main'], 'held request journals first, in one batch');
     assert.ok(existsSync(convEpochPath(sp('proj', SID), 'misc', 0)), 'held conv content still lands');
+  });
+});
+
+// ─── multi-window isolation: owner.lock claim lifecycle ─────────────────────
+describe('V2Writer owner claim lifecycle', () => {
+  const mkMain = () => ({
+    timestamp: '2026-07-13T12:00:00.000Z', url: 'https://api.anthropic.com/v1/messages', method: 'POST',
+    headers: {}, requestId: 'r1', mainAgent: true,
+    body: { model: 'm', metadata: { user_id: jsonUserId }, messages: [textMsg('user', 'hello')] },
+  });
+  const lockPath = () => join(sp('proj', SID).dir, 'owner.lock');
+
+  it('_session claims a fresh dir with this process pid; close() releases it synchronously', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkMain();
+    w.ingestRequest(e, e.body.messages);
+    const lock = JSON.parse(readFileSync(lockPath(), 'utf-8'));
+    assert.equal(lock.pid, process.pid, 'the writing process claimed its session dir');
+    const closing = w.close(); // release runs in close()'s synchronous head…
+    assert.equal(existsSync(lockPath()), false, '…so the lock is gone even if the drain hangs past the 2s shutdown race');
+    await closing;
+  });
+
+  it('resetSessions() (workspace switch) releases the claim — the dir becomes adoptable', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkMain();
+    w.ingestRequest(e, e.body.messages);
+    assert.equal(existsSync(lockPath()), true);
+    w.resetSessions();
+    assert.equal(existsSync(lockPath()), false);
+    await w.close();
+  });
+
+  it('a teammate writer (leader set) never claims — any project viewer keeps following it', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true, leader: { agentName: 'sub', teamName: 't' } });
+    const e = mkMain();
+    w.ingestRequest(e, e.body.messages);
+    assert.equal(existsSync(lockPath()), false);
+    await w.close();
+  });
+
+  it('an IM worker (CCV_IM_PLATFORM) never claims', async () => {
+    process.env.CCV_IM_PLATFORM = 'dingtalk';
+    try {
+      const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+      const e = mkMain();
+      w.ingestRequest(e, e.body.messages);
+      assert.equal(existsSync(lockPath()), false);
+      await w.close();
+    } finally { delete process.env.CCV_IM_PLATFORM; }
+  });
+
+  it('owner.lock is invisible to the read surfaces: listV2Sessions rows and dirSizeSync unaffected', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true });
+    const e = mkMain();
+    const h = w.ingestRequest(e, e.body.messages);
+    w.ingestCompletion(h, { ...e, duration: 1, response: { status: 200, headers: {}, body: { content: [], usage: { input_tokens: 1, output_tokens: 1 } } } });
+    await w.flush();
+    assert.equal(existsSync(lockPath()), true, 'claim present while the writer lives');
+    const withLock = listV2Sessions(join(dir, 'proj'));
+    assert.equal(withLock.length, 1, 'the claimed session lists normally');
+    const sizeWith = dirSizeSync(sp('proj', SID).dir);
+    await w.close(); // releases the lock
+    const withoutLock = listV2Sessions(join(dir, 'proj'));
+    assert.equal(withoutLock.length, 1);
+    assert.equal(withLock[0].sid, withoutLock[0].sid, 'row identity identical with/without the sidecar');
+    assert.ok(sizeWith - dirSizeSync(sp('proj', SID).dir) < 200, 'the sidecar only ever adds its own ~60 bytes');
+  });
+
+  it('the offline converter (staging sessionsDirName) never stamps live ownership onto migrated history', async () => {
+    const w = new V2Writer({ logDir: dir, project: 'proj', enabled: true, sessionsDirName: 'sessions-migrating', metaExtra: { origin: 'convert' } });
+    const e = mkMain();
+    w.ingestRequest(e, e.body.messages);
+    const staged = join(dir, 'proj', 'sessions-migrating');
+    const names = readdirSync(staged);
+    assert.equal(names.length, 1);
+    assert.equal(existsSync(join(staged, names[0], 'owner.lock')), false);
+    await w.close();
   });
 });

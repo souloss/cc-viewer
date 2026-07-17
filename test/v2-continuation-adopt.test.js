@@ -33,7 +33,8 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -188,6 +189,50 @@ describe('does NOT adopt', () => {
     const names = dirsInProject();
     assert.equal(names.length, 2, 'a genuinely fresh conversation (no replayed history) mints its own folder');
     assert.ok(names.some((n) => n.endsWith('_' + SID_B)));
+  });
+});
+
+describe('multi-window isolation: adoption respects the live-owner claim', () => {
+  const lockOf = (name) => join(sessionsRoot(), name, 'owner.lock');
+  const claim = (name, pid) => writeFileSync(lockOf(name), JSON.stringify({ pid, startedAt: '2026-07-14T09:00:00.000Z' }));
+
+  it('a previous dir claimed by another LIVE process is never adopted — fresh folder (fork semantics)', async () => {
+    const seedName = await seedPrev();
+    claim(seedName, process.ppid); // the live test runner stands in for a parallel window
+    const w = newWriter();
+    w.setContinuationMode({ continued: true, fork: false });
+    fire(w, mainEntry(continuedMsgs('second window -c'), { ts: '2026-07-14T10:00:00.000Z', sid: SID_B }));
+    await w.flush(); await w.close();
+    const names = dirsInProject();
+    assert.equal(names.length, 2, 'no adoption into a live foreign session — two writers must never share a journal');
+    assert.ok(names.some((n) => n.endsWith('_' + SID_B)), 'the -c launch minted its own folder');
+  });
+
+  it('a DEAD owner claim is recycled and adoption proceeds (crash never locks a dir forever)', async () => {
+    const seedName = await seedPrev();
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid; // exited → dead
+    claim(seedName, deadPid);
+    const w = newWriter();
+    w.setContinuationMode({ continued: true, fork: false });
+    fire(w, mainEntry(continuedMsgs('after a crash'), { ts: '2026-07-14T10:00:00.000Z', sid: SID_B }));
+    await w.flush();
+    assert.equal(dirsInProject().length, 1, 'adopted the crashed window\'s folder');
+    // The claim transferred to the adopter while it was live…
+    assert.equal(JSON.parse(readFileSync(lockOf(seedName), 'utf-8')).pid, process.pid);
+    await w.close();
+    // …and a clean close released it.
+    assert.equal(existsSync(lockOf(seedName)), false, 'close() released the adopted claim');
+  });
+
+  it('a dir claimed by THIS process is still adoptable (same-process re-launch / multi-tab)', async () => {
+    const seedName = await seedPrev();
+    claim(seedName, process.pid);
+    const w = newWriter();
+    w.setContinuationMode({ continued: true, fork: false });
+    fire(w, mainEntry(continuedMsgs('own claim'), { ts: '2026-07-14T10:00:00.000Z', sid: SID_B }));
+    await w.flush(); await w.close();
+    assert.equal(dirsInProject().length, 1, 'idempotent self-claim does not block adoption');
+    assert.equal(dirsInProject()[0], seedName);
   });
 });
 

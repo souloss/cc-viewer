@@ -12,7 +12,8 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync as writeFileSyncFs, appendFileSync as appendFileSyncFs } from 'node:fs';
+import { spawnSync as spawnSyncCp } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -577,5 +578,127 @@ describe('discardable session attach gate', () => {
     assert.equal(rows[0].mainAgent, false, 'kind-derived: teammate is never mainAgent');
     assert.equal(rows[0].conv, 'main', 'teammate conversations ride the main channel');
     assert.equal(rows[0].teammate, 'tm1');
+  });
+});
+
+// ─── multi-window isolation: foreign live-owner gate (2026-07-17) ────────────
+// A session dir exclusively claimed (owner.lock, pid-liveness validity) by
+// ANOTHER live process must never enter this feed — a parallel ccv window's
+// traffic broadcasting into this window's SSE clients was the live half of the
+// cross-window mixing bug. Real predicate, no mocks: process.ppid (the live
+// test runner) stands in for the other window; a reaped child pid for a
+// crashed one.
+describe('foreign live-owner attach gate', () => {
+  const claimAs = (sdir, pid) =>
+    writeFileSyncFs(join(sdir, 'owner.lock'), JSON.stringify({ pid, startedAt: '2026-07-17T00:00:00.000Z' }));
+
+  async function seedForeignSession() {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'other window secret')]));
+    await w.flush();
+    await w.close(); // releases OUR claim…
+    const sdir = sessionDirOf(SID);
+    claimAs(sdir, process.ppid); // …and the "other window" claims it, alive
+    return sdir;
+  }
+
+  it('a dir claimed by another LIVE process is refused at _attach and lands in no gate set', async () => {
+    const sdir = await seedForeignSession();
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf()); // _initialScan sees the recent dir
+    assert.equal(feed.isFollowing(sdir), false, 'foreign-live dir never followed');
+    assert.equal(feed._discardGated.has(sdir), false, 'never routed through _discardGated (its delete side-effect would un-suppress history later)');
+    assert.equal(dataEntries(client).length, 0, 'zero frames leaked to this window');
+  });
+
+  it('a DEAD owner claim does not block following (crash auto-release)', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'crashed window history')]));
+    await w.flush();
+    await w.close();
+    const sdir = sessionDirOf(SID);
+    const deadPid = spawnSyncCp(process.execPath, ['-e', '']).pid; // exited → dead
+    claimAs(sdir, deadPid);
+    const feed = newFeed([fakeClient()]);
+    feed.start(projectDirOf());
+    assert.equal(feed.isFollowing(sdir), true, 'dead claim = unowned; the dir follows as before');
+  });
+
+  it('an ATTACHED dir that turns foreign-owned is detached by the safety tick before its cursor is re-read', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf());
+
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'was unowned')]));
+    await w.flush();
+    await w.close(); // release → dir is unowned and attach-eligible
+    const sdir = sessionDirOf(SID);
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sdir), true, 'unowned recent dir followed');
+
+    // Another window adopts the dir (ccv -c after the first window closed).
+    claimAs(sdir, process.ppid);
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sdir), false, 'ownership re-check detached the cursor');
+
+    // The adopter keeps writing: mtime bumps trigger re-attach attempts that
+    // the gate keeps refusing — nothing from the adopter reaches this window.
+    const before = dataEntries(client).length;
+    appendFileSyncFs(join(sdir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'req', seq: 99, rid: 'foreign', kind: 'main', conv: 'main', ts: '2026-07-17T00:01:00.000Z', url: 'u' }) + '\n');
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sdir), false, 'still gated while the adopter lives');
+    assert.equal(dataEntries(client).length, before, 'no foreign frames emitted after the adoption');
+  });
+
+  it('a dir that is BOTH discardable AND foreign-live: foreign gate wins, _discardGated stays empty until the owner dies', async () => {
+    // A quota-probe-shaped dir (sub-only journal, no meta.leader) claimed by a
+    // live foreign process. The foreign gate must refuse it BEFORE the discard
+    // gate ever sees it; once the owner dies, the discard gate takes over with
+    // its own (unsuppress-on-first-real-attach) semantics.
+    const sid = 'deadbeef-0000-4000-8000-00000000000b';
+    const probe = join(dir, 'proj', 'sessions', `20260717000000_${sid}`);
+    mkdirSync(probe, { recursive: true });
+    writeFileSyncFs(join(probe, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, startTs: '2026-07-17T00:00:00.000Z', project: 'proj' }));
+    writeFileSyncFs(join(probe, 'journal.jsonl'), [
+      JSON.stringify({ ph: 'meta', wireFormat: 2, sessionId: sid }),
+      JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', conv: 'sub-fp-x', ts: 't', url: 'u' }),
+    ].join('\n') + '\n');
+    claimAs(probe, process.ppid); // foreign, alive
+
+    const feed = newFeed([fakeClient()]);
+    feed.start(projectDirOf());
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(probe), false, 'refused');
+    assert.equal(feed._discardGated.has(probe), false, 'foreign gate ran first — discard bookkeeping untouched');
+
+    // Owner dies → next attach attempt falls through to the discard gate.
+    const deadPid = spawnSyncCp(process.execPath, ['-e', '']).pid;
+    claimAs(probe, deadPid);
+    appendFileSyncFs(join(probe, 'journal.jsonl'), JSON.stringify({ ph: 'done', seq: 1, rid: 'rq', ts: 't', status: 'ok' }) + '\n');
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(probe), false, 'still a main-less probe — discard gate refuses now');
+    assert.equal(feed._discardGated.has(probe), true, 'and its self-healing bookkeeping engages normally');
+  });
+
+  it('after the foreign owner dies, renewed activity re-attaches with history SUPPRESSED (no flood)', async () => {
+    const sdir = await seedForeignSession();
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf());
+    assert.equal(feed.isFollowing(sdir), false);
+
+    // Owner "dies": replace the live claim with a reaped child's pid, then the
+    // dir sees new bytes (e.g. this process adopts it later, or a stray flush).
+    const deadPid = spawnSyncCp(process.execPath, ['-e', '']).pid;
+    claimAs(sdir, deadPid);
+    appendFileSyncFs(join(sdir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'req', seq: 98, rid: 'late', kind: 'main', conv: 'main', ts: '2026-07-17T00:02:00.000Z', url: 'u' }) + '\n');
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sdir), true, 'dead-owner dir re-attaches on the mtime bump');
+    const leaked = dataEntries(client).filter((e) => JSON.stringify(e).includes('other window secret'));
+    assert.equal(leaked.length, 0, 'the pre-existing history stays suppressed — cold load owns it');
   });
 });

@@ -22,6 +22,7 @@ import { AsyncWriteQueue } from '../async-write-queue.js';
 import { reportSwallowed } from '../error-report.js';
 import { ensureSessionDirSync, compactLocalTs14, sanitizePathComponent } from './layout.js';
 import { resolveSessionDirName, latestMainSession } from './session-select.js';
+import { acquireSessionClaim, releaseSessionClaim } from './session-owner.js';
 import { BlobStore } from './blob-store.js';
 import { Journal } from './journal.js';
 import { ConversationStore } from './conversation-store.js';
@@ -76,6 +77,10 @@ export class V2Writer {
     // latency. Purely a nudge — the feed's data source stays the files.
     this._onActivity = typeof opts.onActivity === 'function' ? opts.onActivity : null;
     this._sessions = new Map(); // sessionId → {paths, blobs, journal, convs, resolver}
+    // Multi-window isolation (2026-07-17): session dirs this process has
+    // claimed via owner.lock. Released synchronously in resetSessions()/close()
+    // — a crash skips release harmlessly (claim validity is pid liveness).
+    this._claimedDirs = new Set();
     this._currentSid = null;    // last successfully resolved session (fallback routing §8.3)
     this._pendingNoSid = [];    // requests seen before any sid (cold-start heartbeats).
     // Contract with the caller: originalMessages held here must be a reference
@@ -141,9 +146,41 @@ export class V2Writer {
     if (!m || m.length <= 1 || !m.some((x) => x && x.role === 'assistant')) return null;
     const projectDir = join(this._logDir, sanitizePathComponent(project));
     if (resolveSessionDirName(projectDir, sid, this._sessionsDirName)) return null; // same-UUID restart
-    const prev = latestMainSession(projectDir);
+    // Multi-window isolation: never adopt a dir another LIVE window is writing
+    // (that is the two-writers-one-journal corruption), and CLAIM the picked
+    // dir atomically BEFORE committing — two simultaneous `-c` launches racing
+    // onto the same dead-owned dir get exactly one adopter via the owner.lock
+    // 'wx' arbiter; the loser falls through to a fresh dir, which is Claude
+    // Code's own continue/fork semantics (fresh wire sid per continue).
+    const prev = latestMainSession(projectDir, { skipForeignLive: true });
     if (!prev || !prev.sessionId) return null;
+    if (this._claimsEnabled()) {
+      if (!acquireSessionClaim(prev.dir).ok) return null;
+      // Record immediately (not only in _session): a throw between here and
+      // _session must not leak an untracked lock file until process exit.
+      this._claimedDirs.add(prev.dir);
+    }
     return { dirName: basename(prev.dir), identityUUID: prev.sessionId };
+  }
+
+  /** Multi-window isolation: does this writer claim its session dirs? Only a
+   *  MAIN interactive leader does — teammate writers (leader set) and IM
+   *  workers (CCV_IM_PLATFORM) stay unclaimed so any project viewer keeps
+   *  following them (cross-process producers by design), and the offline
+   *  converter (staging sessionsDirName) must never stamp live-ownership onto
+   *  migrated history. */
+  _claimsEnabled() {
+    return this._enabled && !this._leader
+      && !process.env.CCV_IM_PLATFORM
+      && this._sessionsDirName === 'sessions';
+  }
+
+  /** Release every dir this process claimed (identity-checked unlinks).
+   *  Synchronous on purpose — close() runs it ahead of the bounded async queue
+   *  drain so a hung drain can't strand live-looking locks on a clean exit. */
+  _releaseAllClaims() {
+    for (const dir of this._claimedDirs) releaseSessionClaim(dir);
+    this._claimedDirs.clear();
   }
 
   _session(sessionId, userIdRaw, encoding, project, startTsIso, adoptTarget = null) {
@@ -184,6 +221,14 @@ export class V2Writer {
       }
     }
     const paths = ensureSessionDirSync(this._logDir, project, identityId, meta, this._sessionsDirName, dirName);
+    // Multi-window isolation: stamp this process's live claim on the dir. A
+    // fresh wire-UUID dir has no contention (always succeeds); the adoption
+    // path already holds the claim (idempotent re-entry). Failure (a live
+    // foreign holder appeared) degrades to today's unclaimed behavior — the
+    // write itself must never be blocked by the claim.
+    if (this._claimsEnabled() && acquireSessionClaim(paths.dir).ok) {
+      this._claimedDirs.add(paths.dir);
+    }
     s = {
       paths,
       blobs: new BlobStore(paths),
@@ -505,6 +550,10 @@ export class V2Writer {
    *  under the new project — different directory, so no seq collision. */
   resetSessions() {
     try {
+      // Release live claims FIRST (before the session map is gone): a
+      // switched-away workspace's dirs are dormant and legitimately adoptable
+      // by other windows from this moment on.
+      this._releaseAllClaims();
       this._sessions.clear();
       this._pendingNoSid.length = 0;
       this._lateHandles.clear();
@@ -523,6 +572,12 @@ export class V2Writer {
   }
 
   async close() {
+    // Synchronous claim release BEFORE the async drain: close() runs under
+    // interceptor.js's 2s-bounded shutdown race, and a hung drain must not
+    // strand owner.lock files on a clean exit. (A crash skips this entirely —
+    // harmless, the claim's validity dies with the pid.)
+    try { this._releaseAllClaims(); }
+    catch (err) { reportSwallowed('v2-write.release-claims', err); }
     await this._queue.close();
   }
 }

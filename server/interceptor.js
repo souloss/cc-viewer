@@ -306,7 +306,10 @@ export function getLiveLogSource() {
     // newest dir once its first main req is written) — handing back exactly the
     // blank in-flight session the strict gate rejected. Excluding it makes the
     // fallback actually land on the previous, renderable conversation.
-    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)), { excludeDir: dir });
+    // skipForeignLive: a parallel ccv window's in-flight session must never be
+    // served as THIS window's cold load (multi-window isolation); a crashed
+    // window's claim expires with its pid, so its session stays selectable.
+    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)), { excludeDir: dir, skipForeignLive: true });
     // A current-but-empty session with nothing else on disk: '' (still empty,
     // but the live feed fills it in place — no worse than before the fix).
     return fallback || dir || '';

@@ -29,6 +29,7 @@ import { createIncrementalReconstructor } from '../delta-reconstructor.js';
 import { processWatchedEntry, sendEventToClients, sendEventRawToClients } from '../log-watcher.js';
 import { SessionSynthesizer } from './adapter.js';
 import { isDiscardableSession } from './session-select.js';
+import { isForeignLiveOwned } from './session-owner.js';
 import { computeCacheLoss } from './meta-rows.js';
 import { classifyRequest } from '../../../src/utils/requestType.js';
 
@@ -150,6 +151,8 @@ export class V2LiveFeed {
    *   _safetyTick manually)
    * @param {number} [opts.deferMs]
    * @param {Function} [opts.now]
+   * @param {Function} [opts.isForeignOwnedFn] - injection seam (tests):
+   *   (dir) => boolean, defaults to session-owner's isForeignLiveOwned
    */
   constructor(opts = {}) {
     this._clients = opts.clients || [];
@@ -160,6 +163,7 @@ export class V2LiveFeed {
     this._safetyPollMs = typeof opts.safetyPollMs === 'number' ? opts.safetyPollMs : SAFETY_POLL_MS;
     this._deferMs = typeof opts.deferMs === 'number' ? opts.deferMs : DEFER_MS;
     this._now = opts.now || Date.now;
+    this._isForeignOwned = opts.isForeignOwnedFn || isForeignLiveOwned;
     // Wire v3 (V3.S2): when on, every emitted item ALSO broadcasts a metadata
     // row (v2_requests_delta). Explicit ctor param — this module has no access
     // to the server deps object.
@@ -315,6 +319,16 @@ export class V2LiveFeed {
   _attach(dir, { suppressExisting }) {
     if (this._sessions.has(dir)) return this._sessions.get(dir);
     if (!existsSync(join(dir, 'journal.jsonl'))) return null;
+    // Multi-window isolation: a dir exclusively claimed by ANOTHER live ccv
+    // window (owner.lock, pid-liveness validity) never enters this feed — its
+    // traffic belongs to that window. Checked BEFORE the discard gate so a
+    // foreign dir never lands in _discardGated (whose delete side-effect would
+    // flip suppressExisting to false on a later attach and flood clients with
+    // the whole foreign history). Re-evaluated on every attach attempt — no
+    // persistent gate set — so a dead owner's claim stops mattering the
+    // moment its pid dies. Own dirs (tick path) and unclaimed teammate/IM
+    // dirs pass through untouched.
+    if (this._isForeignOwned(dir)) return null;
     // Discardable sessions (quota-probe orphans — no main/teammate req, no
     // meta.leader) are never followed: single choke point, every attach path
     // (_initialScan / _maybeAttachNew / tick / _safetyTick / _rebuildCursor)
@@ -623,6 +637,20 @@ export class V2LiveFeed {
     this._armRootWatcher(); // re-arm after errors / late directory creation
     // Attached sessions: unconditional slow re-read (fs.watch is lossy).
     for (const cur of [...this._sessions.values()]) {
+      // Multi-window isolation: an ATTACHED dir can turn foreign-owned after
+      // the fact — an unowned (dead-owner) dir followed since startup gets
+      // adopted by another window's `ccv -c`. The attach-time gate can't see
+      // that, so re-check here and detach before the unconditional re-read
+      // would stream the adopter's traffic into this window (bounded to one
+      // safety-poll period). _seenDirs keeps the current mtime so a later
+      // ownership release (owner exits) plus new activity re-attaches through
+      // the normal mtime-bump path below.
+      if (this._isForeignOwned(cur.dir)) {
+        this._closeCursor(cur);
+        this._sessions.delete(cur.dir);
+        this._seenDirs.set(cur.dir, this._journalMtime(cur.dir));
+        continue;
+      }
       this._readCursor(cur);
     }
     // Unattached dirs: attach brand-new ones (missed root events) and

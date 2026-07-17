@@ -12,6 +12,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,6 +112,46 @@ describe('latestMainSessionDir', () => {
     seed('e1', { startTs: iso(2), mainTurn: false });
     seed('e2', { startTs: iso(5), mainTurn: false });
     assert.equal(latestMainSessionDir(projectDir), '');
+  });
+});
+
+describe('latestMainSessionDir skipForeignLive (multi-window isolation)', () => {
+  // owner.lock validity is PID liveness: process.ppid (the live test runner)
+  // stands in for "another live ccv window"; a reaped child pid for a crashed
+  // one. No mocks — the predicate runs its real kill(pid,0) probe.
+  const claim = (dir, pid) => writeFileSync(join(dir, 'owner.lock'), JSON.stringify({ pid, startedAt: iso(0) }));
+
+  it('skips the newest session when it is claimed by another LIVE process', () => {
+    const mine = seed('mine', { startTs: iso(2) });
+    const other = seed('other', { startTs: iso(9) });
+    claim(other, process.ppid);
+    assert.equal(latestMainSessionDir(projectDir, { skipForeignLive: true }), mine);
+  });
+
+  it('default (no opt) keeps the raw picker semantics — claimed dirs still selectable', () => {
+    seed('mine', { startTs: iso(2) });
+    const other = seed('other', { startTs: iso(9) });
+    claim(other, process.ppid);
+    assert.equal(latestMainSessionDir(projectDir), other);
+  });
+
+  it('a DEAD owner claim never blocks selection (crash auto-release, no permanent lock)', () => {
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid; // exited → pid is dead
+    const crashed = seed('crashed', { startTs: iso(9) });
+    claim(crashed, deadPid);
+    assert.equal(latestMainSessionDir(projectDir, { skipForeignLive: true }), crashed);
+  });
+
+  it('this process\'s own claim is selectable (not foreign)', () => {
+    const own = seed('own', { startTs: iso(9) });
+    claim(own, process.pid);
+    assert.equal(latestMainSessionDir(projectDir, { skipForeignLive: true }), own);
+  });
+
+  it('returns "" when the only candidate is foreign-live (intentional empty cold load)', () => {
+    const other = seed('other', { startTs: iso(9) });
+    claim(other, process.ppid);
+    assert.equal(latestMainSessionDir(projectDir, { skipForeignLive: true }), '');
   });
 });
 
