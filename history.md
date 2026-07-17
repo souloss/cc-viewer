@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.3 (2026-07-17)
 
 ### Fix: a user-supplied `--settings` launch arg silently disabled traffic capture
 
