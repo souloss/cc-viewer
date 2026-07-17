@@ -12,7 +12,7 @@ import { renderSystemPromptFileArgs } from './lib/system-prompt-render.js';
 import { MODEL_PROMPT_DIR } from './lib/model-system-prompts.js';
 import { resolveSpawnModel } from './lib/spawn-model-resolver.js';
 import { mergeSettingsIntoArgs } from './lib/settings-merge.js';
-import { t } from './i18n.js';
+import { t, tFor } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -309,7 +309,24 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // - 环境变量 CCV_SKIP_THINKING_DISPLAY=1（用户全局 opt-out，与 cli.js 保持一致）
   const shouldInjectThinkingDisplay = !_thinkingDisplayRejectedPaths.has(claudePath)
     && process.env.CCV_SKIP_THINKING_DISPLAY !== '1';
-  const finalExtraArgs = shouldInjectThinkingDisplay ? withDefaultThinkingDisplay(extraArgs) : extraArgs;
+
+  // Fold any user-supplied --settings into the injected settings so the final argv
+  // carries a SINGLE --settings flag. claude is last-wins for duplicate --settings
+  // (empirically verified), so a user flag sitting after ours would silently clobber
+  // the injected ANTHROPIC_BASE_URL proxy override and the CCV_IM_DENY deny hardening.
+  // Merged: injected keys win, deny is unioned, other user config rides along.
+  // Runs on the RAW user args BEFORE our own --thinking-display / --system-prompt-file
+  // tokens are appended: otherwise a trailing valueless user --settings would consume
+  // an injected token as its value, silently dropping the injection. Relative settings
+  // paths resolve against the cwd claude itself runs with (spawnDir, computed below).
+  const spawnDir = cwd || process.cwd();
+  const settingsMerge = mergeSettingsIntoArgs(extraArgs, settingsObj, { cwd: spawnDir });
+  if (settingsMerge.warningDetail) {
+    console.warn(`[CC Viewer] ${tFor('cli.settingsMergeFailed', 'en', settingsMerge.warningDetail)}`);
+  }
+  const settingsJson = settingsMerge.settingsJson;
+  const userArgs = settingsMerge.args;
+  const finalExtraArgs = shouldInjectThinkingDisplay ? withDefaultThinkingDisplay(userArgs) : userArgs;
 
   // 启动目录存在 CC_SYSTEM.md / CC_APPEND_SYSTEM.md(非空)时，自动追加
   // --system-prompt-file / --append-system-prompt-file(两者独立、用户已传同义 flag 时跳过对应项)。
@@ -318,7 +335,7 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   // 注：currentWorkspacePath 在下方才赋值，这里用 cwd 参数判定启动目录。
   // LOG_DIR 内的 spawn(IM worker 工作目录 = <LOG_DIR>/IM_<id>/)跳过模型匹配：
   // IM 人格依赖默认 sentinel CC_APPEND_SYSTEM.md 注入，全局模型条目不得静默取代它。
-  const spawnDir = cwd || process.cwd();
+  // (spawnDir 已在上方 settings 合并处赋值。)
   // insideLogDir 留在 try 外：下方 onExit 的启动兜底门控也要用它。
   const insideLogDir = spawnDir === LOG_DIR || spawnDir.startsWith(LOG_DIR + sep);
   // 整个 system prompt 构建 + 渲染管道包在 try-catch 里(PR#128)：任何意外抛错(模型解析、
@@ -356,25 +373,13 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   }
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
-  // Fold any user-supplied --settings into the injected settings so the final argv
-  // carries a SINGLE --settings flag. claude is last-wins for duplicate --settings
-  // (empirically verified), so a user flag sitting after ours would silently clobber
-  // the injected ANTHROPIC_BASE_URL proxy override and the CCV_IM_DENY deny hardening.
-  // Merged: injected keys win, deny is unioned, other user config rides along.
-  // Relative settings paths resolve against the cwd claude itself runs with.
-  const settingsMerge = mergeSettingsIntoArgs(launchArgs, settingsObj, { cwd: spawnDir });
-  if (settingsMerge.warning) {
-    console.warn(`[CC Viewer] ${settingsMerge.warning}`);
-  }
-  const settingsJson = settingsMerge.settingsJson;
-
   let command = claudePath;
-  let args = ['--settings', settingsJson, ...settingsMerge.args];
+  let args = ['--settings', settingsJson, ...launchArgs];
 
   // 如果是 npm 版本（cli.js），需要使用 node 来运行
   if (isNpmVersion && claudePath.endsWith('.js')) {
     command = nodePath;
-    args = [claudePath, '--settings', settingsJson, ...settingsMerge.args];
+    args = [claudePath, '--settings', settingsJson, ...launchArgs];
   }
 
   lastExitCode = null;

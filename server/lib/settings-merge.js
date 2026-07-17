@@ -1,5 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+
+// Settings files are tiny in practice; this caps a hostile `--settings /dev/zero`
+// (a never-EOF read that would hang the server event loop) or a huge-file read.
+const MAX_SETTINGS_FILE_BYTES = 1024 * 1024;
 
 // Merges a user-supplied `--settings` launch arg into cc-viewer's injected settings
 // object, so the final claude argv carries a SINGLE `--settings` flag.
@@ -36,20 +40,47 @@ function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
+// Remove C0 control chars (and DEL) so a value/reason echoed into the embedded xterm
+// (via emitSpawnNotice) or a log line cannot inject ANSI escape sequences — the raw
+// user value and a JSON.parse SyntaxError can both carry ESC bytes.
+function stripControls(s) {
+  return String(s).replace(/[\u0000-\u001F\u007F]/g, '');
+}
+
+// Read + parse a user-pointed settings file DEFENSIVELY. The failure reason is echoed
+// into a client-readable surface (the persistent terminal buffer + logs), so it must
+// never disclose file contents or resolved paths — a raw readFileSync/JSON.parse error
+// embeds the leading file bytes and the absolute path, turning the warning into a
+// file-probing oracle. All failures collapse to generic, content-free messages; a
+// statSync isFile()+size gate blocks /dev/zero-style hangs and oversized reads.
+function readSettingsFile(path) {
+  let st;
+  try { st = statSync(path); } catch { throw new Error('settings file not found'); }
+  if (!st.isFile()) throw new Error('settings path is not a regular file');
+  if (st.size > MAX_SETTINGS_FILE_BYTES) throw new Error('settings file too large');
+  let raw;
+  try { raw = stripBom(readFileSync(path, 'utf8')); } catch { throw new Error('settings file could not be read'); }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('settings file is not valid JSON'); }
+  if (!isPlainObject(parsed)) throw new Error('settings file must be a JSON object');
+  return parsed;
+}
+
 // Load a --settings value the way claude does: inline JSON when it looks like an
 // object literal, otherwise a settings file path (resolved against the cwd claude
 // itself will run with). Throws on any failure — caller turns that into a warning.
 function loadSettingsValue(value, cwd) {
   const trimmed = stripBom(value).trim();
   if (trimmed === '') throw new Error('empty value');
-  let parsed;
   if (trimmed.startsWith('{')) {
-    parsed = JSON.parse(trimmed);
-  } else {
-    parsed = JSON.parse(stripBom(readFileSync(resolve(cwd, trimmed), 'utf8')));
+    // Inline JSON is the user's own text; echoing it back on failure is not disclosure
+    // (control chars are stripped at the warning surface). File contents are different —
+    // handled by readSettingsFile, which never surfaces them.
+    const parsed = JSON.parse(trimmed);
+    if (!isPlainObject(parsed)) throw new Error('settings must be a JSON object');
+    return parsed;
   }
-  if (!isPlainObject(parsed)) throw new Error('settings must be a JSON object');
-  return parsed;
+  return readSettingsFile(resolve(cwd, trimmed));
 }
 
 // Shallow top-level merge with two special cases; injected keys win. Deep-merging
@@ -78,21 +109,22 @@ function mergeSettings(userSettings, injectedSettings) {
  * Extract any user `--settings` occurrences from launch args and merge the last
  * one into the injected settings object (injected keys win; permissions.deny is
  * unioned). Never throws — a value that cannot be loaded is dropped and reported
- * via `warning` so the caller can surface it (injection must never block spawn).
+ * via `warningDetail` so the caller can surface it (injection must never block spawn).
  *
  * @param {unknown} args launch args (user-controlled; may contain non-strings)
  * @param {object} injectedSettings cc-viewer's settings object (env.ANTHROPIC_BASE_URL, optional permissions.deny)
  * @param {{cwd?: string}} [opts] base dir for relative settings file paths — must match the cwd claude runs with
- * @returns {{args: unknown[], settingsJson: string, merged: boolean, warning: string|null, warningDetail: {value: string, reason: string}|null}}
+ * @returns {{args: unknown[], settingsJson: string, merged: boolean, warningDetail: {value: string, reason: string}|null}}
  *   args: input args with consumed `--settings` occurrences removed;
  *   settingsJson: JSON for the single injected flag (byte-identical to
  *   JSON.stringify(injectedSettings) when nothing merged);
- *   merged: whether a user value was folded in; warning: composed load-failure
- *   message (or null); warningDetail: the same failure as {value, reason} parts
- *   for callers that localize the sentence themselves.
+ *   merged: whether a user value was folded in; warningDetail: load-failure parts
+ *   ({value, reason}, control-chars stripped) for the caller to render/localize —
+ *   the English sentence lives only in the `cli.settingsMergeFailed` i18n key, so
+ *   there is no duplicated copy here to drift.
  */
 export function mergeSettingsIntoArgs(args, injectedSettings, { cwd = process.cwd() } = {}) {
-  const passthrough = { merged: false, warning: null, warningDetail: null, settingsJson: JSON.stringify(injectedSettings) };
+  const passthrough = { merged: false, warningDetail: null, settingsJson: JSON.stringify(injectedSettings) };
   if (!Array.isArray(args)) return { args: [], ...passthrough };
 
   const cleaned = [];
@@ -123,17 +155,16 @@ export function mergeSettingsIntoArgs(args, injectedSettings, { cwd = process.cw
       args: cleaned,
       settingsJson: JSON.stringify(mergeSettings(userSettings, injectedSettings)),
       merged: true,
-      warning: null,
       warningDetail: null,
     };
   } catch (err) {
     const shown = typeof lastValue === 'string' ? lastValue : String(lastValue);
-    const reason = String(err?.message || err);
+    // Strip control chars: `shown` is raw user input and `err.message` from an inline
+    // JSON.parse can echo user bytes — both flow into the terminal buffer / logs.
     return {
       args: cleaned,
       ...passthrough,
-      warning: `could not load user --settings value ${JSON.stringify(shown)} (${reason}); launching with cc-viewer's injected settings only`,
-      warningDetail: { value: shown, reason },
+      warningDetail: { value: stripControls(shown), reason: stripControls(err?.message || err) },
     };
   }
 }

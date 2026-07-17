@@ -231,6 +231,22 @@ describe('pty-manager-gap: 用户 --settings 合并进注入 settings（单 flag
     // emitSpawnNotice 是用户可见面：失败值必须出现在终端缓冲里（locale 无关断言）
     assert.ok(getOutputBuffer().includes('{broken'), '警告应通过 emitSpawnNotice 写入 outputBuffer');
   });
+
+  it('用户末尾裸 --settings 不吞掉注入的 --thinking-display（合并先于注入）', async () => {
+    // 回归：合并若在 withDefaultThinkingDisplay 之后运行，裸 --settings 会把追加的
+    // --thinking-display 当作值消费掉 → 注入静默丢失、summarized 泄漏成裸词。
+    await spawnClaude(9000, process.cwd(), ['--print', '--settings'], '/bin/echo');
+    const args = spawned[0].args;
+    assert.ok(args.includes('--thinking-display'), '注入的 --thinking-display 必须保留');
+    assert.ok(args.includes('summarized'), '--thinking-display 的值应完整');
+    // summarized 只能作为 --thinking-display 的值出现，不能是裸词
+    assert.equal(args.indexOf('summarized'), args.indexOf('--thinking-display') + 1);
+    // 用户的裸 --settings 未被合并消费（无值形态），仍在用户参数段里原样保留
+    assert.ok(args.includes('--print'));
+    // 且不应因把 --thinking-display 当值而产生警告
+    assert.ok(!getOutputBuffer().includes('--thinking-display (') ,
+      '不应把 --thinking-display 误当作 settings 值而告警');
+  });
 });
 
 describe('pty-manager-gap: getPtyKind / getPtySkipPermissions', () => {

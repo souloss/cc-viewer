@@ -31,7 +31,7 @@ describe('mergeSettingsIntoArgs: no user flag (the common path)', () => {
     const r = mergeSettingsIntoArgs(args, INJECTED);
     assert.deepEqual(r.args, args);
     assert.equal(r.merged, false);
-    assert.equal(r.warning, null);
+    assert.equal(r.warningDetail, null);
     assert.equal(r.settingsJson, JSON.stringify(INJECTED));
   });
 
@@ -61,7 +61,7 @@ describe('mergeSettingsIntoArgs: inline JSON merge', () => {
     const r = mergeSettingsIntoArgs(['--settings', user, '--print'], INJECTED);
     assert.deepEqual(r.args, ['--print']);
     assert.equal(r.merged, true);
-    assert.equal(r.warning, null);
+    assert.equal(r.warningDetail, null);
     const merged = JSON.parse(r.settingsJson);
     assert.equal(merged.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9000');
     assert.equal(merged.env.FOO, 'bar');
@@ -179,7 +179,7 @@ describe('mergeSettingsIntoArgs: multiple occurrences (claude is last-wins)', ()
     );
     assert.deepEqual(r.args, []);
     assert.equal(r.merged, false);
-    assert.ok(r.warning);
+    assert.ok(r.warningDetail);
     assert.equal(r.settingsJson, JSON.stringify(INJECTED));
   });
 
@@ -198,14 +198,14 @@ describe('mergeSettingsIntoArgs: claude argv-semantics parity (pinned by experim
     const r = mergeSettingsIntoArgs(['--print', '--settings'], INJECTED);
     assert.deepEqual(r.args, ['--print', '--settings']);
     assert.equal(r.merged, false);
-    assert.equal(r.warning, null);
+    assert.equal(r.warningDetail, null);
   });
 
   it('strips an empty --settings= (claude silently clobbers earlier flags with it)', () => {
     const r = mergeSettingsIntoArgs(['--settings=', '--print'], INJECTED);
     assert.deepEqual(r.args, ['--print']);
     assert.equal(r.merged, false);
-    assert.ok(r.warning);
+    assert.ok(r.warningDetail);
     assert.equal(r.settingsJson, JSON.stringify(INJECTED));
   });
 
@@ -213,7 +213,7 @@ describe('mergeSettingsIntoArgs: claude argv-semantics parity (pinned by experim
     const r = mergeSettingsIntoArgs(['--settings', '--print', '-c'], INJECTED);
     assert.deepEqual(r.args, ['-c']);
     assert.equal(r.merged, false);
-    assert.ok(r.warning.includes('--print'));
+    assert.ok(r.warningDetail.value.includes('--print'));
     assert.equal(r.settingsJson, JSON.stringify(INJECTED));
   });
 
@@ -241,7 +241,7 @@ describe('mergeSettingsIntoArgs: content failures → warning + injected-only', 
       const r = mergeSettingsIntoArgs(['--settings', value, '--print'], INJECTED, { cwd: dir });
       assert.deepEqual(r.args, ['--print']);
       assert.equal(r.merged, false);
-      assert.ok(r.warning, `expected warning for ${label}`);
+      assert.ok(r.warningDetail, `expected warning for ${label}`);
       assert.equal(r.settingsJson, JSON.stringify(INJECTED));
     });
   }
@@ -254,7 +254,7 @@ describe('mergeSettingsIntoArgs: content failures → warning + injected-only', 
     chmodSync(p, 0o000);
     const r = mergeSettingsIntoArgs(['--settings', p], INJECTED);
     assert.equal(r.merged, false);
-    assert.ok(r.warning);
+    assert.ok(r.warningDetail);
     assert.equal(r.settingsJson, JSON.stringify(INJECTED));
   });
 
@@ -263,13 +263,62 @@ describe('mergeSettingsIntoArgs: content failures → warning + injected-only', 
     writeFileSync(join(dir, 'arr.json'), '[1,2]');
     const r = mergeSettingsIntoArgs(['--settings', 'arr.json'], INJECTED, { cwd: dir });
     assert.equal(r.merged, false);
-    assert.ok(r.warning);
+    assert.ok(r.warningDetail);
   });
 
   it('non-string value token (hostile input): consumed, dropped with a warning, never throws', () => {
     const r = mergeSettingsIntoArgs(['--settings', 123, '--print'], INJECTED);
     assert.deepEqual(r.args, ['--print']);
     assert.equal(r.merged, false);
-    assert.ok(r.warning);
+    assert.ok(r.warningDetail);
+  });
+});
+
+describe('mergeSettingsIntoArgs: security hardening of the failure surface', () => {
+  const ESC = String.fromCharCode(27); // the warning is echoed into a client-readable terminal buffer
+
+  it('file-read failure reason never leaks file contents or the resolved path (info-leak oracle)', () => {
+    const dir = mkTmp();
+    writeFileSync(join(dir, 'secret.txt'), 'root:x:0:0:SUPERSECRET:/root:/bin/bash\n');
+    const r = mergeSettingsIntoArgs(['--settings', 'secret.txt'], INJECTED, { cwd: dir });
+    assert.equal(r.merged, false);
+    assert.ok(r.warningDetail);
+    assert.ok(!r.warningDetail.reason.includes('SUPERSECRET'), 'file contents must not appear in the reason');
+    assert.ok(!r.warningDetail.reason.includes(dir), 'resolved absolute path must not appear in the reason');
+    assert.ok(!r.warningDetail.reason.includes('secret.txt'), 'file name must not appear in the reason');
+  });
+
+  it('nonexistent file reason is generic (no errno / absolute path)', () => {
+    const dir = mkTmp();
+    const r = mergeSettingsIntoArgs(['--settings', 'nope.json'], INJECTED, { cwd: dir });
+    assert.ok(!r.warningDetail.reason.includes('ENOENT'));
+    assert.ok(!r.warningDetail.reason.includes(dir));
+  });
+
+  it('non-regular file (directory / device) is refused without hanging or reading', () => {
+    const dir = mkTmp(); // the temp dir itself is a non-regular path
+    const r = mergeSettingsIntoArgs(['--settings', dir], INJECTED, { cwd: process.cwd() });
+    assert.equal(r.merged, false);
+    assert.ok(r.warningDetail.reason.includes('not a regular file'));
+  });
+
+  it('oversized settings file is refused by the size gate', () => {
+    const dir = mkTmp();
+    writeFileSync(join(dir, 'big.json'), '{"x":"' + 'a'.repeat(1024 * 1024 + 10) + '"}');
+    const r = mergeSettingsIntoArgs(['--settings', 'big.json'], INJECTED, { cwd: dir });
+    assert.equal(r.merged, false);
+    assert.ok(r.warningDetail.reason.includes('too large'));
+  });
+
+  it('control chars in the raw value are stripped (no ANSI injection into the terminal)', () => {
+    const r = mergeSettingsIntoArgs(['--settings', ESC + ']0;pwned' + ESC + '[2J'], INJECTED);
+    assert.equal(r.merged, false);
+    assert.ok(!r.warningDetail.value.includes(ESC), 'value must carry no ESC bytes');
+  });
+
+  it('control chars in an inline-JSON parse-error reason are stripped', () => {
+    const r = mergeSettingsIntoArgs(['--settings', '{' + ESC + '[2Jbroken'], INJECTED);
+    assert.equal(r.merged, false);
+    assert.ok(!r.warningDetail.reason.includes(ESC), 'reason must carry no ESC bytes');
   });
 });
