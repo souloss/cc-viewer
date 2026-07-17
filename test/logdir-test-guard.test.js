@@ -47,10 +47,34 @@ describe('resolveLogDir 测试隔离铁闸(NODE_TEST_CONTEXT)', () => {
     assert.ok(!dir.startsWith(join(homedir(), '.claude')), '绝不允许解析到 ~/.claude: ' + dir);
   });
 
-  it('测试环境 + 显式 CCV_LOG_DIR → 尊重显式值(铁闸不覆盖显式配置)', () => {
+  it('测试环境 + 显式 CCV_LOG_DIR(tmp 下) → 尊重显式值(铁闸不覆盖一次性临时目录)', () => {
     const explicit = mkdtempSync(join(tmpdir(), 'ccv-guard-explicit-'));
     const dir = probeLogDir({ NODE_TEST_CONTEXT: 'child-v8', CCV_LOG_DIR: explicit });
     assert.equal(dir, explicit);
+  });
+
+  // ── L1c(2026-07-12 数据丢失事故)：ccv 宿主 shell 会向子进程导出指向真实用户数据目录的
+  //    CCV_LOG_DIR；直跑 node --test 继承它后曾把真实 ~/.claude/cc-viewer/system_prompt/ 整树删除。
+  //    测试环境下显式 CCV_LOG_DIR 只有落在系统临时目录内才被接受，否则强制守卫目录。 ──
+  it('L1c: 测试环境 + 显式 CCV_LOG_DIR 指向真实用户目录 → 强制守卫目录(绝不接受)', () => {
+    const real = join(homedir(), '.claude', 'cc-viewer');
+    const dir = probeLogDir({ NODE_TEST_CONTEXT: 'child-v8', CCV_LOG_DIR: real });
+    assert.notEqual(dir, real, '继承自 ccv 宿主环境的真实数据目录必须被拒绝');
+    assert.ok(dir.startsWith(join(tmpdir(), 'cc-viewer-test') + sep), '应强制落守卫目录: ' + dir);
+    assert.ok(dir.includes('guard-'), dir);
+  });
+
+  it('L1c: 测试环境 + 显式 CCV_LOG_DIR 指向任意非 tmp 目录 → 同样强制守卫目录', () => {
+    const outside = join(homedir(), 'ccv-not-a-temp-dir-fixture');
+    const dir = probeLogDir({ NODE_TEST_CONTEXT: 'child-v8', CCV_LOG_DIR: outside });
+    assert.notEqual(dir, outside);
+    assert.ok(dir.startsWith(join(tmpdir(), 'cc-viewer-test') + sep), dir);
+  });
+
+  it('L1c: 生产环境(无 NODE_TEST_CONTEXT) + 显式 CCV_LOG_DIR 指向真实目录 → 照常尊重(仅测试环境收紧)', () => {
+    const real = join(homedir(), '.claude', 'cc-viewer');
+    const dir = probeLogDir({ CCV_LOG_DIR: real });
+    assert.equal(dir, real, '生产语义不变：显式配置照常生效');
   });
 
   it("测试环境 + CCV_LOG_DIR='tmp' 关键字 → 仍走进程私有 tmp(既有语义不回归)", () => {
@@ -93,10 +117,26 @@ describe('getClaudeConfigDir 测试隔离铁闸 L1b(NODE_TEST_CONTEXT)', () => {
     assert.ok(!dir.startsWith(join(homedir(), '.claude')), '绝不允许解析到 ~/.claude: ' + dir);
   });
 
-  it('测试环境 + 显式 CLAUDE_CONFIG_DIR → 尊重显式值', () => {
+  it('测试环境 + 显式 CLAUDE_CONFIG_DIR(tmp 下) → 尊重显式值', () => {
     const explicit = mkdtempSync(join(tmpdir(), 'ccv-guard-cfg-explicit-'));
     const dir = probeConfigDir({ NODE_TEST_CONTEXT: 'child-v8', CLAUDE_CONFIG_DIR: explicit });
     assert.equal(dir, explicit);
+  });
+
+  // ── L1d(与 L1c 对称)：显式 CLAUDE_CONFIG_DIR 指向真实 ~/.claude 时，updater CACHE_DIR 等
+  //    派生路径会重新指回真实用户数据（2026-06-06 事故同一漏洞类）。测试环境一律拒绝非 tmp 目录。 ──
+  it('L1d: 测试环境 + 显式 CLAUDE_CONFIG_DIR 指向真实 ~/.claude → 强制守卫目录', () => {
+    const real = join(homedir(), '.claude');
+    const dir = probeConfigDir({ NODE_TEST_CONTEXT: 'child-v8', CLAUDE_CONFIG_DIR: real });
+    assert.notEqual(dir, real);
+    assert.ok(dir.startsWith(join(tmpdir(), 'cc-viewer-test') + sep), dir);
+    assert.ok(dir.includes('guard-cfg-'), dir);
+  });
+
+  it('L1d: 生产环境 + 显式 CLAUDE_CONFIG_DIR → 照常尊重(仅测试环境收紧)', () => {
+    const real = join(homedir(), '.claude');
+    const dir = probeConfigDir({ CLAUDE_CONFIG_DIR: real });
+    assert.equal(dir, real);
   });
 
   it('生产环境 → 默认 ~/.claude 不变', () => {

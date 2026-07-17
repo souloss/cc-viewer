@@ -1,6 +1,6 @@
 import React from 'react';
-import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip } from 'antd';
-import { UploadOutlined, DeleteOutlined, ReloadOutlined, FileZipOutlined } from '@ant-design/icons';
+import { ConfigProvider, Layout, theme, Modal, Button, Checkbox, Spin, Alert, message, Tooltip, Popconfirm } from 'antd';
+import { UploadOutlined, DeleteOutlined, ReloadOutlined, SwapOutlined } from '@ant-design/icons';
 import AppBase, { styles } from './AppBase';
 import { isMobile, isElectron, setViewMode } from './env';
 import AppHeader from './components/dashboard/AppHeader';
@@ -15,7 +15,9 @@ import CountryFlag from './components/common/CountryFlag';
 import UsageWindowPill from './components/dashboard/UsageWindowPill';
 import { extractLatestPlanUsage } from './utils/rateLimitParser';
 import { t } from './i18n';
+import { reportSwallowed } from './utils/errorReport';
 import { filterRelevantRequests, visibleRequests, findPrevMainAgentTimestamp } from './utils/helpers';
+import { formatSize } from './utils/formatters';
 import { isMainAgent } from './utils/contentFilter';
 import { classifyRequest } from './utils/requestType';
 import { apiUrl } from './utils/apiUrl';
@@ -92,6 +94,7 @@ class App extends AppBase {
   // 避免第一条请求碰巧未带 Authorization(走 x-api-key/Unknown) 时永久压住 pill。
   componentDidUpdate(prevProps, prevState) {
     if (super.componentDidUpdate) super.componentDidUpdate(prevProps, prevState);
+    this._syncDetailFetch(prevState);
     if (this._isLocalLog) return;
     const reqs = this.state.requests;
     if (!reqs || reqs.length === 0) return;
@@ -156,22 +159,79 @@ class App extends AppBase {
     this.setState({ viewMode: 'raw', selectedIndex: index, scrollCenter: true });
   };
 
+  // ─── Wire v3 (V3.S3b): on-demand detail fetch ─────────────────────────
+  // Driven from componentDidUpdate so EVERY selection path (click, keyboard,
+  // cache-msg navigation, chat jump-back) funnels through one fetch. A row's
+  // live upgrade (placeholder→completed / classification correction) replaces
+  // its object in v2Rows, which changes the signature and refreshes the open
+  // detail. Rapid row switching aborts the in-flight fetch.
+  _detailRowSig(row) {
+    return row ? `${row.sessionId}\x00${row.seq}\x00${row.inProgress ? 1 : 0}\x00${row.status ?? ''}` : null;
+  }
+
+  _syncDetailFetch(prevState) {
+    const source = this._listSource();
+    if (source === this.state.requests) {
+      if (this.state.detailEntry || this.state.detailLoading || this.state.detailError) {
+        this.setState({ detailEntry: null, detailPrevMain: null, detailLoading: false, detailError: null });
+      }
+      this._detailSig = null;
+      return;
+    }
+    const filtered = visibleRequests(source, this.state.showAll);
+    const row = this.state.selectedIndex != null ? filtered[this.state.selectedIndex]?._v3Row : null;
+    const sig = this._detailRowSig(row);
+    if (sig === this._detailSig) return;
+    this._detailSig = sig;
+    if (this._detailAbort) { this._detailAbort.abort(); this._detailAbort = null; }
+    if (!row) {
+      this.setState({ detailEntry: null, detailPrevMain: null, detailLoading: false, detailError: null });
+      return;
+    }
+    const ctrl = new AbortController();
+    this._detailAbort = ctrl;
+    this.setState({ detailLoading: true, detailError: null });
+    const file = `v2:${this.state.projectName}/${row.sessionId}`;
+    fetch(apiUrl(`/api/v2-entry?file=${encodeURIComponent(file)}&seq=${row.seq}&sid=${encodeURIComponent(row.sessionId)}`), { signal: ctrl.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        if (ctrl.signal.aborted) return;
+        this.setState({ detailLoading: false, detailError: null, detailEntry: data.entry || null, detailPrevMain: data.prevMain || null });
+      })
+      .catch((e) => {
+        if (e && e.name === 'AbortError') return; // benign: user switched rows
+        reportSwallowed('v3.detail-fetch', e);
+        if (!ctrl.signal.aborted) this.setState({ detailLoading: false, detailEntry: null, detailPrevMain: null, detailError: String((e && e.message) || e) });
+      });
+  }
+
+  handleDetailRetry = () => {
+    this._detailSig = null; // force refetch of the same row
+    this._syncDetailFetch(this.state);
+  };
+
   handleViewInChat = () => {
     this.setState(prev => {
-      const filteredRequests = visibleRequests(prev.requests, prev.showAll);
+      // Wire v3: selection indexes into the ACTIVE list source (metadata rows
+      // when flagged) — prev.requests would desynchronize the two shapes.
+      const source = this._listSource();
+      const filteredRequests = visibleRequests(source, prev.showAll);
       const selectedReq = filteredRequests[prev.selectedIndex];
       if (!selectedReq) return null;
       let targetTs = null;
       if (isMainAgent(selectedReq) && selectedReq.timestamp) {
         targetTs = selectedReq.timestamp;
       } else {
-        const cls = classifyRequest(selectedReq);
+        const cls = selectedReq._v3Row?.typeTag || classifyRequest(selectedReq);
         if ((cls.type === 'SubAgent' || cls.type === 'Teammate') && selectedReq.timestamp) {
           targetTs = selectedReq.timestamp;
         } else {
-          const idx = prev.requests.indexOf(selectedReq);
+          const idx = source.indexOf(selectedReq);
           if (idx >= 0) {
-            targetTs = findPrevMainAgentTimestamp(prev.requests, idx);
+            targetTs = findPrevMainAgentTimestamp(source, idx);
           }
         }
         if (!targetTs) {
@@ -185,9 +245,12 @@ class App extends AppBase {
   handleToggleViewMode = () => {
     this.setState(prev => {
       const newMode = prev.viewMode === 'raw' ? 'chat' : 'raw';
+      // Wire v3 (review P1-5): selectedIndex indexes the ACTIVE list source
+      // (adapted rows when flagged) — prev.requests would mis-select.
+      const source = this._listSource();
       if (newMode === 'raw') {
         if (prev.selectedIndex === null) {
-          const filtered = visibleRequests(prev.requests, prev.showAll);
+          const filtered = visibleRequests(source, prev.showAll);
           return {
             viewMode: newMode,
             selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
@@ -196,20 +259,20 @@ class App extends AppBase {
         }
         return { viewMode: newMode, scrollCenter: true };
       }
-      const filtered = visibleRequests(prev.requests, prev.showAll);
+      const filtered = visibleRequests(source, prev.showAll);
       const selectedReq = prev.selectedIndex != null ? filtered[prev.selectedIndex] : null;
       if (selectedReq) {
         let targetTs = null;
         if (isMainAgent(selectedReq) && selectedReq.timestamp) {
           targetTs = selectedReq.timestamp;
         } else {
-          const cls = classifyRequest(selectedReq);
+          const cls = selectedReq._v3Row?.typeTag || classifyRequest(selectedReq);
           if ((cls.type === 'SubAgent' || cls.type === 'Teammate') && selectedReq.timestamp) {
             targetTs = selectedReq.timestamp;
           } else {
-            const idx = prev.requests.indexOf(selectedReq);
+            const idx = source.indexOf(selectedReq);
             if (idx >= 0) {
-              targetTs = findPrevMainAgentTimestamp(prev.requests, idx);
+              targetTs = findPrevMainAgentTimestamp(source, idx);
             }
             if (!targetTs) {
               message.info(t('ui.cannotMap'));
@@ -236,7 +299,7 @@ class App extends AppBase {
   handleCacheHighlightDone = () => { this.setState({ pendingCacheHighlight: null }); };
 
   handleNavigateCacheMsg = (msgIdx) => {
-    const filteredRequests = visibleRequests(this.state.requests, this.state.showAll);
+    const filteredRequests = visibleRequests(this._listSource(), this.state.showAll);
     let targetIdx = -1;
     for (let i = filteredRequests.length - 1; i >= 0; i--) {
       if (isMainAgent(filteredRequests[i])) { targetIdx = i; break; }
@@ -260,7 +323,10 @@ class App extends AppBase {
   handleLoadLocalJsonlFile = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.jsonl';
+    // v2 sessions are folders; a `.zip` round-trips through the server (which
+    // unpacks + rebuilds it), while a legacy `.jsonl` stays on the pure
+    // client-side path as the v1 escape hatch.
+    input.accept = '.zip,.jsonl';
     input.multiple = true;
     input.onchange = (e) => {
       const files = Array.from(e.target.files);
@@ -271,26 +337,94 @@ class App extends AppBase {
         return;
       }
       this.setState({ fileLoading: true, fileLoadingCount: 0 });
-      let readCount = 0;
-      const allEntries = [];
-      const fileNames = [];
-      files.forEach(file => {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          try {
-            const content = ev.target.result;
-            const entries = content.split('\n---\n').filter(line => line.trim()).map(entry => {
-              try { return JSON.parse(entry); } catch { return null; }
-            }).filter(Boolean);
-            allEntries.push(...entries);
-            fileNames.push(file.name);
-          } catch {}
-          readCount++;
-          if (readCount === files.length) {
-            this._finishLocalLoad(allEntries, fileNames);
+
+      // Both a legacy .jsonl file and the server's rebuilt v2 stream use the
+      // same `\n---\n`-delimited raw-entry wire format.
+      const parseRawStream = (text) => text.split('\n---\n')
+        .filter(line => line.trim())
+        .map(entry => { try { return JSON.parse(entry); } catch { return null; } })
+        .filter(Boolean);
+
+      // Incrementally parse the '\n---\n' rebuild off res.body so a large session
+      // (the server may rebuild a v2 folder into a multi-GB v1 stream) never has
+      // to fit in one JS string — `await res.text()` throws RangeError past V8's
+      // ~512MB string cap, exactly for the big sessions this transport targets.
+      const parseReadableStream = async (res) => {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const entries = [];
+        let buf = '';
+        const drain = (last) => {
+          let idx;
+          while ((idx = buf.indexOf('\n---\n')) !== -1) {
+            const piece = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 5);
+            if (piece) { try { entries.push(JSON.parse(piece)); } catch { /* skip malformed */ } }
           }
+          if (last) { const tail = buf.trim(); if (tail) { try { entries.push(JSON.parse(tail)); } catch { /* skip */ } } }
         };
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          drain(false);
+        }
+        buf += decoder.decode();
+        drain(true);
+        return entries;
+      };
+
+      const loadZip = (file) => fetch(apiUrl('/api/upload-log-zip'), { method: 'POST', body: file })
+        .then(async (res) => {
+          if (!res.ok) {
+            let code = '';
+            try { code = (await res.json())?.code || ''; } catch { /* non-JSON error body */ }
+            const err = new Error(`upload-log-zip ${res.status} ${code}`);
+            err.httpStatus = res.status;
+            err.serverCode = code; // TOO_LARGE / ZIP_BOMB / INVALID_ZIP / NOT_V2
+            throw err;
+          }
+          // Prefer streaming; fall back to text() where res.body is unavailable.
+          return res.body ? parseReadableStream(res) : parseRawStream(await res.text());
+        });
+
+      // Promisified FileReader so the legacy path can be awaited alongside the
+      // async zip uploads under one completion gate (the old readCount barrier
+      // only counted FileReader.onload — a zip-only pick would hang forever).
+      const loadJsonl = (file) => new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => { try { resolve(parseRawStream(ev.target.result)); } catch (err) { reportSwallowed('upload.jsonl.parse', err); resolve([]); } };
+        reader.onerror = () => { reportSwallowed('upload.jsonl.read', reader.error); resolve([]); };
         reader.readAsText(file);
+      });
+
+      let hadError = false;
+      Promise.all(files.map((file) => {
+        const isZip = /\.zip$/i.test(file.name);
+        return (isZip ? loadZip(file) : loadJsonl(file))
+          .then((entries) => ({ name: file.name, entries }))
+          .catch((err) => {
+            hadError = true;
+            reportSwallowed('upload.zip', err);
+            // A ZIP_BOMB (valid session, too big when expanded) and a hard 413
+            // are both "too large"; other 400s are malformed/not-a-v2-session.
+            const tooLarge = err?.httpStatus === 413 || err?.serverCode === 'TOO_LARGE' || err?.serverCode === 'ZIP_BOMB';
+            const key = tooLarge ? 'ui.uploadZipTooLarge'
+              : err?.httpStatus === 400 ? 'ui.uploadZipInvalid'
+              : 'ui.uploadZipFailed';
+            message.error(t(key, { name: file.name }));
+            return { name: file.name, entries: [] };
+          });
+      })).then((results) => {
+        const allEntries = [];
+        const fileNames = [];
+        for (const r of results) {
+          if (r.entries.length) { allEntries.push(...r.entries); fileNames.push(r.name); }
+        }
+        // When everything failed we already showed a per-file error toast; skip
+        // _finishLocalLoad's redundant "no logs" toast and just reset the state.
+        if (!allEntries.length && hadError) { this.setState({ fileLoading: false, fileLoadingCount: 0 }); return; }
+        this._finishLocalLoad(allEntries, fileNames);
       });
     };
     input.click();
@@ -302,7 +436,7 @@ class App extends AppBase {
   // ─── PC 渲染 ──────────────────────────────────────────
 
   render() {
-    const { filteredRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.renderPrepare();
+    const { filteredRequests, deepRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.renderPrepare();
     // 「仅展示当前会话」锁定：把传给 ChatView 的会话切到「以 pin 会话结尾」，
     // 让 pin 会话从 ChatView 视角即最后一个会话（LR 卡片 / 审批 modal 等既有逻辑原样可用）。
     const { sessions: displaySessions, upperBoundTs: sessionUpperBoundTs } = this._displaySessionsFor(mainAgentSessions);
@@ -333,11 +467,9 @@ class App extends AppBase {
           onJumpTab={this.handleApprovalJumpTab}
           otherTabs={this.state.approvalOtherTabs}
         >
-        {fileLoading && (
-          <div className={styles.loadingOverlay}>
-            <div className={styles.loadingText}>Loading...({fileLoadingCount})</div>
-          </div>
-        )}
+        {/* Wire v3: no loading mask — rows land in the first frame so the
+            list/detail are interactive immediately; the chat area shows its
+            own inline Spin + byte progress (ChatView loadingProgress prop). */}
         {this.state.isDragging && (
           <div className={styles.dragOverlay}>
             <div className={styles.dragOverlayContent}>
@@ -351,7 +483,7 @@ class App extends AppBase {
             <AppHeader
               ref={this.appHeaderRef}
               requestCount={filteredRequests.length}
-              requests={filteredRequests}
+              requests={deepRequests}
               viewMode={viewMode}
               cacheExpireAt={this.state.cacheExpireAt}
               cacheType={this.state.cacheType}
@@ -361,7 +493,6 @@ class App extends AppBase {
               isLocalLog={!!this._isLocalLog}
               localLogFile={this._localLogFile}
               projectName={this.state.projectName}
-              instanceId={this.state.instanceId}
               filterIrrelevant={!this.state.showAll}
               onFilterIrrelevantChange={this.handleFilterIrrelevantChange}
               logDir={this.state.logDir}
@@ -376,9 +507,6 @@ class App extends AppBase {
               contextBarLocked={this.state.contextBarLocked}
               onNavigateCacheMsg={this.handleNavigateCacheMsg}
               serverCachedContent={this.state.serverCachedContent || this._lastKvCacheContent}
-              resumeAutoChoice={this.state.resumeAutoChoice}
-              onResumeAutoChoiceToggle={this.handleResumeAutoChoiceToggle}
-              onResumeAutoChoiceChange={this.handleResumeAutoChoiceChange}
               themeColor={this.state.themeColor}
               onThemeColorChange={this.handleThemeColorChange}
               displayScale={this.state.displayScale}
@@ -415,7 +543,16 @@ class App extends AppBase {
           )}
           <Layout.Content className={styles.content}>
             {viewMode === 'raw' && (
-              filteredRequests.length === 0 ? (
+              filteredRequests.length === 0 && fileLoading ? (
+                // Legacy wire / v1 files populate the list only at load_end —
+                // show a loading state instead of flashing the onboarding
+                // guide during the cold load (review P1-3; the v3 path fills
+                // rows in the first frame so this rarely shows).
+                <div className={styles.centerLoading}>
+                  <Spin size="large" />
+                  <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>{this._loadingProgressText()}</div>
+                </div>
+              ) : filteredRequests.length === 0 ? (
                 <div className={styles.guideContainer}>
                   <div className={styles.guideContent}>
                     <h2 className={styles.guideTitle}>{t('ui.guide.title')}</h2>
@@ -471,7 +608,7 @@ class App extends AppBase {
 
                 <div className={styles.rightPanel}>
                   <DetailPanel
-                    request={selectedRequest}
+                    request={selectedRequest?._v3Row ? this.state.detailEntry : selectedRequest}
                     requests={filteredRequests}
                     allRequests={this.state.requests}
                     selectedIndex={selectedIndex}
@@ -481,13 +618,18 @@ class App extends AppBase {
                     expandDiff={prefs.expandDiff}
                     pendingCacheHighlight={this.state.pendingCacheHighlight}
                     onCacheHighlightDone={this.handleCacheHighlightDone}
+                    hasPrevMainOverride={!!selectedRequest?._v3Row}
+                    prevMainOverride={this.state.detailPrevMain}
+                    detailLoading={!!(selectedRequest?._v3Row && this.state.detailLoading)}
+                    detailError={selectedRequest?._v3Row ? this.state.detailError : null}
+                    onDetailRetry={this.handleDetailRetry}
                   />
                 </div>
               </div>
               )
             )}
             <div className={styles.chatViewWrapper} style={{ display: viewMode === 'chat' ? 'flex' : 'none' }}>
-              <ChatView {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={filteredRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={this._isLocalLog ? false : prefs.onlyCurrentSession} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} hasMoreHistory={this.state.hasMoreHistory} loadingMore={this.state.loadingMore} onLoadMoreHistory={() => this.loadMoreHistory()} loadingSessionId={this.state.loadingSessionId} onLoadSession={(sid) => this.loadSession(sid)} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
+              <ChatView loadingProgress={fileLoading ? this._loadingProgressText() : null} {...this._settingsProps()} getTokenStatsContent={this._getTokenStatsContent} requests={deepRequests} mainAgentSessions={displaySessions} sessionUpperBoundTs={sessionUpperBoundTs} streamingLatest={this.state.streamingLatest} userProfile={this.state.userProfile} collapseToolResults={prefs.collapseToolResults} expandThinking={prefs.expandThinking} showFullToolContent={prefs.showFullToolContent} onlyCurrentSession={!this._isLocalLog} isLocalLog={!!this._isLocalLog} showThinkingSummaries={prefs.showThinkingSummaries} onViewRequest={this.handleViewRequest} scrollToTimestamp={this.state.chatScrollToTs} onScrollTsDone={this.handleScrollTsDone} cliMode={this._isLocalLog ? false : this.state.cliMode} sdkMode={this._isLocalLog ? false : this.state.sdkMode} terminalVisible={this._isLocalLog ? false : (this.state.sdkMode ? false : this.state.terminalVisible)} onToggleTerminal={() => this.setState(prev => ({ terminalVisible: !prev.terminalVisible }))} pendingUploadPaths={this.state.pendingUploadPaths} onUploadPathsConsumed={this.handleUploadPathsConsumed} uploadingDrop={this.state.uploadingDrop} fileLoading={this.state.fileLoading} isStreaming={this.state.isStreaming} lang={this.state.lang} autoApproveSeconds={this.state.autoApproveSeconds} onAutoApproveChange={this.handleAutoApproveChange} planAutoApproveSeconds={this.state.approvalPrefs?.planAutoApproveSeconds} onPlanAutoApproveChange={this.handlePlanAutoApproveChange} onClearContextOptimistic={this.handleClearContextOptimistic} onUserMessageSent={this.handleUserMessageSent} onPendingAsk={this.handleApprovalAsk} onPendingPtyPlan={this.handleApprovalPtyPlan} ownTabId={this.state.ownTabId} projectName={this.state.projectName} setContextBarSlot={this.setContextBarSlot} />
             </div>
           </Layout.Content>
           <div className={styles.footer}>
@@ -543,36 +685,48 @@ class App extends AppBase {
           </div>
         </Modal>
         <Modal
-          title={t('ui.resume.title')}
-          open={this.state.resumeModalVisible}
-          closable={false}
-          maskClosable={false}
-          keyboard={false}
+          title={t('ui.migratePrompt.title')}
+          open={this.state.migratePromptVisible}
+          onCancel={() => this.handleMigrateLater(false)}
           footer={
             <div>
               <div className={styles.resumeFooterRight}>
-                <Button key="continue" type="primary" onClick={() => this.handleResumeChoice('continue')} className={styles.btnMarginRight}>
-                  {t('ui.resume.continue')}
+                <Button type="primary" onClick={this.handleMigrateNow} className={styles.btnMarginRight}>
+                  {t('ui.migratePrompt.now')}
                 </Button>
-                <Button key="new" onClick={() => this.handleResumeChoice('new')}>
-                  {t('ui.resume.new')}
+                <Button onClick={() => this.handleMigrateLater(this.state.migrateDontRemind)}>
+                  {t('ui.migratePrompt.later')}
                 </Button>
               </div>
-              <div className={styles.resumeFooterLeft}>
-                <Checkbox
-                  checked={this.state.resumeRememberChoice}
-                  onChange={(e) => this.setState({ resumeRememberChoice: e.target.checked })}
-                  className={styles.resumeCheckboxOpacity}
-                >
-                  <span className={styles.resumeCheckboxOpacity}>{t('ui.resume.remember')}</span>
-                </Checkbox>
-              </div>
+              {!this.state.migratePromptData?.continued && (
+                <div className={styles.resumeFooterLeft}>
+                  <Checkbox
+                    checked={!!this.state.migrateDontRemind}
+                    onChange={(e) => this.setState({ migrateDontRemind: e.target.checked })}
+                    className={styles.resumeCheckboxOpacity}
+                  >
+                    <span className={styles.resumeCheckboxOpacity}>{t('ui.migratePrompt.dontRemind')}</span>
+                  </Checkbox>
+                </div>
+              )}
             </div>
           }
         >
-          <p>{t('ui.resume.message', { file: this.state.resumeFileName })}</p>
+          <p>
+            {this.state.migratePromptData?.continued
+              ? t('ui.migratePrompt.bodyContinued', {
+                  files: this.state.migratePromptData?.files ?? 0,
+                  size: formatSize(this.state.migratePromptData?.totalBytes || 0),
+                })
+              : t('ui.migratePrompt.body', {
+                  files: this.state.migratePromptData?.files ?? 0,
+                  size: formatSize(this.state.migratePromptData?.totalBytes || 0),
+                })}
+          </p>
+          {(this.state.migratePromptData?.otherProjects || 0) > 0 && (
+            <p className={styles.pendingHint}>{t('ui.migratePrompt.otherProjects', { count: this.state.migratePromptData.otherProjects })}</p>
+          )}
         </Modal>
-
         <Modal
           title={<span className={styles.modalTitleInline}><OpenFolderIcon apiEndpoint={apiUrl('/api/open-log-dir')} title={t('ui.openLogDir')} size={16} />{t('ui.importLocalLogs')}</span>}
           open={this.state.importModalVisible}
@@ -584,24 +738,6 @@ class App extends AppBase {
           <div className={styles.modalActions}>
             <Button size="small" icon={<UploadOutlined />} onClick={this.handleLoadLocalJsonlFile}>
               {t('ui.loadLocalJsonl')}
-            </Button>
-            <Button
-              size="small"
-              type={this.state.selectedLogs.size > 1 && ![...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip')) ? 'primary' : 'default'}
-              disabled={this.state.selectedLogs.size < 2 || [...this.state.selectedLogs].some(f => f.endsWith('.jsonl.zip'))}
-              onClick={this.handleMergeLogs}
-              className={styles.btnMarginLeft}
-            >
-              {t('ui.mergeLogs')}
-            </Button>
-            <Button
-              size="small"
-              icon={<FileZipOutlined />}
-              disabled={![...this.state.selectedLogs].some(f => f.endsWith('.jsonl'))}
-              onClick={this.handleArchiveLogs}
-              className={styles.btnMarginLeft}
-            >
-              {t('ui.archiveLogs')}
             </Button>
             <Button
               size="small"
@@ -622,18 +758,96 @@ class App extends AppBase {
             >
               {t('ui.refreshStats')}
             </Button>
-            <Checkbox
-              className={styles.btnMarginLeft}
-              checked={this.state.logShowAllInstances}
-              onChange={this.handleToggleShowAllLogs}
-            >
-              {t('ui.showAllInstanceLogs')}
-            </Checkbox>
+            {/* v1 view entry — gated on "v1 files ON DISK" (not "unmigrated"):
+                the converter never deletes sources, so the view must stay
+                reachable after a finished migration until the user deletes the
+                leftovers from inside it. Hidden when no v1 file exists. */}
+            {this.state.logView === 'v2' && this.state.v1FileCount > 0 && (
+              <Button size="small" type="link" onClick={() => this.handleSetLogView('v1')}>
+                {t('ui.viewV1Logs', { count: this.state.v1FileCount })}
+              </Button>
+            )}
+            {this.state.logView === 'v1' && (
+              <Button size="small" type="link" onClick={() => this.handleSetLogView('v2')}>
+                {t('ui.backToV2Logs')}
+              </Button>
+            )}
+            {/* wire-v2 S8: one-click v1→v2 migration of legacy v1 logs. The
+                task is resident server-side; this row is just its remote.
+                Lives in the v1 view only (the v2 view carries no migration UI);
+                gated on "unmigrated v1 files present" (an active/just-finished
+                task stays visible so its progress/result can be read). */}
+            {this.state.logView === 'v1' && (this.state.unmigratedV1Count > 0 || this.state.wireV2Convert?.running || this.state.wireV2Convert?.state) && (() => {
+              const cv = this.state.wireV2Convert;
+              const st = cv && cv.state;
+              const active = !!(cv && (cv.running || (st && (st.status === 'running' || st.status === 'verifying'))));
+              if (active) {
+                const total = st && Array.isArray(st.files) ? st.files.length : 0;
+                const done = st && Array.isArray(st.files) ? st.files.filter(f => f.done).length : 0;
+                // Verify progress MUST come from st.verifyIndex/verifyTotal —
+                // the convert-phase `done/total` above are files with f.done,
+                // which are ALL done by verify time (would render a frozen n/n).
+                const label = st && st.status === 'verifying'
+                  ? t('ui.wireV2ConvertVerifying', {
+                      done: st.verifyIndex || 0,
+                      total: st.verifyTotal || total,
+                      entries: (st.verifyEntries || 0).toLocaleString(),
+                    })
+                  : t('ui.wireV2ConvertProgress', { done, total, sessions: (st && st.sessionsConverted) || 0 });
+                return (
+                  <span className={styles.btnMarginLeft}>
+                    <Spin size="small" /> <span className={styles.pendingHint}>{label}</span>
+                    <Button size="small" className={styles.btnMarginLeft} onClick={this.handleStopWireV2Convert}>
+                      {t('ui.wireV2ConvertStop')}
+                    </Button>
+                  </span>
+                );
+              }
+              return (
+                <span className={styles.btnMarginLeft}>
+                  <Popconfirm
+                    title={t('ui.wireV2Convert')}
+                    description={t('ui.wireV2ConvertConfirm')}
+                    onConfirm={this.handleStartWireV2Convert}
+                    okText={t('ui.wireV2ConvertOk')}
+                    cancelText={t('ui.cancel')}
+                  >
+                    <Button size="small" icon={<SwapOutlined />}>{t('ui.wireV2Convert')}</Button>
+                  </Popconfirm>
+                  {st && st.status === 'done' && (
+                    <span className={styles.pendingHint}> {t('ui.wireV2ConvertDone', { sessions: st.sessionsConverted || 0, skipped: st.sessionsSkipped || 0 })}</span>
+                  )}
+                  {st && st.status === 'done' && st.sessionsQuarantined > 0 && (
+                    <Tooltip title={<span>{(st.quarantined || []).map(q => <div key={q.sessionId}>{q.sessionId}</div>)}</span>}>
+                      <span className={styles.pendingHint}> {t('ui.wireV2ConvertQuarantined', { count: st.sessionsQuarantined })}</span>
+                    </Tooltip>
+                  )}
+                  {st && (st.status === 'error' || st.status === 'stopped') && (
+                    <Tooltip title={st.lastError || ''}>
+                      <span className={styles.pendingHint}> {t(st.status === 'error' ? 'ui.wireV2ConvertError' : 'ui.wireV2ConvertStopped')}</span>
+                    </Tooltip>
+                  )}
+                </span>
+              );
+            })()}
           </div>
+          {this.state.logView === 'v1' && this.state.unmigratedV1Count > 0 && (
+            <Alert
+              type="info"
+              showIcon
+              className={styles.btnMarginLeft}
+              style={{ marginBottom: 8 }}
+              message={t('ui.unmigratedV1Hint', {
+                count: this.state.unmigratedV1Count,
+                size: formatSize(this.state.unmigratedV1Bytes || 0),
+              })}
+            />
+          )}
           {this.state.localLogsLoading ? (
             <div className={styles.spinCenter}><Spin /></div>
           ) : (() => {
-            const currentLogs = this.state.localLogs[this.state.currentProject];
+            const source = this.state.logView === 'v1' ? this.state.localLogsV1 : this.state.localLogs;
+            const currentLogs = source[this.state.currentProject];
             if (!currentLogs || currentLogs.length === 0) {
               return (
                 <div className={styles.emptyCenter}>

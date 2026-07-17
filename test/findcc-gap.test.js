@@ -106,6 +106,20 @@ describe('findcc: setLogDir 边界与安全约束', () => {
     assert.equal(await readLogDir(), join(homedir(), 'findcc-gap-tilde'),
       '~/x 应展开为 <home>/x 并被接受');
   });
+
+  it('returns boolean: true on accept — INCLUDING a path equal to the current LOG_DIR — false on reject', async () => {
+    // Regression pin (2026-07-14): cli.js used to detect rejection by diffing
+    // LOG_DIR before/after, which mis-rejected `--log-dir <current default>`
+    // (a no-op change). setLogDir now returns the accept/reject verdict itself.
+    const dir = '/tmp/findcc-gap-samevalue';
+    assert.equal(setLogDir(dir), true, 'fresh valid path accepted');
+    assert.equal(setLogDir(dir), true, 'SAME path again must still report accepted (the fixed bug)');
+    assert.equal(await readLogDir(), dir);
+    assert.equal(setLogDir('/etc/ccv-evil'), false, 'rejected path reports false');
+    assert.equal(setLogDir(''), false, 'empty string reports false');
+    assert.equal(setLogDir(undefined), false, 'undefined reports false');
+    assert.equal(await readLogDir(), dir, 'rejections leave LOG_DIR untouched');
+  });
 });
 
 // ════════════════════════ resolveCliPath ════════════════════════
@@ -217,6 +231,51 @@ describe('findcc: resolveNpmClaudePath', () => {
     } finally {
       delete process.env.CCV_TEST_ALLOW_REAL_CLAUDE;
     }
+  });
+
+  // ── Claude Code 2.x 布局（无 cli.js，bin/claude.exe 即入口；2.1.x 在 macOS 上
+  //    package.json bin 映射也是 bin/claude.exe——真实布局已在本机核实）──
+  it('2.x 全局兜底：无 cli.js、有 bin/claude.exe → 返回该 bin 路径', () => {
+    const root = mkdtempSync(join(base, 'case4-'));
+    const binDir = join(root, 'bin');
+    const gnm = join(root, 'gnm');
+    const pkgDir = join(gnm, '@anthropic-ai', 'claude-code');
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(join(pkgDir, 'bin'), { recursive: true });
+    writeFileSync(join(pkgDir, 'bin', 'claude.exe'), 'fake-native-binary');
+    const fakeNpm = join(binDir, 'npm');
+    writeFileSync(fakeNpm, `#!/bin/sh\necho "${gnm}"\n`);
+    chmodSync(fakeNpm, 0o755);
+
+    process.env.PATH = `${binDir}:/usr/bin:/bin`;
+    delete process.env.NPM_CONFIG_PREFIX;
+    process.env.CCV_TEST_ALLOW_REAL_CLAUDE = '1';
+    try {
+      const got = resolveNpmClaudePath();
+      assert.equal(got, join(pkgDir, 'bin', 'claude.exe'),
+        `2.x 布局应回退到 bin/claude.exe，实得: ${got}`);
+    } finally {
+      delete process.env.CCV_TEST_ALLOW_REAL_CLAUDE;
+    }
+  });
+
+  it('2.x which 命中支：软链 realpath 落在包内、无 cli.js、有 bin/claude → 返回该 bin', () => {
+    const root = mkdtempSync(join(base, 'case5-'));
+    const shimDir = join(root, 'shim');
+    const pkgDir = join(root, 'node_modules', '@anthropic-ai', 'claude-code');
+    mkdirSync(shimDir, { recursive: true });
+    mkdirSync(join(pkgDir, 'bin'), { recursive: true });
+    const realBin = join(pkgDir, 'bin', 'claude');
+    writeFileSync(realBin, '#!/bin/sh\nexit 0\n');
+    chmodSync(realBin, 0o755);
+    symlinkSync(realBin, join(shimDir, 'claude'));
+
+    process.env.PATH = `${shimDir}:/usr/bin:/bin`;
+    process.env.NPM_CONFIG_PREFIX = '/tmp/findcc-gap-fake-prefix-' + Date.now();
+
+    const got = resolveNpmClaudePath();
+    assert.ok(got && got.endsWith(join('@anthropic-ai', 'claude-code', 'bin', 'claude')),
+      `2.x which 命中支应回退到包内 bin/claude，实得: ${got}`);
   });
 });
 

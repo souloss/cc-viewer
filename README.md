@@ -52,11 +52,23 @@ Once started in programming mode, the web page opens automatically.
 
 cc-viewer also ships as a native desktop app: [download page](https://github.com/weiesky/cc-viewer/releases)
 
+### Upgrading to 1.7.0 (log format v2)
+
+Since 1.7.0, logs are stored in a per-session directory format (wire-format v2) instead of single `.jsonl` files — roughly 90% smaller on disk. Existing v1 `.jsonl` files are never modified or deleted; the log dialog lists v2 sessions by default, and a small “View legacy (v1) logs” entry (shown while old files exist) opens a v1 view where they can be viewed, migrated, or deleted. On startup, cc-viewer offers one-click migration when legacy logs are found (strongly recommended when continuing an old conversation with `claude -c`, whose first half lives in the old files). You can also migrate from the terminal:
+
+```bash
+ccv convert <project>   # migrate one project
+ccv convert --all       # migrate every project
+ccv verify <v1-file>    # check a v1 file against its converted sessions
+```
+
+A session that fails golden verification is held in `sessions-quarantine/` for inspection instead of failing the whole migration — the other sessions still migrate.
+
 ### Logger mode
 
 If you still prefer the native claude tool or the VS Code extension, use this mode.
 
-In this mode, launching `claude` will automatically start a logging process that records request logs to \~/.claude/cc-viewer/*yourproject*/date.jsonl
+In this mode, launching `claude` will automatically start a logging process that records request logs to per-session directories under \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Enable logger mode:
 
@@ -149,7 +161,7 @@ The **Edit System Prompt** modal (hamburger menu → Edit System Prompt) is tabb
 
 * The **Default** tab keeps the classic behavior: it writes `CC_SYSTEM.md` (override) or `CC_APPEND_SYSTEM.md` (append) into the current workspace, injected as `--system-prompt-file` / `--append-system-prompt-file` on the next ccv launch.
 * **Model tabs**: click **+ Add model**, type a name such as `opus` or `Gemini3`, and pick a scope — **Global** (`~/.claude/cc-viewer/system_prompt/`, applies to every workspace) or **Workspace** (`<project>/system_prompt/`). Each tab has its own Append/Override switch and Markdown preview.
-* Entries are stored as uppercase files: `OPUS_SYSTEM.md` (override) or `OPUS_APPEND_SYSTEM.md` (append). Matching is fuzzy — a case-insensitive substring of the model ID used at the last launch, so `opus` matches `claude-opus-4-8[1m]` regardless of version. A workspace match beats a global one; within a scope the longest name wins; a matched entry fully replaces the Default files for that launch.
+* Entries are stored as uppercase files: `OPUS_SYSTEM.md` (override) or `OPUS_APPEND_SYSTEM.md` (append). Matching is fuzzy — a case-insensitive substring of the model ID resolved from the ACTIVE configuration (an active third-party proxy profile's model mapping > the launch environment's `ANTHROPIC_MODEL`/`CLAUDE_MODEL` > the `model` configured in `settings.json`; with no configuration signal, no entry is injected), so `opus` matches `claude-opus-4-8[1m]` regardless of version. Switching the proxy profile mid-session re-matches only after the claude session is restarted, and a `--model` flag passed through extra args is not consulted (known limitations). A workspace match beats a global one; within a scope the longest name wins; a matched entry fully replaces the Default files for that launch.
 * Saving a tab empty deletes the entry. Model switches made mid-session apply at the next relaunch. Set `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` to disable all automatic injection. You may commit `<project>/system_prompt/` to share prompts with your team, or add it to `.gitignore` to keep them private.
 
 ### Logger mode (view the complete Claude Code session)

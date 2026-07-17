@@ -1,7 +1,6 @@
 // Unit tests for src/utils/entryCache.js
 //
-// 覆盖目标：getCacheMeta / saveEntries / loadEntries / clearEntries /
-//          saveSessionEntries / loadSessionEntries 全部导出。
+// 覆盖目标：getCacheMeta / saveEntries / loadEntries / clearEntries 全部导出。
 //
 // entryCache.js 依赖浏览器全局 indexedDB + localStorage。Node 测试环境没有，
 // 这里手写最小 fake：
@@ -292,7 +291,6 @@ describe('loadEntries expiry (MAX_AGE 7 days)', () => {
     // 直接写入一条 ts 超过 7 天的记录到 fake store
     const stale = Date.now() - (8 * 24 * 60 * 60 * 1000);
     idb._stores.set('entries', new Map([[CACHE_KEY, { projectName: 'projOld', entries: [{ id: 1 }], ts: stale }]]));
-    idb._stores.set('sessions', new Map());
     idb.needUpgrade = false; // store 已存在，跳过 upgrade
     // 先放一条 meta，验证过期淘汰会经由 clearEntries -> clearMeta 删除
     storage.setItem(META_KEY, JSON.stringify({ projectName: 'projOld', lastTs: 't', count: 1 }));
@@ -310,7 +308,6 @@ describe('loadEntries expiry (MAX_AGE 7 days)', () => {
   it('keeps fresh cache (ts within 7 days)', async () => {
     const fresh = Date.now() - (1 * 24 * 60 * 60 * 1000);
     idb._stores.set('entries', new Map([[CACHE_KEY, { projectName: 'projFresh', entries: [{ id: 7 }], ts: fresh }]]));
-    idb._stores.set('sessions', new Map());
     idb.needUpgrade = false;
     const loaded = await mod.loadEntries('projFresh');
     assert.deepEqual(loaded, [{ id: 7 }]);
@@ -360,58 +357,11 @@ describe('clearEntries', () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────
-describe('per-session save/load', () => {
-  beforeEach(() => { freshEnv(); });
-
-  it('round-trips session entries by projectName:sessionId key', async () => {
-    const entries = [{ m: 'a' }, { m: 'b' }];
-    await mod.saveSessionEntries('projS', 'sess-1', entries);
-    const loaded = await mod.loadSessionEntries('projS', 'sess-1');
-    assert.deepEqual(loaded, entries);
-  });
-
-  it('different session ids do not collide', async () => {
-    await mod.saveSessionEntries('projS', 's1', [{ x: 1 }]);
-    await mod.saveSessionEntries('projS', 's2', [{ x: 2 }]);
-    assert.deepEqual(await mod.loadSessionEntries('projS', 's1'), [{ x: 1 }]);
-    assert.deepEqual(await mod.loadSessionEntries('projS', 's2'), [{ x: 2 }]);
-  });
-
-  it('loadSessionEntries returns null for missing key', async () => {
-    assert.equal(await mod.loadSessionEntries('projS', 'nope'), null);
-  });
-
-  it('loadSessionEntries returns null for empty stored array', async () => {
-    await mod.saveSessionEntries('projS', 'empty', []);
-    assert.equal(await mod.loadSessionEntries('projS', 'empty'), null);
-  });
-
-  it('saveSessionEntries is a no-op when projectName missing or entries null', async () => {
-    await mod.saveSessionEntries('', 's', [{ x: 1 }]);   // no projectName
-    await mod.saveSessionEntries('projS', 's', null);    // entries null
-    assert.equal(await mod.loadSessionEntries('', 's'), null);
-    assert.equal(await mod.loadSessionEntries('projS', 's'), null);
-  });
-
-  it('evicts session cache older than 7 days', async () => {
-    const stale = Date.now() - (8 * 24 * 60 * 60 * 1000);
-    idb._stores.set('entries', new Map());
-    idb._stores.set('sessions', new Map([['projS:old', { entries: [{ x: 1 }], ts: stale }]]));
-    idb.needUpgrade = false;
-    assert.equal(await mod.loadSessionEntries('projS', 'old'), null);
-  });
-});
-
-// ──────────────────────────────────────────────────────────────────────────
 describe('DB open failure fallback', () => {
   beforeEach(() => { freshEnv(); idb.openShouldFail = true; globalThis.indexedDB = idb; });
 
   it('loadEntries returns null when getDB rejects', async () => {
     assert.equal(await mod.loadEntries('p'), null);
-  });
-
-  it('loadSessionEntries returns null when getDB rejects', async () => {
-    assert.equal(await mod.loadSessionEntries('p', 's'), null);
   });
 
   it('saveEntries swallows the rejection (no throw)', async () => {
@@ -423,10 +373,6 @@ describe('DB open failure fallback', () => {
     storage.setItem(META_KEY, JSON.stringify({ projectName: 'p', lastTs: 't', count: 1 }));
     await assert.doesNotReject(mod.clearEntries());
     assert.equal(storage.getItem(META_KEY), null, 'meta cleared before getDB even on open failure');
-  });
-
-  it('saveSessionEntries swallows the rejection (no throw)', async () => {
-    await assert.doesNotReject(mod.saveSessionEntries('p', 's', [{ x: 1 }]));
   });
 });
 
@@ -455,13 +401,6 @@ describe('store-level request errors resolve gracefully', () => {
     idb._reqFailStores.add('entries');
     assert.equal(await mod.loadEntries('projErr'), null);
     idb._reqFailStores.delete('entries');
-  });
-
-  it('loadSessionEntries resolves null when the get request errors', async () => {
-    await mod.saveSessionEntries('projErr', 's', [{ x: 1 }]);
-    idb._reqFailStores.add('sessions');
-    assert.equal(await mod.loadSessionEntries('projErr', 's'), null);
-    idb._reqFailStores.delete('sessions');
   });
 
   it('saveEntries resolves (no throw) when the write transaction errors', async () => {

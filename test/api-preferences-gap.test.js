@@ -122,7 +122,8 @@ describe('GET /api/preferences (gap)', () => {
     const res = await callGet(preferencesGet);
     const data = JSON.parse(res.body);
     assert.equal(data.logDir, tmpDir);
-    assert.equal(data.resumeAutoChoice, 'continue');
+    // wire-v2 (1.7.0): resumeAutoChoice virtual default removed — no injection.
+    assert.equal('resumeAutoChoice' in data, false);
   });
 });
 

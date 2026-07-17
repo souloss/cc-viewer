@@ -1,10 +1,25 @@
+/**
+ * stats-worker (wire-v2, stats schema v9) — worker-thread integration tests.
+ *
+ * The scan unit is a v2 session directory: counts/usage come from journal
+ * req/done lines, previews from conversations/main/e<N>.jsonl event slices.
+ * Fixtures are hand-written journal/conv lines (full control over msgTo/
+ * epoch/usage shapes) plus one REAL V2Writer round-trip pinning that the
+ * hand-written format matches what the writer actually produces.
+ *
+ * Data-safety: all fixtures live in private tmp dirs; nothing touches a real
+ * CCV_LOG_DIR.
+ */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveSessionDirName } from '../server/lib/v2/session-select.js';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+
+import { V2Writer } from '../server/lib/v2/v2-writer.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const WORKER_PATH = join(__dirname, '..', 'server', 'lib', 'stats-worker.js');
@@ -13,15 +28,6 @@ function makeTmpDir() {
   const dir = join(tmpdir(), `ccv-stats-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-/** Build a JSONL entry string (entries separated by \n---\n) */
-function jsonlEntry(obj) {
-  return JSON.stringify(obj);
-}
-
-function buildJsonlContent(entries) {
-  return entries.map(e => jsonlEntry(e)).join('\n---\n');
 }
 
 /** Spawn worker, send a message, collect responses until expectedType is received */
@@ -50,546 +56,401 @@ function runWorker(msg, expectedType, timeout = 5000) {
   });
 }
 
-// ─── parseJsonlFile (tested via init message → stats JSON output) ───
+// ─── v2 session fixture builder (hand-written journal/conv lines) ────────────
 
-describe('stats-worker: parseJsonlFile via init', () => {
+function makeSession(projectDir, sid, { requests = [], convEvents = [] } = {}) {
+  const dir = join(projectDir, 'sessions', sid);
+  mkdirSync(join(dir, 'conversations', 'main'), { recursive: true });
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, pid: 1, startTs: '2026-07-14T00:00:00.000Z' }));
+  const lines = [JSON.stringify({ ph: 'meta', wireFormat: 2 })];
+  for (const r of requests) {
+    const { _done, ...req } = r;
+    lines.push(JSON.stringify({ ph: 'req', ...req }));
+    if (_done) lines.push(JSON.stringify({ ph: 'done', seq: r.seq, ts: r.ts, status: 'ok', ...(_done === true ? {} : _done) }));
+  }
+  writeFileSync(join(dir, 'journal.jsonl'), lines.join('\n') + '\n');
+  const byEpoch = new Map();
+  for (const ev of convEvents) {
+    const e = ev.epoch || 0;
+    if (!byEpoch.has(e)) byEpoch.set(e, []);
+    const { epoch, ...rest } = ev;
+    byEpoch.get(e).push(JSON.stringify(rest));
+  }
+  for (const [e, evLines] of byEpoch) {
+    writeFileSync(join(dir, 'conversations', 'main', `e${e}.jsonl`), evLines.join('\n') + '\n');
+  }
+  return dir;
+}
+
+/** Shorthand main request journal line. */
+function mainReq(seq, msgTo, { model = 'claude-fable-5', epoch = 0, usage = null, kind = 'main' } = {}) {
+  return {
+    seq,
+    rid: `r${seq}`,
+    ts: `2026-07-14T00:00:0${Math.min(seq, 9)}.000Z`,
+    kind,
+    conv: 'main',
+    epoch,
+    url: 'https://api.anthropic.com/v1/messages',
+    method: 'POST',
+    model,
+    msgFrom: 0,
+    msgTo,
+    _done: usage ? { usage, dur: 10 } : true,
+  };
+}
+
+const userMsg = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
+
+describe('stats-worker v2: session parsing via init', () => {
   let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
-  beforeEach(() => {
-    logDir = makeTmpDir();
-  });
-
-  afterEach(() => {
-    rmSync(logDir, { recursive: true, force: true });
-  });
-
-  it('parses a single JSONL file with model and usage', async () => {
-    const projectName = 'test-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    const content = buildJsonlContent([
-      {
-        body: { model: 'claude-sonnet-4-20250514' },
-        response: {
-          body: {
-            model: 'claude-sonnet-4-20250514',
-            usage: { input_tokens: 100, output_tokens: 50 },
-          },
-        },
-      },
-      {
-        body: { model: 'claude-sonnet-4-20250514' },
-        response: {
-          body: {
-            model: 'claude-sonnet-4-20250514',
-            usage: { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 30 },
-          },
-        },
-      },
-    ]);
-    writeFileSync(join(projectDir, 'session1.jsonl'), content);
-
-    await runWorker(
-      { type: 'init', logDir, projectName },
-      'init-done',
-    );
-
-    const statsFile = join(projectDir, `${projectName}.json`);
-    assert.ok(existsSync(statsFile), 'stats JSON should be created');
-
-    const stats = JSON.parse(readFileSync(statsFile, 'utf-8'));
-    assert.equal(stats.project, projectName);
-    assert.equal(stats.summary.requestCount, 2);
-    assert.equal(stats.summary.input_tokens, 300);
-    assert.equal(stats.summary.output_tokens, 130);
-    assert.equal(stats.summary.cache_read_input_tokens, 30);
-    assert.equal(stats.summary.fileCount, 1);
-    assert.ok(stats.models['claude-sonnet-4-20250514'] >= 2);
-  });
-
-  it('counts sessions and turns correctly', async () => {
-    const projectName = 'sess-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    const content = buildJsonlContent([
-      // Turn 1: new session, messages.length=1
-      {
-        mainAgent: true,
-        body: { model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }] },
-        response: { body: { model: 'claude-sonnet-4-20250514', stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } } },
-      },
-      // Same turn 1: tool_use continuation, messages.length=3
-      {
-        mainAgent: true,
-        body: { model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'tool call' }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] }] },
-        response: { body: { model: 'claude-sonnet-4-20250514', stop_reason: 'end_turn', usage: { input_tokens: 20, output_tokens: 10 } } },
-      },
-      // Turn 2: user sends second message, messages.length=5
-      {
-        mainAgent: true,
-        body: { model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'a1' }, { role: 'user', content: 'q2' }, { role: 'assistant', content: 'a2' }, { role: 'user', content: 'q3' }] },
-        response: { body: { model: 'claude-sonnet-4-20250514', stop_reason: 'end_turn', usage: { input_tokens: 30, output_tokens: 15 } } },
-      },
-      // SUGGESTION MODE: should NOT count as a turn, messages.length=7
-      {
-        mainAgent: true,
-        body: { model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'a1' }, { role: 'user', content: 'q2' }, { role: 'assistant', content: 'a2' }, { role: 'user', content: 'q3' }, { role: 'assistant', content: 'a3' }, { role: 'user', content: [{ type: 'text', text: '[SUGGESTION MODE: Suggest next input]' }] }] },
-        response: { body: { model: 'claude-sonnet-4-20250514', stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 3 } } },
-      },
-      // New session: messages.length=1 again
-      {
-        mainAgent: true,
-        body: { model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'new' }] },
-        response: { body: { model: 'claude-sonnet-4-20250514', stop_reason: 'end_turn', usage: { input_tokens: 15, output_tokens: 8 } } },
-      },
-    ]);
-    writeFileSync(join(projectDir, 'session.jsonl'), content);
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.sessionCount, 2, 'only entries with messages.length===1 count as sessions');
-    assert.equal(stats.summary.turnCount, 3, 'user turns: turn1 + turn2 + new session, excluding suggestion and tool continuation');
-    assert.equal(stats.summary.requestCount, 5);
-  });
-
-  it('handles empty JSONL file', async () => {
-    const projectName = 'empty-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-    writeFileSync(join(projectDir, 'empty.jsonl'), '');
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.requestCount, 0);
-    assert.equal(stats.summary.input_tokens, 0);
-  });
-
-  it('skips _temp.jsonl files', async () => {
-    const projectName = 'temp-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    writeFileSync(join(projectDir, 'real.jsonl'), buildJsonlContent([
-      { body: { model: 'x' }, response: { body: { model: 'x', usage: { input_tokens: 10, output_tokens: 5 } } } },
-    ]));
-    writeFileSync(join(projectDir, 'something_temp.jsonl'), buildJsonlContent([
-      { body: { model: 'y' }, response: { body: { model: 'y', usage: { input_tokens: 999, output_tokens: 999 } } } },
-    ]));
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.fileCount, 1, 'should only count real.jsonl');
-    assert.equal(stats.summary.input_tokens, 10);
-  });
-
-  it('handles malformed JSON entries gracefully', async () => {
-    const projectName = 'bad-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    const content = 'not valid json\n---\n' + jsonlEntry({
-      body: { model: 'ok' },
-      response: { body: { model: 'ok', usage: { input_tokens: 5, output_tokens: 3 } } },
+  it('parses models and usage from journal req/done lines', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [
+        mainReq(1, 1, { model: 'mA', usage: { in: 100, out: 50, cr: 30, cw: 10 } }),
+        mainReq(2, 3, { model: 'mA', usage: { out: 5, cw: 7 } }),
+        mainReq(3, 3, { model: 'mB' }), // done without usage
+        { seq: 4, rid: 'r4', ts: '2026-07-14T00:00:04.000Z', kind: 'heartbeat', url: 'https://api.anthropic.com/api/eval/sdk-x', method: 'POST' }, // no model, no done
+      ],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [userMsg('hello world')] },
+        { seq: 2, t: 'append', msgs: [{ role: 'assistant', content: [{ type: 'text', text: 'hi' }] }, userMsg('second turn')] },
+      ],
     });
-    writeFileSync(join(projectDir, 'mixed.jsonl'), content);
 
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
+    const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.ok(messages.some(m => m.type === 'init-done'));
 
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.requestCount, 1, 'should skip bad entry, count good one');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats._v, 11);
+    // v10: per-unit size = recursive session-dir bytes; journalSize = cache key.
+    const sizedUnit = Object.values(stats.files)[0];
+    assert.ok(sizedUnit.size >= sizedUnit.journalSize, 'folder size includes journal + conv/blob files');
+    assert.ok(sizedUnit.journalSize > 0);
+    assert.equal(stats.summary.requestCount, 4);
+    assert.equal(stats.summary.input_tokens, 100);
+    assert.equal(stats.summary.output_tokens, 55);
+    assert.equal(stats.summary.cache_read_input_tokens, 30);
+    assert.equal(stats.summary.cache_creation_input_tokens, 17);
+    assert.equal(stats.models['mA'], 2);
+    assert.equal(stats.models['mB'], 1);
+    assert.equal(stats.summary.fileCount, 1);
+    const unit = stats.files['sessions/sid-1'];
+    assert.ok(unit, 'unit keyed by sessions/<sid>');
+    assert.deepEqual(unit.preview, ['hello world', 'second turn']);
   });
 
-  it('aggregates multiple models across files', async () => {
-    const projectName = 'multi-proj';
-    const projectDir = join(logDir, projectName);
+  it('restart continuation in the SAME epoch does not inflate sessionCount (epoch seeding, 2026-07-15)', async () => {
+    const projectDir = join(logDir, 'proj');
+    // Journal shape a post-fix restarted writer produces: epochs 0,0 then a
+    // /clear into 1, then the RESTARTED generation continues in epoch 1 with a
+    // fresh snapshot — sessionCount must stay 2 (distinct epochs), not grow.
+    makeSession(projectDir, 'sid-1', {
+      requests: [
+        mainReq(1, 1),
+        mainReq(2, 3),
+        mainReq(3, 1, { epoch: 1 }),           // /clear
+        mainReq(4, 2, { epoch: 1, evt: 'snapshot' }), // restart snapshot, SAME epoch
+        mainReq(5, 4, { epoch: 1 }),
+      ],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [userMsg('one')] },
+        { seq: 2, t: 'append', msgs: [{ role: 'assistant', content: 'r' }, userMsg('two')] },
+        { seq: 3, t: 'snapshot', epoch: 1, msgs: [userMsg('post clear')] },
+        { seq: 4, t: 'snapshot', epoch: 1, msgs: [userMsg('post clear'), { role: 'assistant', content: 'r' }] },
+        { seq: 5, t: 'append', epoch: 1, msgs: [{ role: 'assistant', content: 'r2' }, userMsg('after restart')] },
+      ],
+    });
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.files['sessions/sid-1'].summary.sessionCount, 2,
+      'restart continues an EXISTING epoch — no phantom session');
+  });
+
+  it('counts turns from msgTo growth and sessions from distinct epochs (/clear)', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [
+        mainReq(1, 1),
+        mainReq(2, 3),
+        mainReq(3, 3),  // unchanged wire → not a new turn
+        mainReq(4, 1, { epoch: 1 }), // /clear: shrink resets tracking, new epoch
+        mainReq(5, 3, { epoch: 1 }),
+      ],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [userMsg('turn one')] },
+        { seq: 2, t: 'append', msgs: [{ role: 'assistant', content: 'r' }, userMsg('turn two')] },
+        { seq: 4, t: 'snapshot', epoch: 1, msgs: [userMsg('after clear')] },
+        { seq: 5, t: 'append', epoch: 1, msgs: [{ role: 'assistant', content: 'r' }, userMsg('post clear turn')] },
+      ],
+    });
+
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    // Turns: seq1 (1>0), seq2 (3>1), seq4 (shrink of 3→1 is below the >4 gap
+    // threshold, but 1<3 so not a new turn either), seq5 (3 not > 3) — the v1
+    // formula counts growth beyond the running max: seq1 + seq2 = 2 turns,
+    // then epoch 1 wire never exceeds max 3 → stays 2... unless the shrink
+    // reset fires. With maxMsgLen 3 → len 1: 1 < 1.5 but gap 2 ≤ 4 → NO reset
+    // (v1 behavior for short sessions) → total turns = 2.
+    assert.equal(stats.summary.turnCount, 2);
+    assert.equal(stats.summary.sessionCount, 2, 'two epochs = two v1-style sessions');
+    assert.deepEqual(stats.files['sessions/sid-1'].preview,
+      ['turn one', 'turn two', 'after clear', 'post clear turn']);
+  });
+
+  it('a real /clear-scale shrink resets turn tracking', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [
+        mainReq(1, 12),                 // long-running conversation
+        mainReq(2, 1, { epoch: 1 }),    // /clear: 1 < 6 and gap 11 > 4 → reset
+        mainReq(3, 3, { epoch: 1 }),
+      ],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [userMsg('long history')] },
+        { seq: 2, t: 'snapshot', epoch: 1, msgs: [userMsg('fresh start')] },
+        { seq: 3, t: 'append', epoch: 1, msgs: [{ role: 'assistant', content: 'r' }, userMsg('next')] },
+      ],
+    });
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.summary.turnCount, 3, 'reset makes post-clear growth count again');
+  });
+
+  it('SUGGESTION MODE requests are excluded from turns and previews', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [mainReq(1, 1), mainReq(2, 2)],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [userMsg('real prompt')] },
+        { seq: 2, t: 'append', msgs: [userMsg('[SUGGESTION MODE: predict the next input]')] },
+      ],
+    });
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.summary.turnCount, 1);
+    assert.deepEqual(stats.files['sessions/sid-1'].preview, ['real prompt']);
+  });
+
+  it('strips system tags from previews and dedups repeated snapshot texts', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [mainReq(1, 1), mainReq(2, 1)],
+      convEvents: [
+        { seq: 1, t: 'snapshot', msgs: [{ role: 'user', content: '<system-reminder>noise</system-reminder>fix the bug' }] },
+        // cache_control migration style mid-epoch snapshot repeats the state
+        { seq: 2, t: 'snapshot', msgs: [{ role: 'user', content: '<system-reminder>noise</system-reminder>fix the bug' }] },
+        // replace-tail ctl carries the swapped tail as .msg — collected too
+        { seq: 3, t: 'ctl', op: 'replace-tail', msg: { role: 'user', content: 'probe swapped real' } },
+      ],
+    });
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.deepEqual(stats.files['sessions/sid-1'].preview, ['fix the bug', 'probe swapped real']);
+  });
+
+  it('tolerates malformed journal lines and sessions without conversations', async () => {
+    const projectDir = join(logDir, 'proj');
+    const dir = makeSession(projectDir, 'sid-1', { requests: [mainReq(1, 1, { usage: { in: 1, out: 2 } })], convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('x')] }] });
+    appendFileSync(join(dir, 'journal.jsonl'), '{broken json\n');
+    makeSession(projectDir, 'sid-2', { requests: [mainReq(1, 1, { model: 'mC' })] }); // no conv events at all
+    rmSync(join(projectDir, 'sessions', 'sid-2', 'conversations'), { recursive: true, force: true });
+
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.summary.requestCount, 2);
+    assert.equal(stats.models['mC'], 1);
+    assert.equal(stats.summary.fileCount, 2);
+  });
+
+  it('a project without any v2 session writes no stats file', async () => {
+    const projectDir = join(logDir, 'proj');
     mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, 'legacy.jsonl'), JSON.stringify({ body: { model: 'old' } }));
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.equal(existsSync(join(projectDir, 'proj.json')), false, 'v1-only projects are no longer counted');
+  });
+});
 
-    writeFileSync(join(projectDir, 'a.jsonl'), buildJsonlContent([
-      { body: { model: 'modelA' }, response: { body: { model: 'modelA', usage: { input_tokens: 10, output_tokens: 5 } } } },
-    ]));
-    writeFileSync(join(projectDir, 'b.jsonl'), buildJsonlContent([
-      { body: { model: 'modelB' }, response: { body: { model: 'modelB', usage: { input_tokens: 20, output_tokens: 10 } } } },
-      { body: { model: 'modelA' }, response: { body: { model: 'modelA', usage: { input_tokens: 30, output_tokens: 15 } } } },
-    ]));
+describe('stats-worker v2: incremental update & scan-all', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
+  it('unchanged sessions are reused from cache; the updated unit is re-parsed', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-1', {
+      requests: [mainReq(1, 1, { model: 'mA', usage: { in: 1, out: 1 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('one')] }],
+    });
+    const dir2 = makeSession(projectDir, 'sid-2', {
+      requests: [mainReq(1, 1, { model: 'mB', usage: { in: 2, out: 2 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('two')] }],
+    });
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
 
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.models['modelA'], 2);
-    assert.equal(stats.models['modelB'], 1);
+    // Append a new request to sid-2 only.
+    appendFileSync(join(dir2, 'journal.jsonl'),
+      JSON.stringify({ ph: 'req', seq: 2, rid: 'r2', ts: '2026-07-14T00:00:09.000Z', kind: 'main', conv: 'main', epoch: 0, url: 'https://api.anthropic.com/v1/messages', model: 'mB', msgFrom: 1, msgTo: 3 }) + '\n' +
+      JSON.stringify({ ph: 'done', seq: 2, ts: '2026-07-14T00:00:09.500Z', status: 'ok', usage: { in: 5, out: 5 } }) + '\n');
+    appendFileSync(join(dir2, 'conversations', 'main', 'e0.jsonl'),
+      JSON.stringify({ seq: 2, t: 'append', msgs: [{ role: 'assistant', content: 'r' }, userMsg('two more')] }) + '\n');
+
+    const messages = await runWorker({ type: 'update', logDir, projectName: 'proj', logFile: dir2 }, 'update-done');
+    assert.ok(messages.some(m => m.type === 'update-done' && m.logFile === 'sessions/sid-2'));
+
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
     assert.equal(stats.summary.requestCount, 3);
-    assert.equal(stats.summary.input_tokens, 60);
-    assert.equal(stats.summary.fileCount, 2);
-  });
-});
-
-// ─── incremental update ───
-
-describe('stats-worker: incremental update', () => {
-  let logDir;
-
-  beforeEach(() => {
-    logDir = makeTmpDir();
+    assert.equal(stats.summary.input_tokens, 8);
+    assert.equal(stats.models['mB'], 2);
+    assert.deepEqual(stats.files['sessions/sid-2'].preview, ['two', 'two more']);
   });
 
-  afterEach(() => {
-    rmSync(logDir, { recursive: true, force: true });
-  });
-
-  it('update message re-parses only the specified file', async () => {
-    const projectName = 'incr-proj';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    writeFileSync(join(projectDir, 'file1.jsonl'), buildJsonlContent([
-      { body: { model: 'm1' }, response: { body: { model: 'm1', usage: { input_tokens: 10, output_tokens: 5 } } } },
-    ]));
-
-    // Initial
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    // Add a second file
-    writeFileSync(join(projectDir, 'file2.jsonl'), buildJsonlContent([
-      { body: { model: 'm2' }, response: { body: { model: 'm2', usage: { input_tokens: 20, output_tokens: 10 } } } },
-    ]));
-
-    // Update with the new file
-    await runWorker(
-      { type: 'update', logDir, projectName, logFile: join(projectDir, 'file2.jsonl') },
-      'update-done',
-    );
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.fileCount, 2);
-    assert.equal(stats.summary.requestCount, 2);
-    assert.equal(stats.summary.input_tokens, 30);
-  });
-});
-
-// ─── scan-all ───
-
-describe('stats-worker: scan-all', () => {
-  let logDir;
-
-  beforeEach(() => {
-    logDir = makeTmpDir();
-  });
-
-  afterEach(() => {
-    rmSync(logDir, { recursive: true, force: true });
-  });
-
-  it('scans all project directories and generates stats for each', async () => {
-    // Create two project dirs
-    for (const name of ['projA', 'projB']) {
-      const dir = join(logDir, name);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'log.jsonl'), buildJsonlContent([
-        { body: { model: 'x' }, response: { body: { model: 'x', usage: { input_tokens: 1, output_tokens: 1 } } } },
-      ]));
-    }
-
-    await runWorker({ type: 'scan-all', logDir }, 'scan-all-done');
-
-    for (const name of ['projA', 'projB']) {
-      const statsFile = join(logDir, name, `${name}.json`);
-      assert.ok(existsSync(statsFile), `${name}.json should exist`);
-      const stats = JSON.parse(readFileSync(statsFile, 'utf-8'));
-      assert.equal(stats.project, name);
-      assert.equal(stats.summary.requestCount, 1);
-    }
-  });
-
-  it('handles empty logDir gracefully', async () => {
-    const msgs = await runWorker({ type: 'scan-all', logDir }, 'scan-all-done');
-    assert.ok(msgs.some(m => m.type === 'scan-all-done'));
-  });
-
-  it('skips non-directory entries in logDir', async () => {
-    // Create a regular file (not a directory) in logDir — should be skipped
-    writeFileSync(join(logDir, 'not-a-dir.txt'), 'hello');
-    const msgs = await runWorker({ type: 'scan-all', logDir }, 'scan-all-done');
-    assert.ok(msgs.some(m => m.type === 'scan-all-done'));
-  });
-});
-
-// ─── edge cases for branch coverage ───
-
-describe('stats-worker: branch coverage', () => {
-  let logDir;
-
-  beforeEach(() => {
-    logDir = makeTmpDir();
-  });
-
-  afterEach(() => {
-    rmSync(logDir, { recursive: true, force: true });
-  });
-
-  it('handles corrupt existing stats JSON gracefully (line 102)', async () => {
-    const projectName = 'corrupt-stats';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    // Write a valid jsonl file
-    writeFileSync(join(projectDir, 'log.jsonl'), buildJsonlContent([
-      { body: { model: 'x' }, response: { body: { model: 'x', usage: { input_tokens: 1, output_tokens: 1 } } } },
-    ]));
-    // Write corrupt stats JSON
-    writeFileSync(join(projectDir, `${projectName}.json`), 'NOT VALID JSON{{{');
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    // Should regenerate valid stats despite corrupt cache
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.project, projectName);
-    assert.equal(stats.summary.requestCount, 1);
-  });
-
-  it('handles entry with no model gracefully', async () => {
-    const projectName = 'no-model';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    writeFileSync(join(projectDir, 'log.jsonl'), buildJsonlContent([
-      { body: {}, response: { body: { usage: { input_tokens: 10, output_tokens: 5 } } } },
-      { body: { model: 'ok' }, response: { body: { model: 'ok', usage: { input_tokens: 1, output_tokens: 1 } } } },
-    ]));
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    // Both entries are counted as requests, but only one has a model
-    assert.equal(stats.summary.requestCount, 2);
-    assert.equal(stats.models['ok'], 1);
-  });
-
-  it('handles entry with cache_creation_input_tokens', async () => {
-    const projectName = 'cache-create';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    writeFileSync(join(projectDir, 'log.jsonl'), buildJsonlContent([
-      {
-        body: { model: 'c' },
-        response: { body: { model: 'c', usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 50, cache_read_input_tokens: 20 } } },
-      },
-    ]));
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.cache_creation_input_tokens, 50);
-    assert.equal(stats.summary.cache_read_input_tokens, 20);
-  });
-
-  it('incremental update reuses unchanged file stats from cache', async () => {
-    const projectName = 'cache-reuse';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    writeFileSync(join(projectDir, 'file1.jsonl'), buildJsonlContent([
-      { body: { model: 'm1' }, response: { body: { model: 'm1', usage: { input_tokens: 10, output_tokens: 5 } } } },
-    ]));
-    writeFileSync(join(projectDir, 'file2.jsonl'), buildJsonlContent([
-      { body: { model: 'm2' }, response: { body: { model: 'm2', usage: { input_tokens: 20, output_tokens: 10 } } } },
-    ]));
-
-    // Initial parse
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    // Update only file2 (file1 should be reused from cache)
-    await runWorker(
-      { type: 'update', logDir, projectName, logFile: join(projectDir, 'file2.jsonl') },
-      'update-done',
-    );
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    assert.equal(stats.summary.fileCount, 2);
-    assert.equal(stats.summary.requestCount, 2);
-  });
-
-  it('init on nonexistent project dir does not crash', async () => {
-    const msgs = await runWorker(
-      { type: 'init', logDir, projectName: 'nonexistent' },
-      'init-done',
-      3000,
-    ).catch(() => []);
-    // Worker should not crash — it just won't send init-done for missing dir
-    // (timeout is expected here)
-    assert.ok(true);
-  });
-
-  it('collects all user prompts in preview (not limited to 2)', async () => {
-    const projectName = 'all-prompts';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    // Create 5 session-start entries (messages.length === 1)
-    const entries = [];
-    for (let i = 1; i <= 5; i++) {
-      entries.push({
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: `prompt ${i}` }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
+  it('scan-all generates stats for every project directory with sessions', async () => {
+    for (const p of ['alpha', 'beta']) {
+      makeSession(join(logDir, p), 'sid-1', {
+        requests: [mainReq(1, 1, { model: `model-${p}`, usage: { in: 1, out: 1 } })],
+        convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg(p)] }],
       });
     }
-    writeFileSync(join(projectDir, 'session.jsonl'), buildJsonlContent(entries));
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    const fileStats = Object.values(stats.files)[0];
-    assert.equal(fileStats.preview.length, 5, 'should collect all 5 user prompts, not just 2');
-    assert.equal(fileStats.preview[0], 'prompt 1');
-    assert.equal(fileStats.preview[4], 'prompt 5');
+    writeFileSync(join(logDir, 'stray.txt'), 'not a dir');
+    const messages = await runWorker({ type: 'scan-all', logDir }, 'scan-all-done');
+    assert.ok(messages.some(m => m.type === 'scan-all-done'));
+    for (const p of ['alpha', 'beta']) {
+      const stats = JSON.parse(readFileSync(join(logDir, p, `${p}.json`), 'utf-8'));
+      assert.equal(stats.models[`model-${p}`], 1);
+    }
   });
 
-  it('collects prompts from array content format', async () => {
-    const projectName = 'array-prompts';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
-
-    const entries = [
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: [{ type: 'text', text: 'array prompt one' }] }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
-      },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: [{ type: 'text', text: 'array prompt two' }] }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
-      },
-    ];
-    writeFileSync(join(projectDir, 'session.jsonl'), buildJsonlContent(entries));
-
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    const fileStats = Object.values(stats.files)[0];
-    assert.equal(fileStats.preview.length, 2);
-    assert.equal(fileStats.preview[0], 'array prompt one');
-    assert.equal(fileStats.preview[1], 'array prompt two');
+  it('scan-all on empty/odd logDir does not crash the worker', async () => {
+    const messages = await runWorker({ type: 'scan-all', logDir }, 'scan-all-done');
+    assert.ok(messages.every(m => m.type !== 'error'));
   });
+});
 
-  it('strips system-reminder tags from preview text', async () => {
-    const projectName = 'sys-tag-filter';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
+// ─── real-writer format pin ──────────────────────────────────────────────────
+describe('stats-worker v2: V2Writer round-trip format pin', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
-    const entries = [
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: '<system-reminder>secret instructions</system-reminder>hello world' }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
+  it('sessions produced by the real writer parse into sane stats', async () => {
+    const SID = 'ab345678-9abc-4def-8012-3456789abcde';
+    const w = new V2Writer({ logDir, project: 'proj', enabled: true, minFreeBytes: 0 });
+    const entry = {
+      timestamp: '2026-07-14T01:00:00.000Z',
+      project: 'proj',
+      url: 'https://api.anthropic.com/v1/messages?beta=true',
+      method: 'POST',
+      body: {
+        model: 'claude-fable-5',
+        system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
+        tools: [{ name: 'Edit' }],
+        metadata: { user_id: JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID }) },
+        messages: [userMsg('real writer prompt')],
       },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: '<system-reminder>more secrets</system-reminder>' }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
-      },
-    ];
-    writeFileSync(join(projectDir, 'session.jsonl'), buildJsonlContent(entries));
+      response: null, duration: 0, isStream: false, isHeartbeat: false, isCountTokens: false,
+      mainAgent: true, requestId: 'rid_1',
+    };
+    const h = w.ingestRequest(entry, entry.body.messages);
+    w.ingestCompletion(h, {
+      ...entry,
+      response: { status: 200, body: { content: [], usage: { input_tokens: 11, output_tokens: 22, cache_read_input_tokens: 33, cache_creation_input_tokens: 44 } } },
+      duration: 10,
+    });
+    await w.flush();
 
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    const fileStats = Object.values(stats.files)[0];
-    assert.equal(fileStats.preview.length, 1, 'pure system-tag entry should be skipped');
-    assert.equal(fileStats.preview[0], 'hello world');
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    const stats = JSON.parse(readFileSync(join(logDir, 'proj', 'proj.json'), 'utf-8'));
+    assert.equal(stats.summary.requestCount, 1);
+    assert.equal(stats.summary.turnCount, 1);
+    assert.equal(stats.summary.sessionCount, 1);
+    assert.equal(stats.summary.input_tokens, 11);
+    assert.equal(stats.summary.output_tokens, 22);
+    assert.equal(stats.summary.cache_read_input_tokens, 33);
+    assert.equal(stats.summary.cache_creation_input_tokens, 44);
+    assert.equal(stats.models['claude-fable-5'], 1);
+    // Task C: the writer names the dir `<ts>_<uuid>`; the stats unit key follows.
+    const dirName = resolveSessionDirName(join(logDir, 'proj'), SID) || SID;
+    assert.deepEqual(stats.files[`sessions/${dirName}`].preview, ['real writer prompt']);
   });
+});
 
-  it('collects prompts from multi-turn conversations (not just len===1)', async () => {
-    const projectName = 'multi-turn';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
+// ─── per-session containment (issue #129) ─────────────────────────────────────
+describe('stats-worker per-session containment', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
-    const entries = [
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: 'first turn' }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
-      },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [
-          { role: 'user', content: 'first turn' },
-          { role: 'assistant', content: 'response 1' },
-          { role: 'user', content: 'second turn' },
-        ] },
-        response: { body: { model: 'claude', usage: { input_tokens: 20, output_tokens: 10 } } },
-      },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [
-          { role: 'user', content: 'first turn' },
-          { role: 'assistant', content: 'response 1' },
-          { role: 'user', content: 'second turn' },
-          { role: 'assistant', content: 'response 2' },
-          { role: 'user', content: 'third turn' },
-        ] },
-        response: { body: { model: 'claude', usage: { input_tokens: 30, output_tokens: 15 } } },
-      },
-    ];
-    writeFileSync(join(projectDir, 'session.jsonl'), buildJsonlContent(entries));
+  it('one unreadable session is skipped; healthy siblings still counted', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-good', {
+      requests: [mainReq(1, 1, { model: 'mA', usage: { in: 100, out: 50 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('healthy prompt')] }],
+    });
+    // Corrupt sibling: journal.jsonl is a DIRECTORY — reading it throws
+    // (EISDIR on POSIX), the crash class the per-session catch contains.
+    const bad = join(projectDir, 'sessions', 'sid-bad');
+    mkdirSync(join(bad, 'journal.jsonl'), { recursive: true });
+    writeFileSync(join(bad, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'sid-bad', pid: 1, startTs: '2026-07-14T00:00:00.000Z' }));
 
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
+    const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.ok(messages.some(m => m.type === 'init-done'), 'worker completes instead of dying');
 
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    const fileStats = Object.values(stats.files)[0];
-    assert.equal(fileStats.preview.length, 3, 'should collect prompt from each turn');
-    assert.equal(fileStats.preview[0], 'first turn');
-    assert.equal(fileStats.preview[1], 'second turn');
-    assert.equal(fileStats.preview[2], 'third turn');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.ok(stats.files['sessions/sid-good'], 'healthy session counted');
+    assert.equal(stats.files['sessions/sid-good'].preview[0], 'healthy prompt');
+    assert.equal(stats.files['sessions/sid-bad'], undefined, 'broken session skipped, not crashed on');
+    assert.equal(stats.summary.input_tokens, 100);
   });
+});
 
-  it('does not duplicate preview when same turn has multiple requests', async () => {
-    const projectName = 'test-dedup';
-    const projectDir = join(logDir, projectName);
-    mkdirSync(projectDir, { recursive: true });
+// ─── discardable sessions vs the incremental cache (2026-07-16) ───────────────
+describe('stats-worker discardable-session cache interplay', () => {
+  let logDir;
+  beforeEach(() => { logDir = makeTmpDir(); });
+  afterEach(() => { try { rmSync(logDir, { recursive: true, force: true }); } catch {} });
 
-    const sameTurnMsgs = [
-      { role: 'user', content: 'hello world' },
-      { role: 'assistant', content: 'hi' },
-      { role: 'user', content: 'do something' },
-    ];
-    // Simulate multiple main-agent requests within the same turn (same msg length)
-    const entries = [
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: [{ role: 'user', content: 'hello world' }] },
-        response: { body: { model: 'claude', usage: { input_tokens: 10, output_tokens: 5 } } },
+  it('a probe unit in a stale pre-v11 cache is not resurrected (version bump forces re-parse)', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeSession(projectDir, 'sid-real', {
+      requests: [mainReq(1, 1, { model: 'mA', usage: { in: 10, out: 5 } })],
+      convEvents: [{ seq: 1, t: 'snapshot', msgs: [userMsg('real prompt')] }],
+    });
+    // probe orphan (sub-only, no leader)
+    const probeDir = join(projectDir, 'sessions', 'sid-probe');
+    mkdirSync(probeDir, { recursive: true });
+    writeFileSync(join(probeDir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: 'sid-probe', pid: 1, startTs: '2026-07-16T00:00:00.000Z' }));
+    writeFileSync(join(probeDir, 'journal.jsonl'),
+      JSON.stringify({ ph: 'meta', wireFormat: 2 }) + '\n'
+      + JSON.stringify({ ph: 'req', seq: 1, rid: 'rq', kind: 'sub', ts: '2026-07-16T00:00:00.000Z', url: 'u' }) + '\n');
+    // Stale PRE-upgrade cache (v10) containing the probe unit with MATCHING
+    // journal size+mtime — without the version bump the reuse branch would
+    // copy it straight back into filesStats.
+    const st = statSync(join(probeDir, 'journal.jsonl'));
+    writeFileSync(join(projectDir, 'proj.json'), JSON.stringify({
+      _v: 10,
+      files: {
+        'sessions/sid-probe': {
+          models: {}, summary: { requestCount: 1 }, preview: [],
+          size: 1, journalSize: st.size, lastModified: st.mtime.toISOString(),
+        },
       },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: sameTurnMsgs },
-        response: { body: { model: 'claude', usage: { input_tokens: 20, output_tokens: 10 } } },
-      },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: sameTurnMsgs },
-        response: { body: { model: 'claude', usage: { input_tokens: 20, output_tokens: 10 } } },
-      },
-      {
-        mainAgent: true,
-        body: { model: 'claude', messages: sameTurnMsgs },
-        response: { body: { model: 'claude', usage: { input_tokens: 20, output_tokens: 10 } } },
-      },
-    ];
-    writeFileSync(join(projectDir, 'session.jsonl'), buildJsonlContent(entries));
+      summary: { fileCount: 1, requestCount: 1 },
+      models: {},
+    }));
 
-    await runWorker({ type: 'init', logDir, projectName }, 'init-done');
-
-    const stats = JSON.parse(readFileSync(join(projectDir, `${projectName}.json`), 'utf-8'));
-    const fileStats = Object.values(stats.files)[0];
-    assert.equal(fileStats.preview.length, 2, 'duplicate requests in same turn should not produce extra previews');
-    assert.equal(fileStats.preview[0], 'hello world');
-    assert.equal(fileStats.preview[1], 'do something');
+    const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.ok(messages.some(m => m.type === 'init-done'));
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats._v, 11);
+    assert.equal(stats.files['sessions/sid-probe'], undefined, 'stale cached probe unit dropped');
+    assert.ok(stats.files['sessions/sid-real'], 'real session counted');
+    assert.equal(stats.summary.fileCount, 1);
   });
 });

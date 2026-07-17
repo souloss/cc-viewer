@@ -58,13 +58,25 @@ Nach dem Start im Programmiermodus wird automatisch eine Webseite geöffnet.
 
 CC-Viewer wird auch als native Desktop-App ausgeliefert: [Download-Seite](https://github.com/weiesky/cc-viewer/releases)
 
+### Upgrade auf 1.7.0 (Logformat v2)
+
+Seit 1.7.0 werden Logs im Format eines Verzeichnisses pro Sitzung (wire-format v2) gespeichert statt in einzelnen `.jsonl`-Dateien — etwa 90 % weniger Speicherplatz. Vorhandene v1-`.jsonl`-Dateien werden niemals geändert oder gelöscht; der Log-Dialog listet standardmäßig v2-Sitzungen auf, und ein kleiner Eintrag „Legacy-Logs (v1) anzeigen“ (sichtbar, solange alte Dateien vorhanden sind) öffnet eine v1-Ansicht, in der sie angezeigt, migriert oder gelöscht werden können. Beim Start bietet cc-viewer eine Ein-Klick-Migration an, wenn Legacy-Logs gefunden werden (dringend empfohlen, wenn Sie eine alte Unterhaltung mit `claude -c` fortsetzen, deren erste Hälfte in den alten Dateien liegt). Sie können auch über das Terminal migrieren:
+
+```bash
+ccv convert <project>   # ein Projekt migrieren
+ccv convert --all       # jedes Projekt migrieren
+ccv verify <v1-file>    # eine v1-Datei mit ihren konvertierten Sitzungen abgleichen
+```
+
+Besteht eine Sitzung die Golden-Prüfung nicht, wird sie zur Inspektion in `sessions-quarantine/` zurückgehalten, statt die gesamte Migration scheitern zu lassen – die übrigen Sitzungen werden weiterhin migriert.
+
 ### Logger-Modus
 
 Wenn Sie weiterhin das native claude-Tool oder die VS Code-Erweiterung bevorzugen, verwenden Sie diesen Modus.
 
 In diesem Modus startet `claude`
 
-automatisch einen Protokollierungsprozess, der Anfrageprotokolle in \~/.claude/cc-viewer/*yourproject*/date.jsonl aufzeichnet.
+automatisch einen Protokollierungsprozess, der Anfrageprotokolle in Verzeichnissen pro Sitzung unter \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2) aufzeichnet.
 
 Logger-Modus starten:
 
@@ -140,7 +152,7 @@ Das Modal **System-Prompt bearbeiten** (Hamburger-Menü → System-Prompt bearbe
 
 * Der Tab **Standard** behält das klassische Verhalten bei: Er schreibt `CC_SYSTEM.md` (Überschreiben) oder `CC_APPEND_SYSTEM.md` (Anhängen) in den aktuellen Arbeitsbereich, injiziert als `--system-prompt-file` / `--append-system-prompt-file` beim nächsten ccv-Start.
 * **Modell-Tabs**: Klicken Sie auf **+ Modell hinzufügen**, geben Sie einen Namen wie `opus` oder `Gemini3` ein und wählen Sie einen Geltungsbereich — **Global** (`~/.claude/cc-viewer/system_prompt/`, gilt für jeden Arbeitsbereich) oder **Arbeitsbereich** (`<project>/system_prompt/`). Jeder Tab hat einen eigenen Anhängen/Überschreiben-Schalter und eine Markdown-Vorschau.
-* Einträge werden als großgeschriebene Dateien gespeichert: `OPUS_SYSTEM.md` (Überschreiben) oder `OPUS_APPEND_SYSTEM.md` (Anhängen). Der Abgleich ist unscharf — ein Teilstring der beim letzten Start verwendeten Modell-ID ohne Beachtung der Groß-/Kleinschreibung, sodass `opus` unabhängig von der Version auf `claude-opus-4-8[1m]` passt. Ein Arbeitsbereich-Treffer schlägt einen globalen; innerhalb eines Geltungsbereichs gewinnt der längste Name; ein passender Eintrag ersetzt für diesen Start die Standard-Dateien vollständig.
+* Einträge werden als großgeschriebene Dateien gespeichert: `OPUS_SYSTEM.md` (Überschreiben) oder `OPUS_APPEND_SYSTEM.md` (Anhängen). Der Abgleich ist unscharf — ein Teilstring der aus der AKTIVEN Konfiguration aufgelösten Modell-ID (Modell-Zuordnung des aktiven Drittanbieter-Proxy-Profils > Umgebungsvariablen `ANTHROPIC_MODEL`/`CLAUDE_MODEL` beim Start > `model` in `settings.json`; ohne Konfigurationssignal wird kein Eintrag injiziert) ohne Beachtung der Groß-/Kleinschreibung, sodass `opus` unabhängig von der Version auf `claude-opus-4-8[1m]` passt. Ein Arbeitsbereich-Treffer schlägt einen globalen; innerhalb eines Geltungsbereichs gewinnt der längste Name; ein passender Eintrag ersetzt für diesen Start die Standard-Dateien vollständig. Bekannte Einschränkungen: Ein Profilwechsel während der Sitzung wird erst nach Neustart der claude-Sitzung neu abgeglichen; ein per Zusatzargument übergebenes `--model` wird nicht ausgewertet.
 * Wird ein Tab leer gespeichert, wird der Eintrag gelöscht. Modellwechsel während einer Sitzung greifen beim nächsten Neustart. Setzen Sie `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1`, um jede automatische Injektion zu deaktivieren. Sie können `<project>/system_prompt/` committen, um Prompts mit Ihrem Team zu teilen, oder es zu `.gitignore` hinzufügen, um sie privat zu halten.
 
 ### Logger-Modus (Vollständige Claude Code-Sitzungen anzeigen)

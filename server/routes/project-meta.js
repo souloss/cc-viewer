@@ -22,10 +22,9 @@ export function getInstallMethod({
   return 'npm';
 }
 
-function projectName(req, res, parsedUrl, isLocal, deps) {
+function projectName(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
-  // instanceId (`--pid`) lets the client scope its session-pin requests + show 项目(id) in the title.
-  res.end(JSON.stringify({ projectName: _projectName || '', instanceId: (deps && deps.instanceId) || null }));
+  res.end(JSON.stringify({ projectName: _projectName || '' }));
 }
 
 function projectDir(req, res) {

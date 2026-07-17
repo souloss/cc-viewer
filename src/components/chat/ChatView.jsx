@@ -528,12 +528,10 @@ class ChatView extends React.Component {
       nextProps.userProfile !== this.props.userProfile ||
       nextProps.pendingUploadPaths !== this.props.pendingUploadPaths ||
       nextProps.isStreaming !== this.props.isStreaming ||
-      nextProps.hasMoreHistory !== this.props.hasMoreHistory ||
-      nextProps.loadingMore !== this.props.loadingMore ||
-      nextProps.loadingSessionId !== this.props.loadingSessionId ||
       nextProps.lang !== this.props.lang ||
       nextProps.showThinkingSummaries !== this.props.showThinkingSummaries ||
       nextProps.fileLoading !== this.props.fileLoading ||
+      nextProps.loadingProgress !== this.props.loadingProgress ||
       nextProps.claudeSettings !== this.props.claudeSettings ||
       nextProps.preferences !== this.props.preferences ||
       // 审批档位值要直达终端工具栏快捷菜单：不能只依赖 preferences 引用同批变化放行
@@ -1718,25 +1716,6 @@ class ChatView extends React.Component {
       }
     }
 
-    // Server-side pagination: "load earlier conversations" button
-    // 仅展示当前会话时隐藏跨会话的「加载更早」按钮（更早内容本就不展示）。
-    if (!onlyCurrentSession && (this.props.hasMoreHistory || this.props.loadingMore)) {
-      allItems.push(
-        <div key="load-more-history" className={styles.loadMoreWrap}>
-          {this.props.loadingMore ? (
-            <div className={`${styles.loadMoreBtn} ${styles.loadMoreBtnLoading}`}>
-              <span className={styles.loadMoreSpinner} />
-              {t('ui.loadingMoreHistory')}
-            </div>
-          ) : (
-            <button className={styles.loadMoreBtn} onClick={() => this.props.onLoadMoreHistory && this.props.onLoadMoreHistory()}>
-              {t('ui.loadEarlierConversations')}
-            </button>
-          )}
-        </div>
-      );
-    }
-
     let subIdx = 0;
     // 仅展示当前会话：跳过更早 session 的 SubAgent entries，避免它们 bleed 进当前 session 顶部
     //（下方 forEach 对更早 session 直接 return，不会推进 subIdx，故这里先把游标快进到当前 session 起点）。
@@ -1756,7 +1735,7 @@ class ChatView extends React.Component {
 
     const startSi = onlyCurrentSession ? mainAgentSessions.length - 1 : 0;
     mainAgentSessions.forEach((session, si) => {
-      // 仅展示当前会话：跳过当前(最末)session 之前的全部 session（含其冷占位「加载」按钮，见下方 _cold 分支）。
+      // 仅展示当前会话：跳过当前(最末)session 之前的全部 session。
       if (si < startSi) return;
       if (si > startSi) {
         allItems.push(
@@ -1764,27 +1743,6 @@ class ChatView extends React.Component {
             <Text className={styles.sessionDividerText}>{t('ui.session')}</Text>
           </Divider>
         );
-      }
-
-      // 冷 session 占位符
-      if (session._cold) {
-        const isLoading = this.props.loadingSessionId === session.sessionId;
-        allItems.push(
-          <div key={`cold-session-${si}`} className={styles.loadMoreWrap}>
-            {isLoading ? (
-              <div className={`${styles.loadMoreBtn} ${styles.loadMoreBtnLoading}`}>
-                <span className={styles.loadMoreSpinner} />
-                {t('ui.loadingMoreHistory')}
-              </div>
-            ) : (
-              <button className={styles.loadMoreBtn}
-                onClick={() => this.props.onLoadSession && this.props.onLoadSession(session.sessionId)}>
-                {t('ui.loadSessionPlaceholder', { count: session.msgCount })}
-              </button>
-            )}
-          </div>
-        );
-        return; // 跳过 renderSessionMessages
       }
 
       // Session-level model fallback: when per-message producer resolution is null (the session's
@@ -3134,9 +3092,17 @@ class ChatView extends React.Component {
     const noData = (!allItems || allItems.length === 0) && (noMainAgent || this.props.onlyCurrentSession);
 
     if (noData && !cliMode) {
-      // 初始 SSE 加载期间不显示"暂无对话"，避免 Empty→内容 的两阶段闪烁
+      // 初始 SSE 加载期间复用既有 Spin 占位（wire v3 下列表首帧即达、
+      // 只有对话区仍在装配——无需全局遮罩，就地显示加载与字节进度）。
       if (this.props.fileLoading) {
-        return null;
+        return (
+          <div className={styles.centerEmpty}>
+            <Spin size="large" />
+            {this.props.loadingProgress && (
+              <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>{this.props.loadingProgress}</div>
+            )}
+          </div>
+        );
       }
       return (
         <div className={styles.centerEmpty}>
@@ -3318,7 +3284,7 @@ class ChatView extends React.Component {
           // logfile 只读模式自动渐进扩窗中：展示加载态而非可点按钮（_maybeScheduleLocalLogAutoFill 驱动）
           <div className={`${styles.loadMoreBtn} ${styles.loadMoreBtnLoading}`}>
             <span className={styles.loadMoreSpinner} />
-            {t('ui.loadingMoreHistory')}
+            {t('ui.loading')}
           </div>
         ) : (
           <button className={styles.loadMoreBtn} onClick={this.handleLoadMore}>

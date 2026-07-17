@@ -99,6 +99,33 @@ describe('lib/ensure-hooks.js — timeout field v3 migration (canonical import)'
       assert.match(ask.hooks[0].command, /CCVIEWER_PORT/);
       assert.match(ask.hooks[0].command, /cc-viewer-managed/);
     });
+
+    it('SessionStart hook 注入（/resume 会话切换信号）：无 matcher、带 guard/marker/timeout，幂等', () => {
+      mod.ensureHooks();
+      const s = loadSettings();
+      assert.ok(Array.isArray(s.hooks.SessionStart), 'SessionStart 段被创建');
+      const entry = s.hooks.SessionStart.find(h => (h.hooks?.[0]?.command || '').includes('session-start-bridge.js'));
+      assert.ok(entry, 'session-start-bridge 条目存在');
+      assert.equal(entry.matcher, undefined, '无 matcher = 覆盖全部 source，服务端按 source 门控');
+      assert.match(entry.hooks[0].command, /CCVIEWER_PORT/);
+      assert.match(entry.hooks[0].command, /cc-viewer-managed/);
+      assert.equal(entry.hooks[0].timeout, 86400);
+      // Idempotent: a second run must not duplicate the entry.
+      mod.ensureHooks();
+      const s2 = loadSettings();
+      const count = s2.hooks.SessionStart.filter(h => (h.hooks?.[0]?.command || '').includes('session-start-bridge.js')).length;
+      assert.equal(count, 1, '重复运行不重复注入');
+    });
+
+    it('用户在 SessionStart 已有第三方 hook → 不被破坏', () => {
+      writeSettings({ hooks: { SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command: 'echo my-own-hook' }] }] } });
+      mod.ensureHooks();
+      const s = loadSettings();
+      const mine = s.hooks.SessionStart.find(h => (h.hooks?.[0]?.command || '').includes('my-own-hook'));
+      assert.ok(mine, '第三方 SessionStart hook 原样保留');
+      assert.equal(mine.matcher, 'startup');
+      assert.ok(s.hooks.SessionStart.some(h => (h.hooks?.[0]?.command || '').includes('session-start-bridge.js')));
+    });
   });
 
   describe('upgrade path: 老用户已有缺 timeout 的 hook → 必须被重写', () => {

@@ -36,8 +36,19 @@ export class AsyncWriteQueue {
   get pendingBytes() { return this._pendingBytes; }
 
   append(data, onDone) {
+    return this.appendTo(this._getPath(), data, onDone);
+  }
+
+  /**
+   * Explicit-path variant (wire-v2 S2): same queue, same ordering/drain
+   * machinery, caller supplies the target file. Within one drain batch, path
+   * groups are written in first-enqueue order, so a caller enqueuing
+   * conversation lines before the journal line keeps that relative order on
+   * disk (WIRE_FORMAT_V2.md §1.3 write-order protocol). Empty/falsy path stays
+   * a silent no-op — workspace mode and leaderless teammates rely on it.
+   */
+  appendTo(path, data, onDone) {
     if (this._closed) return;
-    const path = this._getPath();
     if (!path) {
       if (onDone) try { onDone(); } catch {}
       return;

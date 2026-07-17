@@ -12,7 +12,7 @@
 //    变化时触发——与 findRecentLog 的「最新真实日志」语义对齐，过滤流式临时文件噪声。
 //  - watchImpl / mkdirImpl 可注入，便于确定性单测（无需真实 FS 时序）。
 
-import { watch as fsWatch, mkdirSync, existsSync } from 'node:fs';
+import { watch as fsWatch, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // fs.watch 一次文件写会抖多次（macOS/Linux 尤甚），通常 50~300ms 内合并；选 250ms 平衡实时性与稳定性。
@@ -21,14 +21,17 @@ const DEFAULT_DEBOUNCE_MS = 250;
 // 杜绝被污染的 id 经 `IM_${id}` 拼进路径造成穿越（与路由正则 /^[a-z0-9_-]+$/ 同集）。
 const PLATFORM_ID_RE = /^[a-z0-9_-]+$/;
 
-export function createImLogWatcher({ getLogDir, onChange, debounceMs = DEFAULT_DEBOUNCE_MS, watchImpl, mkdirImpl, existsImpl } = {}) {
+export function createImLogWatcher({ getLogDir, onChange, debounceMs = DEFAULT_DEBOUNCE_MS, watchImpl, mkdirImpl, existsImpl, readdirImpl } = {}) {
   const _watch = watchImpl || fsWatch;
   const _mkdir = mkdirImpl || ((d) => { try { mkdirSync(d, { recursive: true }); } catch { /* ignore */ } });
   const _exists = existsImpl || existsSync;
+  const _readdir = readdirImpl || ((d) => { try { return readdirSync(d); } catch { return []; } });
   const _onChange = typeof onChange === 'function' ? onChange : () => {};
   const _getLogDir = typeof getLogDir === 'function' ? getLogDir : () => '';
 
-  const watchers = new Map(); // platformId -> { w: FSWatcher, dir: string } —— 连同所属目录登记，便于 LOG_DIR 切换检测
+  // platformId -> { w, dir, sessionsW, sidWatchers: Map<sid, FSWatcher> }
+  // 连同所属目录登记，便于 LOG_DIR 切换检测。
+  const watchers = new Map();
   const timers = new Map();   // platformId -> timeout
   let _disposed = false;
 
@@ -51,6 +54,52 @@ export function createImLogWatcher({ getLogDir, onChange, debounceMs = DEFAULT_D
     return true;
   }
 
+  function _closeReg(reg) {
+    try { reg.w.close(); } catch { /* ignore */ }
+    if (reg.sessionsW) { try { reg.sessionsW.close(); } catch { /* ignore */ } }
+    for (const sw of reg.sidWatchers.values()) { try { sw.close(); } catch { /* ignore */ } }
+    reg.sidWatchers.clear();
+  }
+
+  // wire-v2: session appends land at IM_<id>/sessions/<sid>/journal.jsonl —
+  // two levels below the platform dir, invisible to its non-recursive watch.
+  // Per-sid watchers see journal appends (direct children of the sid dir);
+  // the sessions/-level watcher sees new sid dirs appear.
+  function _watchSid(platformId, reg, sid) {
+    if (reg.sidWatchers.has(sid)) return;
+    const sidDir = join(reg.dir, 'sessions', sid);
+    let sw;
+    try {
+      sw = _watch(sidDir, (_eventType, filename) => {
+        if (_relevant(filename)) _schedule(platformId);
+      });
+    } catch { return; }
+    if (sw && typeof sw.on === 'function') {
+      sw.on('error', () => { try { sw.close(); } catch { /* ignore */ } reg.sidWatchers.delete(sid); });
+    }
+    reg.sidWatchers.set(sid, sw);
+  }
+
+  function _ensureSessionsWatch(platformId, reg) {
+    const sessionsDir = join(reg.dir, 'sessions');
+    if (!_exists(sessionsDir)) return; // re-tried on the next platform-dir event
+    if (!reg.sessionsW) {
+      let sw;
+      try {
+        sw = _watch(sessionsDir, (_eventType, filename) => {
+          // New session dir → a fresh conversation exists; watch it and refresh.
+          if (filename) _watchSid(platformId, reg, String(filename));
+          _schedule(platformId);
+        });
+      } catch { return; }
+      if (sw && typeof sw.on === 'function') {
+        sw.on('error', () => { try { sw.close(); } catch { /* ignore */ } reg.sessionsW = null; });
+      }
+      reg.sessionsW = sw;
+    }
+    for (const sid of _readdir(sessionsDir)) _watchSid(platformId, reg, sid);
+  }
+
   function ensure(platformId) {
     if (_disposed || !platformId) return;
     if (!PLATFORM_ID_RE.test(platformId)) return; // 纵深防御：非白名单字符不放行（防 `IM_${id}` 路径穿越）
@@ -62,29 +111,40 @@ export function createImLogWatcher({ getLogDir, onChange, debounceMs = DEFAULT_D
       // 幂等仅当「目录路径未变且仍存在」时成立；否则关旧重建：
       //  - reg.dir !== dir：LOG_DIR 运行时切换（切项目），旧 watcher 还盯着旧目录，新目录无人监听；
       //  - !exists(dir)：目录被删（某些平台 fs.watch 删目录不报 error，留下永不恢复的幽灵监听）。
-      if (reg.dir === dir && _exists(dir)) return;
-      try { reg.w.close(); } catch { /* ignore */ }
+      if (reg.dir === dir && _exists(dir)) {
+        _ensureSessionsWatch(platformId, reg); // sessions/ may have appeared since
+        return;
+      }
+      _closeReg(reg);
       watchers.delete(platformId);
     }
     _mkdir(dir);
     let w;
+    const newReg = { w: null, dir, sessionsW: null, sidWatchers: new Map() };
     try {
       w = _watch(dir, (_eventType, filename) => {
+        // v2: 'sessions' appearing (or any event) is the moment to arm the
+        // deeper watchers; legacy v1 .jsonl writes keep firing directly.
+        if (String(filename || '') === 'sessions' || !filename) {
+          _ensureSessionsWatch(platformId, newReg);
+        }
         if (_relevant(filename)) _schedule(platformId);
       });
     } catch { return; }
     // watcher 出错（目录被删等）→ 关闭并撤销登记，下次 ensure 可重建。
     if (w && typeof w.on === 'function') {
-      w.on('error', () => { try { w.close(); } catch { /* ignore */ } watchers.delete(platformId); });
+      w.on('error', () => { _closeReg(newReg); watchers.delete(platformId); });
     }
-    watchers.set(platformId, { w, dir });
+    newReg.w = w;
+    watchers.set(platformId, newReg);
+    _ensureSessionsWatch(platformId, newReg);
   }
 
   function dispose() {
     _disposed = true;
     for (const t of timers.values()) clearTimeout(t);
     timers.clear();
-    for (const reg of watchers.values()) { try { reg.w.close(); } catch { /* ignore */ } }
+    for (const reg of watchers.values()) _closeReg(reg);
     watchers.clear();
   }
 

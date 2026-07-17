@@ -28,8 +28,10 @@ after(() => {
 
 describe('getBaseUrlHost：非法 ANTHROPIC_BASE_URL 安全降级', () => {
   it('模块加载不因非法 base url 抛出（catch → CUSTOM_API_HOST=null）', () => {
-    // 能成功 import 且 LOG_FILE 初始化即证明 getBaseUrlHost 的 catch 吞掉了 URL 解析异常。
+    // 能成功 import 且 v2 writer 就绪即证明 getBaseUrlHost 的 catch 吞掉了 URL 解析异常。
+    // 1.7.0：v1 单文件日志已下线，LOG_FILE 恒为 ''（deprecated 占位导出）。
     assert.ok(mod, 'interceptor 模块应正常加载');
-    assert.ok(mod.LOG_FILE, 'LOG_FILE 应正常初始化（非法 base url 不阻断初始化）');
+    assert.equal(mod.LOG_FILE, '', '1.7.0 起 LOG_FILE 恒为空串（v1 写路径已退役）');
+    assert.ok(mod._v2Writer && mod._v2Writer.enabled, 'v2 writer 应正常初始化（非法 base url 不阻断初始化）');
   });
 });

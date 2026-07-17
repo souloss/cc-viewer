@@ -162,6 +162,9 @@ export default function ImPlatformSettings({ descriptor }) {
         try { const e = await r.json(); detail = e.detail || e.error || ''; } catch { detail = `HTTP ${r.status}`; }
         return { ok: false, detail };
       }
+      // Notify the header status chips: a platform that was completely unconfigured (and therefore
+      // not polling) may now be configured/enabled, so its chip must re-probe and re-arm its poll.
+      try { window.dispatchEvent(new CustomEvent('ccv:im-config-changed', { detail: { id: descriptor.id } })); } catch { /* no-op */ }
       return { ok: true };
     } catch {
       return { ok: false, detail: '' };

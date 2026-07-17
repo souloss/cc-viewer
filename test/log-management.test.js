@@ -1,9 +1,13 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, utimesSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { validateLogPath, listLocalLogs, readLocalLog, deleteLogFiles, mergeLogFiles } from '../server/lib/log-management.js';
+import {
+  validateLogPath, readLocalLog, deleteLogFiles, isLogFileName, parseLogTs, listLocalLogs, LIVE_SESSION_MTIME_MS,
+} from '../server/lib/log-management.js';
 
 let tmpDir;
 
@@ -16,6 +20,36 @@ function writeLog(dir, project, filename, entries) {
   mkdirSync(projectDir, { recursive: true });
   writeFileSync(join(projectDir, filename), entries.join('\n---\n') + '\n---\n');
 }
+
+/** Minimal hand-written v2 session dir (meta + journal + main conversation). */
+function makeV2Session(dir, project, sid, { pid = 1, startTs = '2026-01-01T12:00:00.000Z' } = {}) {
+  const sessionDir = join(dir, project, 'sessions', sid);
+  mkdirSync(join(sessionDir, 'conversations', 'main'), { recursive: true });
+  writeFileSync(join(sessionDir, 'meta.json'), JSON.stringify({ wireFormat: 2, sessionId: sid, pid, startTs }));
+  writeFileSync(join(sessionDir, 'journal.jsonl'), [
+    JSON.stringify({ ph: 'meta', wireFormat: 2 }),
+    JSON.stringify({ ph: 'req', seq: 1, rid: 'r1', ts: startTs, kind: 'main', conv: 'main', epoch: 0, url: 'https://api.anthropic.com/v1/messages', method: 'POST', model: 'm', msgFrom: 0, msgTo: 1, evt: 'snapshot' }),
+    JSON.stringify({ ph: 'done', seq: 1, rid: 'r1', ts: startTs, status: 'ok' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(sessionDir, 'conversations', 'main', 'e0.jsonl'),
+    JSON.stringify({ seq: 1, rid: 'r1', t: 'snapshot', msgs: [{ role: 'user', content: [{ type: 'text', text: 'first prompt' }] }] }) + '\n');
+  return sessionDir;
+}
+
+/** Age a session's journal so the mtime liveness guard sees it as stale. */
+function ageJournal(sessionDir, ageMs = LIVE_SESSION_MTIME_MS + 60_000) {
+  const old = (Date.now() - ageMs) / 1000;
+  utimesSync(join(sessionDir, 'journal.jsonl'), old, old);
+}
+
+/** The YYYYMMDD stamp deleteLogFiles derives from its `now` option. */
+function stampOf(nowMs) {
+  const d = new Date(nowMs);
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// A processKill stub whose target pid is always gone (dead-owner default for tests).
+const pidDead = () => { const e = new Error('kill ESRCH'); e.code = 'ESRCH'; throw e; };
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ccv-logmgmt-'));
@@ -37,74 +71,59 @@ describe('validateLogPath', () => {
   });
 });
 
-describe('listLocalLogs', () => {
-  it('returns empty grouped for missing dir', async () => {
-    const result = await listLocalLogs(join(tmpDir, 'nonexistent'), 'proj');
-    assert.equal(result._currentProject, 'proj');
-  });
-
-  it('lists files grouped by project, sorted reverse', async () => {
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
-    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [makeEntry('t2', 'u2')]);
-    const result = await listLocalLogs(tmpDir, 'proj');
-    assert.ok(result.proj);
-    assert.equal(result.proj.length, 2);
-    assert.ok(result.proj[0].timestamp > result.proj[1].timestamp);
-  });
-
-  it('skips empty files', async () => {
-    const projectDir = join(tmpDir, 'proj');
-    mkdirSync(projectDir, { recursive: true });
-    writeFileSync(join(projectDir, 'proj_20260601_100000.jsonl'), '');
-    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [makeEntry('t2', 'u2')]);
-    const result = await listLocalLogs(tmpDir, 'proj');
-    assert.equal(result.proj.length, 1);
+describe('isLogFileName / parseLogTs', () => {
+  it('never accepts legacy .jsonl.zip archives (zip support removed 2026-07-14)', () => {
+    assert.equal(isLogFileName('proj_20260601_100000.jsonl.zip'), false);
+    assert.equal(parseLogTs('proj_20260601_100000.jsonl.zip'), '');
+    assert.equal(isLogFileName('proj_20260601_100000.jsonl'), true);
+    assert.equal(parseLogTs('proj_20260601_100000.jsonl'), '20260601_100000');
+    assert.equal(parseLogTs('123__proj_20260601_100000.jsonl'), '20260601_100000');
   });
 });
 
-describe('listLocalLogs instance isolation (--pid)', () => {
-  const untagged = 'proj_20260601_100000.jsonl';        // 无标签(旧)
-  const tagged = '123__proj_20260602_100000.jsonl';     // pid=123(新)
-
-  function seedMixed() {
-    writeLog(tmpDir, 'proj', untagged, [makeEntry('t1', 'u1')]);
-    writeLog(tmpDir, 'proj', tagged, [makeEntry('t2', 'u2')]);
-  }
-
-  it('default (no instanceId) lists only untagged logs, excludes <pid>__ files', async () => {
-    seedMixed();
-    const result = await listLocalLogs(tmpDir, 'proj');
-    assert.equal(result.proj.length, 1);
-    assert.ok(result.proj[0].file.endsWith(untagged));
-    assert.equal(result.proj[0].instanceId, null);
+describe('listLocalLogs (1.7.0 v1 view)', () => {
+  it('lists every timestamped v1 file, including legacy pid-prefixed names, newest first', async () => {
+    writeLog(tmpDir, 'proj', 'proj_20260601_120000.jsonl', [makeEntry('t1', 'u1')]);
+    writeLog(tmpDir, 'proj', '999__proj_20260702_090000.jsonl', [makeEntry('t2', 'u2')]);
+    const out = await listLocalLogs(tmpDir, 'proj');
+    assert.equal(out._currentProject, 'proj');
+    assert.equal(out.proj.length, 2, 'legacy pid-prefixed files are listed too (instance concept gone)');
+    assert.equal(out.proj[0].file, 'proj/999__proj_20260702_090000.jsonl', 'sorted by timestamp desc');
+    assert.equal(out.proj[0].timestamp, '20260702_090000');
+    assert.ok(out.proj.every((x) => typeof x.size === 'number' && x.size > 0));
+    assert.ok(out.proj.every((x) => !('instanceId' in x)), 'no instanceId field emitted');
   });
 
-  it('instanceId scopes the list to that pid only', async () => {
-    seedMixed();
-    const result = await listLocalLogs(tmpDir, 'proj', { instanceId: '123' });
-    assert.equal(result.proj.length, 1);
-    assert.ok(result.proj[0].file.endsWith(tagged));
-    assert.equal(result.proj[0].instanceId, '123');
+  it('excludes _temp / non-timestamped / empty files', async () => {
+    writeLog(tmpDir, 'proj', 'proj_20260601_120000.jsonl', [makeEntry('t1', 'u1')]);
+    writeLog(tmpDir, 'proj', 'proj_20260601_130000_temp.jsonl', [makeEntry('t', 'u')]);
+    writeFileSync(join(tmpDir, 'proj', 'notes.jsonl'), '{}');           // no timestamp
+    writeFileSync(join(tmpDir, 'proj', 'proj_20260601_140000.jsonl'), ''); // empty
+    const out = await listLocalLogs(tmpDir, 'proj');
+    assert.deepEqual(out.proj.map((x) => x.file), ['proj/proj_20260601_120000.jsonl']);
   });
 
-  it('showAll returns every instance, newest-by-timestamp first (sort-bug fix)', async () => {
-    seedMixed();
-    const result = await listLocalLogs(tmpDir, 'proj', { showAll: true });
-    assert.equal(result.proj.length, 2);
-    // 修复前：'123__' 因 '1' < 'p' 被排到列表最底；修复后按时间戳，最新的 pid 日志排最前。
-    assert.ok(result.proj[0].file.endsWith(tagged), 'newest (pid-tagged) is first, not buried');
-    assert.equal(result.proj[0].instanceId, '123');
-    assert.equal(result.proj[1].instanceId, null);
+  it('takes turns/preview from a pre-1.7 stats file; corrupt stats are tolerated', async () => {
+    writeLog(tmpDir, 'proj', 'proj_20260601_120000.jsonl', [makeEntry('t1', 'u1')]);
+    writeFileSync(join(tmpDir, 'proj', 'proj.json'), JSON.stringify({
+      files: { 'proj_20260601_120000.jsonl': { summary: { sessionCount: 3 }, preview: ['hello'] } },
+    }));
+    const withStats = await listLocalLogs(tmpDir, 'proj');
+    assert.equal(withStats.proj[0].turns, 3);
+    assert.deepEqual(withStats.proj[0].preview, ['hello']);
+
+    writeFileSync(join(tmpDir, 'proj', 'proj.json'), '{corrupt');
+    const corrupt = await listLocalLogs(tmpDir, 'proj');
+    assert.equal(corrupt.proj[0].turns, 0, 'stats are cosmetic — corrupt file degrades gracefully');
+    assert.deepEqual(corrupt.proj[0].preview, []);
   });
 
-  it('parses pid correctly when the project name itself contains underscores', async () => {
-    writeLog(tmpDir, 'my_proj', 'alpha__my_proj_20260601_100000.jsonl', [makeEntry('t', 'u')]);
-    const scoped = await listLocalLogs(tmpDir, 'my_proj', { instanceId: 'alpha' });
-    assert.equal(scoped['my_proj'].length, 1);
-    assert.equal(scoped['my_proj'][0].instanceId, 'alpha');
-    // 默认实例看不到 alpha 的日志
-    const def = await listLocalLogs(tmpDir, 'my_proj');
-    assert.equal(def['my_proj'], undefined);
+  it('missing logDir → only _currentProject; sessions/ dirs are never listed here', async () => {
+    const missing = await listLocalLogs(join(tmpDir, 'nope'), 'x');
+    assert.deepEqual(missing, { _currentProject: 'x' });
+    makeV2Session(tmpDir, 'proj', 'aaaa1111-2222-4333-8444-bbbb5555cccc');
+    const out = await listLocalLogs(tmpDir, 'proj');
+    assert.ok(!out.proj, 'v2 session dirs contribute no v1 rows');
   });
 });
 
@@ -125,137 +144,140 @@ describe('readLocalLog', () => {
   });
 });
 
-describe('deleteLogFiles', () => {
-  it('deletes valid files and returns ok', () => {
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
-    const results = deleteLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl']);
+// ─────────────────── deleteLogFiles (soft delete, 1.7.0) ───────────────────
+// Nothing is ever unlinked: v2 session dirs are renamed into the project's
+// sessions-removed-<YYYYMMDD>/ recycle dir, legacy .jsonl into removed-<date>/.
+describe('deleteLogFiles v2 soft delete', () => {
+  const SID = 'aaaa1111-2222-4333-8444-bbbb55550001';
+  // Freeze "now" so the recycle-dir date stamp is deterministic in assertions.
+  const NOW = Date.now();
+  const now = () => NOW;
+
+  it('moves the session dir into sessions-removed-<date>/, content intact', () => {
+    const sessionDir = makeV2Session(tmpDir, 'proj', SID);
+    ageJournal(sessionDir);
+    const journalBefore = readFileSync(join(sessionDir, 'journal.jsonl'), 'utf-8');
+
+    const results = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], { now, processKill: pidDead });
     assert.equal(results[0].ok, true);
+    const expected = join(tmpDir, 'proj', `sessions-removed-${stampOf(NOW)}`, SID);
+    assert.equal(results[0].movedTo, expected);
+    // Original location gone, nothing unlinked: full tree moved intact.
+    assert.equal(existsSync(sessionDir), false);
+    assert.equal(readFileSync(join(expected, 'journal.jsonl'), 'utf-8'), journalBefore);
+    assert.equal(existsSync(join(expected, 'meta.json')), true);
+    assert.equal(existsSync(join(expected, 'conversations', 'main', 'e0.jsonl')), true);
+    // sessions/ itself survives, just emptied of this sid.
+    assert.deepEqual(readdirSync(join(tmpDir, 'proj', 'sessions')), []);
+  });
+
+  it('suffixes the target on recycle-dir collision instead of overwriting', () => {
+    const first = makeV2Session(tmpDir, 'proj', SID);
+    ageJournal(first);
+    const r1 = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], { now, processKill: pidDead });
+    assert.equal(r1[0].ok, true);
+    // Same sid comes back (restore + re-delete scenario) — must not clobber.
+    const second = makeV2Session(tmpDir, 'proj', SID);
+    ageJournal(second);
+    const r2 = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], { now, processKill: pidDead });
+    assert.equal(r2[0].ok, true);
+    assert.notEqual(r2[0].movedTo, r1[0].movedTo);
+    assert.equal(r2[0].movedTo, `${r1[0].movedTo}-${NOW}`);
+    assert.equal(existsSync(r1[0].movedTo), true, 'first recycle entry untouched');
+    assert.equal(existsSync(r2[0].movedTo), true);
+  });
+
+  it('refuses the caller\'s own live session (liveSessionDir match)', () => {
+    const sessionDir = makeV2Session(tmpDir, 'proj', SID);
+    ageJournal(sessionDir); // stale mtime + dead pid: only the liveSessionDir guard fires
+    const results = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], {
+      now, processKill: pidDead, liveSessionDir: sessionDir,
+    });
+    assert.equal(results[0].ok, undefined);
+    assert.match(results[0].error, /live/i);
+    assert.equal(existsSync(sessionDir), true, 'live session must stay in place');
+  });
+
+  it('refuses when meta.pid belongs to a running process', () => {
+    const sessionDir = makeV2Session(tmpDir, 'proj', SID, { pid: 424242 });
+    ageJournal(sessionDir); // stale mtime: only the pid guard fires
+    const seen = [];
+    const results = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], {
+      now, processKill: (pid) => { seen.push(pid); /* no throw = alive */ },
+    });
+    assert.deepEqual(seen, [424242], 'liveness probe hits meta.pid');
+    assert.match(results[0].error, /live/i);
+    assert.equal(existsSync(sessionDir), true);
+  });
+
+  it('refuses when the journal mtime is fresh (< LIVE_SESSION_MTIME_MS)', () => {
+    const sessionDir = makeV2Session(tmpDir, 'proj', SID);
+    // Journal was just written; dead pid, no liveSessionDir — mtime guard alone fires.
+    const results = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], { now: Date.now, processKill: pidDead });
+    assert.match(results[0].error, /live/i);
+    assert.equal(existsSync(sessionDir), true);
+  });
+
+  it('skips the pid probe for our own pid (own crashed-and-restarted session is deletable)', () => {
+    const sessionDir = makeV2Session(tmpDir, 'proj', SID, { pid: process.pid });
+    ageJournal(sessionDir);
+    // processKill would report "alive" — but it must never be consulted for process.pid.
+    const results = deleteLogFiles(tmpDir, [`v2:proj/${SID}`], { now, processKill: () => {} });
+    assert.equal(results[0].ok, true);
+  });
+
+  it('reports Not found for a missing session and rejects malformed v2 refs', () => {
+    const results = deleteLogFiles(tmpDir, [
+      `v2:proj/${SID}`,            // well-formed but nonexistent
+      'v2:../evil/x',              // traversal — never parses as v2, fails legacy name check too
+      'v2:proj/..',                // dot component rejected by sanitizePathComponent
+    ], { now, processKill: pidDead });
+    assert.equal(results[0].error, 'Not found');
+    assert.ok(results[1].error);
+    assert.ok(results[2].error);
+    assert.ok(results.every((r) => r.ok === undefined));
+  });
+});
+
+describe('deleteLogFiles legacy .jsonl soft delete', () => {
+  const NOW = Date.now();
+  const now = () => NOW;
+
+  it('moves the file into removed-<date>/ next to it, content intact', () => {
+    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
+    const original = join(tmpDir, 'proj', 'proj_20260601_100000.jsonl');
+    const contentBefore = readFileSync(original, 'utf-8');
+
+    const results = deleteLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl'], { now });
+    assert.equal(results[0].ok, true);
+    // movedTo is realpath-based (dirname of the resolved file) — compare the suffix,
+    // macOS resolves /var → /private/var.
+    const expected = results[0].movedTo;
+    assert.ok(expected.endsWith(join('proj', `removed-${stampOf(NOW)}`, 'proj_20260601_100000.jsonl')),
+      `unexpected movedTo: ${expected}`);
+    assert.equal(existsSync(original), false);
+    assert.equal(readFileSync(expected, 'utf-8'), contentBefore, 'nothing unlinked, bytes intact');
+  });
+
+  it('suffixes on collision inside removed-<date>/', () => {
+    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
+    const r1 = deleteLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl'], { now });
+    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('t2', 'u2')]);
+    const r2 = deleteLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl'], { now });
+    assert.equal(r2[0].ok, true);
+    assert.notEqual(r2[0].movedTo, r1[0].movedTo);
+    assert.ok(r2[0].movedTo.endsWith(`-${NOW}.jsonl`));
+    assert.equal(existsSync(r1[0].movedTo), true);
+    assert.equal(existsSync(r2[0].movedTo), true);
   });
 
   it('rejects path traversal', () => {
     const results = deleteLogFiles(tmpDir, ['../evil.jsonl']);
-    assert.ok(results[0].error);
+    assert.equal(results[0].error, 'Invalid file name');
   });
 
   it('rejects non-log filenames', () => {
     const results = deleteLogFiles(tmpDir, ['proj/config.json']);
-    assert.ok(results[0].error);
-  });
-});
-
-describe('mergeLogFiles', () => {
-  it('merges two files into the first, deletes the second', async () => {
-    const e1 = makeEntry('2026-06-01T00:00:00Z', 'http://api/v1/messages');
-    const e2 = makeEntry('2026-06-01T00:00:01Z', 'http://api/v1/messages');
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [e1]);
-    writeLog(tmpDir, 'proj', 'proj_20260601_110000.jsonl', [e2]);
-    const target = await mergeLogFiles(tmpDir, [
-      'proj/proj_20260601_100000.jsonl',
-      'proj/proj_20260601_110000.jsonl',
-    ]);
-    assert.equal(target, 'proj/proj_20260601_100000.jsonl');
-    const merged = await readLocalLog(tmpDir, target);
-    assert.equal(merged.length, 2);
-  });
-
-  it('rejects fewer than 2 files', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/a.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects cross-project merge', async () => {
-    writeLog(tmpDir, 'a', 'a_20260601_100000.jsonl', [makeEntry('t1', 'u1')]);
-    writeLog(tmpDir, 'b', 'b_20260601_100000.jsonl', [makeEntry('t2', 'u2')]);
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['a/a_20260601_100000.jsonl', 'b/b_20260601_100000.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects archived (.jsonl.zip) files', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/a.jsonl.zip', 'proj/b.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-
-  it('rejects path traversal in file paths', async () => {
-    await assert.rejects(
-      () => mergeLogFiles(tmpDir, ['proj/../evil.jsonl', 'proj/b.jsonl']),
-      (e) => e.code === 'INVALID_INPUT'
-    );
-  });
-});
-
-// ─────────────────────────── findPreviousSegment ───────────────────────────
-describe('findPreviousSegment', () => {
-  let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-prevseg-')); });
-  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
-
-  const touch = (name, content = '{"timestamp":"t","url":"u"}\n---\n') => {
-    writeFileSync(join(tmpDir, name), content);
-    return join(tmpDir, name);
-  };
-
-  it('returns the newest strictly-older owned segment', async () => {
-    const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    touch('proj_20260601_100000.jsonl');
-    const expected = touch('proj_20260602_100000.jsonl');
-    const current = touch('proj_20260603_100000.jsonl');
-    assert.equal(findPreviousSegment(current, 'proj'), expected);
-  });
-
-  it('returns null when there is no older segment or for a lone file', async () => {
-    const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    const current = touch('proj_20260601_100000.jsonl');
-    assert.equal(findPreviousSegment(current, 'proj'), null);
-  });
-
-  it('respects --pid instance ownership and never crosses instances', async () => {
-    const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    touch('proj_20260601_100000.jsonl');            // untagged — not owned by pid instance
-    const owned = touch('777__proj_20260602_100000.jsonl');
-    const current = touch('777__proj_20260603_100000.jsonl');
-    assert.equal(findPreviousSegment(current, 'proj', '777'), owned);
-    // Untagged instance must not see pid-tagged files either.
-    const untaggedCurrent = touch('proj_20260604_100000.jsonl');
-    assert.equal(findPreviousSegment(untaggedCurrent, 'proj', null), join(tmpDir, 'proj_20260601_100000.jsonl'));
-  });
-
-  it('includes archived .jsonl.zip predecessors and ignores foreign files', async () => {
-    const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    const zipped = touch('proj_20260601_100000.jsonl.zip', 'zip-bytes');
-    touch('notes.txt', 'hello');
-    touch('otherproj_20260602_100000.jsonl');
-    const current = touch('proj_20260603_100000.jsonl');
-    assert.equal(findPreviousSegment(current, 'proj'), zipped);
-  });
-
-  it('is null-safe on garbage input', async () => {
-    const { findPreviousSegment } = await import('../server/lib/log-management.js');
-    assert.equal(findPreviousSegment('', 'proj'), null);
-    assert.equal(findPreviousSegment(join(tmpDir, 'proj_nots.jsonl'), 'proj'), null);
-    assert.equal(findPreviousSegment(join(tmpDir, 'proj_20260601_100000.jsonl'), ''), null);
-  });
-});
-
-// ───────────────────── mergeLogFiles drops rotation sentinels ─────────────────────
-describe('mergeLogFiles rotation-sentinel strip', () => {
-  let tmpDir;
-  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-mergesent-')); });
-  afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
-
-  it('merged output contains the real entries but no ccvRotationContext frames', async () => {
-    const sentinel = JSON.stringify({ ccvRotationContext: 1, url: 'ccv://rotation-context', from: 'proj_20260601_100000.jsonl', teammateNames: [['p', 'alice']], timestamp: '2026-06-02T00:00:00.000Z' });
-    writeLog(tmpDir, 'proj', 'proj_20260601_100000.jsonl', [makeEntry('2026-06-01T00:00:01Z', '/v1/messages')]);
-    writeLog(tmpDir, 'proj', 'proj_20260602_100000.jsonl', [sentinel, makeEntry('2026-06-02T00:00:01Z', '/v1/messages')]);
-    await mergeLogFiles(tmpDir, ['proj/proj_20260601_100000.jsonl', 'proj/proj_20260602_100000.jsonl']);
-    const merged = readFileSync(join(tmpDir, 'proj', 'proj_20260601_100000.jsonl'), 'utf-8');
-    assert.ok(!merged.includes('ccvRotationContext'));
-    assert.ok(merged.includes('2026-06-01T00:00:01Z'));
-    assert.ok(merged.includes('2026-06-02T00:00:01Z'));
+    assert.equal(results[0].error, 'Invalid file name');
   });
 });

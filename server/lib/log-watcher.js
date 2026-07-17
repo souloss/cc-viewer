@@ -1,35 +1,23 @@
-import { readFileSync, existsSync, watch, watchFile, unwatchFile, statSync } from 'node:fs';
-import { open as fsOpen, stat as fsStat } from 'node:fs/promises';
-import { dirname, basename } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
 import { isMainAgentEntry, extractCachedContent } from './kv-cache-analyzer.js';
 import { buildContextWindowEvent, getContextSizeForModel } from './context-watcher.js';
-import { reconstructEntries, createIncrementalReconstructor } from './delta-reconstructor.js';
-import { countLogEntries, streamReconstructedEntriesAsync } from './log-stream.js';
+import { reconstructEntries } from './delta-reconstructor.js';
 import { enrichEntry } from './enrich-plan-input.js';
 import { enrichEntry as enrichWorkflowEntry } from './enrich-workflow.js';
-import { resolveJsonlPath } from './jsonl-archive.js';
+import { sseWrite } from './wire-compress.js';
 
-// 跟踪所有被 watch 的日志文件。value: fileState 对象（外部只用 .has()/.keys()）
-const watchedFiles = new Map();
-
-// 目录级 fs.watch 实例注册表（事件驱动，替代 per-file 轮询）
-const _dirWatchers = new Map();
-
-// Windows 单次 appendFileSync 触发 2+ 事件，防抖合并
-const FSWATCH_DEBOUNCE_MS = 80;
-
-// 安全网慢轮询：fs.watch 可能漏事件（buffer overflow 等），冷 fallback 兜底
-const SAFETY_POLL_MS = 5000;
-
-const FORCE_POLL = process.env.CCV_FORCE_POLL === '1';
-
+// 1.7.0: the v1 log-file tail (fs.watch + byte cursors + rotation follow)
+// retired with the v1 write path — the live channel is server/lib/v2/
+// live-feed.js. This module keeps what both eras share: the SSE client
+// plumbing (sendToClients & friends), the per-entry broadcast pipeline
+// (processWatchedEntry, used by the live feed), and readLogFile — the legacy
+// v1 reader (no production caller; kept for tests and ad-hoc legacy reads).
 /**
  * Read and parse a JSONL log file.
  * @param {string} logFile - absolute path to the log file
  * @returns {Array} parsed and deduplicated entries
  */
 export function readLogFile(logFile) {
-  logFile = resolveJsonlPath(logFile);
   if (!existsSync(logFile)) {
     return [];
   }
@@ -73,7 +61,11 @@ function _safeSseWrite(clients, client, payload) {
   }
   let ok;
   try {
-    ok = client.write(payload);
+    // sseWrite routes through the client's negotiated Content-Encoding
+    // (wire-compress.js) — a bare client.write here would corrupt compressed
+    // streams. The drain listener below stays on the res: the encoder is
+    // piped into it, so socket drain still propagates.
+    ok = sseWrite(client, payload);
   } catch {
     _removeClient(clients, client);
     return false;
@@ -81,9 +73,18 @@ function _safeSseWrite(clients, client, payload) {
   if (!ok) {
     if (!client._sseBackpressureSince) {
       client._sseBackpressureSince = Date.now();
-      client.once('drain', () => { client._sseBackpressureSince = 0; });
+      // On compressed clients the false write() came from the ENCODER (its
+      // input buffer), whose own 'drain' fires when compression catches up —
+      // the res may never emit 'drain' at all (compressed output is 20-80x
+      // smaller than what the socket can absorb). Arming the reset on the
+      // wrong stream would let the timeout below kill healthy clients.
+      const pressured = client._wireEnc || client;
+      pressured.once('drain', () => { client._sseBackpressureSince = 0; });
     } else if (Date.now() - client._sseBackpressureSince > SSE_BACKPRESSURE_TIMEOUT_MS) {
       _removeClient(clients, client);
+      // Destroy the encoder first: end() alone leaves the 16MB brotli window
+      // alive until TCP teardown of the already-stuck socket.
+      try { if (client._wireEnc) client._wireEnc.destroy(); } catch {}
       try { client.end(); } catch {}
       return false;
     }
@@ -91,7 +92,12 @@ function _safeSseWrite(clients, client, payload) {
   return true;
 }
 
+// Zero-client short-circuit (all four senders): the payload template is built
+// BEFORE the client loop, so with no SSE consumer connected every broadcast
+// still paid a full JSON.stringify — for reconstructed entries carrying
+// cumulative messages that is a giant allocation for nothing.
 export function sendToClients(clients, entry) {
+  if (clients.length === 0) return;
   const payload = `data: ${JSON.stringify(entry)}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
@@ -99,270 +105,60 @@ export function sendToClients(clients, entry) {
 }
 
 export function sendEventToClients(clients, eventName, data) {
+  if (clients.length === 0) return;
   const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
   }
 }
 
+/** Like sendEventToClients but `json` is an ALREADY-serialized JSON string —
+ *  wire v3 forwards raw stored lines verbatim without a parse/stringify trip. */
+export function sendEventRawToClients(clients, eventName, json) {
+  if (clients.length === 0) return;
+  const payload = `event: ${eventName}\ndata: ${json}\n\n`;
+  for (let i = clients.length - 1; i >= 0; i--) {
+    _safeSseWrite(clients, clients[i], payload);
+  }
+}
+
 export function sendChunkToClients(clients, dataJson) {
+  if (clients.length === 0) return;
   const payload = `event: load_chunk\ndata: ${dataJson}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
   }
 }
 
-// --- 轮转切换（抽取公共逻辑） ---
-
-async function _switchToRotatedFile(logFile, currentLogFile, clients, opts) {
-  // Deliberately KEEP the old file watched: external-process teammates resolve
-  // the leader log once at boot and continue appending to the previous segment
-  // after rotation. Unwatching it would make their post-rotation entries
-  // invisible live; client dedup absorbs any replayed frames. watchedFiles is
-  // a multi-file Map, so watching both segments is supported.
-  const total = await countLogEntries(currentLogFile);
-  sendEventToClients(clients, 'load_start', { total, incremental: false });
-  await streamReconstructedEntriesAsync(currentLogFile, (segment) => {
-    sendChunkToClients(clients, JSON.stringify(segment));
-  });
-  sendEventToClients(clients, 'load_end', {});
-  watchLogFile({ ...opts, logFile: currentLogFile });
-}
-
-// --- 增量读 + 解析 + 广播（独立于触发机制） ---
-
-async function _readDelta(state) {
-  if (state._reading) return; // 防止并发调用（debounce + safetyTimer 可能重叠）
-  state._reading = true;
-  const { logFile, opts, reconstructor } = state;
-  const { clients, getClaudePid, runParallelHook, notifyStatsWorker, getLogFile } = opts;
-  try {
-    const st = await fsStat(logFile);
-    const currentSize = st.size;
-
-    if (currentSize < state.lastByteOffset) {
-      state.lastByteOffset = 0;
-      state.pendingTail = '';
-      reconstructor.reset();
-
-      const currentLogFile = getLogFile();
-      if (currentLogFile !== logFile && !watchedFiles.has(currentLogFile)) {
-        await _switchToRotatedFile(logFile, currentLogFile, clients, opts);
-        return;
-      }
-    }
-
-    if (currentSize <= state.lastByteOffset) return;
-
-    const bytesToRead = currentSize - state.lastByteOffset;
-    const buf = Buffer.alloc(bytesToRead);
-    const fh = await fsOpen(logFile, 'r');
-    try {
-      await fh.read(buf, 0, bytesToRead, state.lastByteOffset);
-    } finally {
-      await fh.close();
-    }
-    state.lastByteOffset = currentSize;
-
-    const raw = state.pendingTail + buf.toString('utf-8');
-    const parts = raw.split('\n---\n');
-    state.pendingTail = parts.pop() || '';
-
-    if (parts.length === 0 && state.pendingTail.trim()) {
-      try {
-        JSON.parse(state.pendingTail);
-        parts.push(state.pendingTail);
-        state.pendingTail = '';
-      } catch {}
-    }
-
-    const validParts = parts.filter(p => p.trim());
-    if (validParts.length > 0) {
-      validParts.forEach(entry => {
-        try {
-          const parsed = JSON.parse(entry);
-          if (!parsed.pid) parsed.pid = getClaudePid();
-          reconstructor.reconstruct(parsed);
-          try { enrichEntry(parsed); } catch {}
-          try { enrichWorkflowEntry(parsed); } catch {}
-          sendToClients(clients, parsed);
-          runParallelHook('onNewEntry', parsed).catch(() => {});
-          if (isMainAgentEntry(parsed) && !parsed.inProgress) {
-            const cached = extractCachedContent(parsed);
-            if (cached) sendEventToClients(clients, 'kv_cache_content', cached);
-            const usage = parsed.response?.body?.usage;
-            if (usage) {
-              const contextSize = getContextSizeForModel(parsed.body?.model);
-              const cwData = buildContextWindowEvent(usage, contextSize);
-              if (cwData) sendEventToClients(clients, 'context_window', cwData);
-            }
-          }
-        } catch {}
-      });
-      notifyStatsWorker(logFile);
-    }
-
-    const currentLogFile = getLogFile();
-    if (currentLogFile !== logFile && !watchedFiles.has(currentLogFile)) {
-      await _switchToRotatedFile(logFile, currentLogFile, clients, opts);
-    }
-  } catch {
-    // File not yet created or transient read error
-  } finally {
-    state._reading = false;
-  }
-}
-
-// --- 目录级 fs.watch 管理 ---
-
-function _getOrCreateDirWatcher(dir) {
-  if (_dirWatchers.has(dir)) return _dirWatchers.get(dir);
-
-  try {
-    const files = new Map();
-    const watcher = watch(dir, (eventType, filename) => {
-      if (!filename) {
-        for (const [, fileState] of files) {
-          _scheduleDebouncedRead(fileState);
-        }
-        return;
-      }
-      const fileState = files.get(filename);
-      if (fileState) _scheduleDebouncedRead(fileState);
-    });
-
-    watcher.on('error', () => {
-      for (const [, fileState] of files) {
-        _fallbackToPolling(fileState);
-      }
-      try { watcher.close(); } catch {}
-      _dirWatchers.delete(dir);
-    });
-
-    const entry = { watcher, files };
-    _dirWatchers.set(dir, entry);
-    return entry;
-  } catch {
-    return null;
-  }
-}
-
-function _scheduleDebouncedRead(fileState) {
-  if (fileState.debounceTimer) return;
-  fileState.debounceTimer = setTimeout(() => {
-    fileState.debounceTimer = null;
-    _readDelta(fileState);
-  }, FSWATCH_DEBOUNCE_MS);
-}
-
-// 测试注入缝(仿 updater fetchImpl 惯例):替换轮询分支的 watchFile 实现。
-// 真实 watchFile 的 stat 基线与 500ms 间隔在 CI 慢机上不可确定性驱动(基线竞态曾致
-// 25s 全程静默 flake),单测注入假实现手动触发回调即可零时序覆盖。生产恒为 node:fs 原版。
-let _watchFileImpl = watchFile;
-export function __setWatchFileImplForTests(fn) { _watchFileImpl = fn || watchFile; }
-
-function _fallbackToPolling(fileState) {
-  if (fileState.polling) return;
-  fileState.polling = true;
-  _watchFileImpl(fileState.logFile, { interval: 500 }, () => {
-    _readDelta(fileState);
-  });
-}
-
-function _unwatchSingleFile(logFile) {
-  const fileState = watchedFiles.get(logFile);
-  watchedFiles.delete(logFile);
-
-  if (!fileState) return;
-
-  if (fileState.debounceTimer) clearTimeout(fileState.debounceTimer);
-  if (fileState.safetyTimer) clearInterval(fileState.safetyTimer);
-
-  if (fileState.polling) {
-    try { unwatchFile(logFile); } catch {}
-    return;
-  }
-
-  const dir = dirname(logFile);
-  const filename = basename(logFile);
-  const dirEntry = _dirWatchers.get(dir);
-  if (dirEntry) {
-    dirEntry.files.delete(filename);
-    if (dirEntry.files.size === 0) {
-      try { dirEntry.watcher.close(); } catch {}
-      _dirWatchers.delete(dir);
+/**
+ * Per-entry broadcast pipeline — the single processing path every live entry
+ * takes on its way to the SSE clients, regardless of source (v1 file tail or
+ * the v2 live feed): pid stamping, server-side delta reconstruction, plan/
+ * workflow enrichment, client broadcast, plugin hook, kv-cache and
+ * context-window side events.
+ * @param {object} parsed - one parsed log entry (mutated in place)
+ * @param {{reconstructor: object, clients: Array, getClaudePid: Function,
+ *          runParallelHook: Function}} ctx
+ */
+export function processWatchedEntry(parsed, ctx) {
+  const { reconstructor, clients, getClaudePid, runParallelHook } = ctx;
+  if (!parsed.pid) parsed.pid = getClaudePid();
+  reconstructor.reconstruct(parsed);
+  try { enrichEntry(parsed); } catch {}
+  try { enrichWorkflowEntry(parsed); } catch {}
+  // Wire v3 (V3.S5): the flagged v2 live feed suppresses the full-entry
+  // broadcast — clients rebuild entries from native lines + rows. The kv/
+  // context side events below still fire (they are slim and file-agnostic).
+  if (!ctx.suppressEntryBroadcast) sendToClients(clients, parsed);
+  runParallelHook('onNewEntry', parsed).catch(() => {});
+  if (isMainAgentEntry(parsed) && !parsed.inProgress) {
+    const cached = extractCachedContent(parsed);
+    if (cached) sendEventToClients(clients, 'kv_cache_content', cached);
+    const usage = parsed.response?.body?.usage;
+    if (usage) {
+      const contextSize = getContextSizeForModel(parsed.body?.model);
+      const cwData = buildContextWindowEvent(usage, contextSize);
+      if (cwData) sendEventToClients(clients, 'context_window', cwData);
     }
   }
-}
-
-// --- 公开 API ---
-
-export function watchLogFile(opts) {
-  const { logFile } = opts;
-  if (watchedFiles.has(logFile)) return;
-
-  let lastByteOffset = 0;
-  const _reconstructor = createIncrementalReconstructor();
-  try {
-    if (existsSync(logFile)) {
-      lastByteOffset = statSync(logFile).size;
-    }
-  } catch {}
-
-  const fileState = {
-    logFile,
-    opts,
-    reconstructor: _reconstructor,
-    lastByteOffset,
-    pendingTail: '',
-    debounceTimer: null,
-    safetyTimer: null,
-    polling: false,
-  };
-
-  watchedFiles.set(logFile, fileState);
-
-  if (FORCE_POLL) {
-    _fallbackToPolling(fileState);
-    return;
-  }
-
-  const dir = dirname(logFile);
-  const filename = basename(logFile);
-  const dirEntry = _getOrCreateDirWatcher(dir);
-
-  if (!dirEntry) {
-    _fallbackToPolling(fileState);
-    return;
-  }
-
-  dirEntry.files.set(filename, fileState);
-
-  fileState.safetyTimer = setInterval(() => {
-    _readDelta(fileState);
-  }, SAFETY_POLL_MS);
-}
-
-export function unwatchLogFile(logFile) {
-  _unwatchSingleFile(logFile);
-}
-
-export function unwatchAll() {
-  for (const logFile of watchedFiles.keys()) {
-    _unwatchSingleFile(logFile);
-  }
-  for (const [, entry] of _dirWatchers) {
-    try { entry.watcher.close(); } catch {}
-  }
-  _dirWatchers.clear();
-  watchedFiles.clear();
-}
-
-export function startWatching(opts) {
-  const { clients, ...watchOpts } = opts;
-  watchLogFile({ ...watchOpts, clients });
-}
-
-export function getWatchedFiles() {
-  return watchedFiles;
 }

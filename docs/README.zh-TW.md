@@ -58,13 +58,25 @@ ccv -c --d             # == claude --continue --dangerously-skip-permissions
 
 cc-viewer 也提供了客戶端版本：[下載連結](https://github.com/weiesky/cc-viewer/releases)
 
+### 升級到 1.7.0（日誌格式 v2）
+
+自 1.7.0 起，日誌以「每工作階段目錄」格式（wire-format v2）儲存，不再使用單一 `.jsonl` 檔案——磁碟佔用約減少 90%。既有的 v1 `.jsonl` 檔案不會被修改或刪除；日誌對話框預設會列出 v2 工作階段，並提供一個小的「檢視舊版（v1）日誌」項目（只要舊檔案還存在便會顯示），點選後會開啟 v1 檢視，可在其中檢視、遷移或刪除它們。啟動時，若發現舊版日誌，cc-viewer 會提供一鍵遷移（在使用 `claude -c` 繼續舊對話時強烈建議遷移，因為這類對話的前半部分儲存在舊檔案中）。你也可以在終端機中遷移：
+
+```bash
+ccv convert <project>   # 遷移單個專案
+ccv convert --all       # 遷移所有專案
+ccv verify <v1-file>    # 對照轉換後的工作階段校驗某個 v1 檔案
+```
+
+某個工作階段未通過 golden 校驗時，會被暫存到 `sessions-quarantine/` 待檢查，而不會讓整次遷移失敗——其餘工作階段照常遷移。
+
 ### 日誌模式
 
 如果你仍習慣使用 claude 原生工具，或 VS Code 擴充功能，請使用此模式。
 
 此模式下啟動 `claude`
 
-會自動啟動一個日誌行程，將請求日誌自動記錄到 \~/.claude/cc-viewer/*yourproject*/date.jsonl
+會自動啟動一個日誌行程，將請求日誌自動記錄到 \~/.claude/cc-viewer/*yourproject*/sessions/ 下的每工作階段目錄（wire-format v2）
 
 啟動日誌模式：
 
@@ -140,7 +152,7 @@ ccv -h
 
 * **預設**分頁保留經典行為：它會將 `CC_SYSTEM.md`（覆蓋）或 `CC_APPEND_SYSTEM.md`（追加）寫入目前工作區，並在下次 ccv 啟動時以 `--system-prompt-file` / `--append-system-prompt-file` 注入。
 * **模型分頁**：點擊 **+ 新增模型**，輸入名稱（例如 `opus` 或 `Gemini3`），並選擇作用範圍——**全域**（`~/.claude/cc-viewer/system_prompt/`，套用於所有工作區）或**工作區**（`<project>/system_prompt/`）。每個分頁都有自己的追加/覆蓋開關和 Markdown 預覽。
-* 條目以大寫檔名儲存：`OPUS_SYSTEM.md`（覆蓋）或 `OPUS_APPEND_SYSTEM.md`（追加）。比對採模糊方式——以上次啟動所用模型 ID 的不區分大小寫子字串進行比對，因此無論版本為何，`opus` 都能比對到 `claude-opus-4-8[1m]`。工作區比對優先於全域比對；同一作用範圍內名稱最長者勝出；比對到的條目會在該次啟動中完全取代預設分頁的檔案。
+* 條目以大寫檔名儲存：`OPUS_SYSTEM.md`（覆蓋）或 `OPUS_APPEND_SYSTEM.md`（追加）。比對採模糊方式——以「目前生效設定」解析出的模型 ID 做不區分大小寫子字串比對（啟用的第三方 proxy profile 模型對應 > 啟動環境變數 `ANTHROPIC_MODEL`/`CLAUDE_MODEL` > `settings.json` 設定的 `model`；無任何設定訊號則不注入條目），因此無論版本為何，`opus` 都能比對到 `claude-opus-4-8[1m]`。已知限制：工作階段中途切換 proxy profile 需重新啟動 claude 工作階段才會重新比對；經額外參數透傳的 `--model` 不參與解析。工作區比對優先於全域比對；同一作用範圍內名稱最長者勝出；比對到的條目會在該次啟動中完全取代預設分頁的檔案。
 * 將分頁儲存為空白即可刪除該條目。工作階段中途切換模型會在下次重新啟動時生效。設定 `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` 可停用所有自動注入。你可以將 `<project>/system_prompt/` 提交到版本庫與團隊共享提示詞，也可以將其加入 `.gitignore` 保持私有。
 
 ### 日誌模式（檢視 claude code 完整對話）

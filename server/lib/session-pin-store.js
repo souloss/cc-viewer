@@ -1,9 +1,8 @@
-// Server-side "current session" pin store, per project (+ optional instance id).
+// Server-side "current session" pin store, per project.
 //
-// The "仅展示当前会话" view filter needs a single "current session pointer". It used to
+// The current-session view filter needs a single "current session pointer". It used to
 // live in the browser's localStorage (keyed by project name) — so two devices hitting the
-// SAME ccv process diverged. We move it server-side: one tiny JSON per project, optionally
-// suffixed by an instance id (`--pid`) so multiple ccv processes of one project can isolate.
+// SAME ccv process diverged. We move it server-side: one tiny JSON per project.
 //
 // `logDir` here is the PER-PROJECT directory (interceptor._logDir = LOG_DIR/<projectName>);
 // '' means no active project (workspace mode not yet launched) → read = null / write = no-op.
@@ -14,24 +13,16 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { renameSyncWithRetry } from './file-api.js';
 
-// Sanitize an instance id into a filesystem-safe token (same charset as projectName).
-// Returns '' for empty/falsy → caller treats it as the no-instance (shared) key.
-export function sanitizeInstanceId(instanceId) {
-  if (!instanceId || typeof instanceId !== 'string') return '';
-  return instanceId.replace(/[^a-zA-Z0-9_\-.]/g, '_');
-}
-
-/** Pin file path inside the project dir: `.session-pin.json` or `.session-pin.<id>.json`. */
-export function pinFilePath(logDir, instanceId) {
-  const id = sanitizeInstanceId(instanceId);
-  return join(logDir, id ? `.session-pin.${id}.json` : '.session-pin.json');
+/** Pin file path inside the project dir: `.session-pin.json`. */
+export function pinFilePath(logDir) {
+  return join(logDir, '.session-pin.json');
 }
 
 /** Read the pinned session id. No project / missing file / corrupt → null. */
-export function readPin(logDir, instanceId) {
+export function readPin(logDir) {
   if (!logDir) return null;
   try {
-    const file = pinFilePath(logDir, instanceId);
+    const file = pinFilePath(logDir);
     if (!existsSync(file)) return null;
     const obj = JSON.parse(readFileSync(file, 'utf-8'));
     const v = obj && typeof obj === 'object' ? obj.pinnedSessionId : null;
@@ -44,9 +35,9 @@ export function readPin(logDir, instanceId) {
  * A null/empty pinnedSessionId deletes the file (back to "show latest"). Atomic tmp+rename.
  * Returns true on success, false on no-project / write failure (view state is best-effort).
  */
-export function writePin(logDir, instanceId, pinnedSessionId) {
+export function writePin(logDir, pinnedSessionId) {
   if (!logDir) return false;
-  const file = pinFilePath(logDir, instanceId);
+  const file = pinFilePath(logDir);
   const id = (typeof pinnedSessionId === 'string' && pinnedSessionId) ? pinnedSessionId : null;
   try {
     if (id == null) {

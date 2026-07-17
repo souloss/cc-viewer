@@ -3,6 +3,7 @@ import { List, Tag, Empty, Tooltip } from 'antd';
 import { t } from '../../i18n';
 import { formatTokenCount, getModelShort } from '../../utils/helpers';
 import { classifyRequest, formatRequestTag } from '../../utils/requestType';
+import { listItemType } from '../../utils/v3Rows.js';
 import styles from './RequestList.module.css';
 
 class RequestList extends React.Component {
@@ -79,7 +80,8 @@ class RequestList extends React.Component {
 
             const model = getModelShort(req.body?.model);
             const nextReq = index + 1 < requests.length ? requests[index + 1] : null;
-            const { type: reqType, subType } = classifyRequest(req, nextReq);
+            // Wire v3 rows carry a server-computed typeTag; legacy entries classify client-side.
+            const { type: reqType, subType } = listItemType(req, nextReq, classifyRequest);
             const usage = req.response?.body?.usage;
             const inputTokens = usage ? (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) : null;
             const outputTokens = usage?.output_tokens || null;
@@ -131,7 +133,7 @@ class RequestList extends React.Component {
                       <div>token: output:{formatTokenCount(outputTokens) || 0}, input: {formatTokenCount(inputTokens) || 0}</div>
                       {(cacheRead > 0 || cacheCreate > 0) && (
                         <div>{(() => {
-                          const loss = this.props.cacheLossMap?.get(index);
+                          const loss = req._v3Row ? req._v3Row.cacheLoss : this.props.cacheLossMap?.get(index);
                           const reasonI18nMap = {
                             ttl: 'ui.cacheLoss.ttl',
                             system_change: 'ui.cacheLoss.systemChange',

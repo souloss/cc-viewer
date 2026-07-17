@@ -8,7 +8,7 @@ import { homedir, tmpdir } from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { bumpWorkspacesVersion } from '../lib/file-access-policy.js';
 import { validateImportDir } from '../lib/file-api.js';
-import { LOG_FILE, PROFILE_PATH, _projectName } from '../interceptor.js';
+import { PROFILE_PATH, _projectName, _logDir } from '../interceptor.js';
 import { LOG_DIR, getClaudeConfigDir } from '../../findcc.js';
 
 function upload(req, res, parsedUrl, isLocal, deps) {
@@ -844,7 +844,9 @@ function createDir(req, res, parsedUrl, isLocal, deps) {
 }
 
 function openLogDir(req, res) {
-  const dir = LOG_FILE ? dirname(LOG_FILE) : LOG_DIR;
+  // Project dir works for both formats (legacy v1 files and the v2 sessions/
+  // tree are siblings under it); LOG_DIR is the pre-workspace fallback.
+  const dir = _logDir || LOG_DIR;
   const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
   execFile(cmd, [dir], { windowsHide: true }, () => {});
   res.writeHead(200, { 'Content-Type': 'application/json' });

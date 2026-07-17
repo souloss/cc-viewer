@@ -53,13 +53,15 @@ function hasArg(args, ...names) {
  * @param {string[]} [existingArgs] 已有的 claude 参数(用于「手动优先」判断)
  * @param {Object} [env] 环境变量(默认 process.env)
  * @param {{ modelId?: string|null, globalModelDir?: string|null }} [opts]
- * @returns {{ args: string[], loaded: string[], model: string|null }}
- *          args: 待追加参数；loaded: 实际加载的文件(终端提示)；model: 命中的条目名(未命中为 null)
+ * @returns {{ args: string[], loaded: string[], model: string|null, suppressed?: 'env'|'manual-flag' }}
+ *          args: 待追加参数；loaded: 实际加载的文件(终端提示)；model: 命中的条目名(未命中为 null)；
+ *          suppressed: 注入被有意跳过的原因(env 开关 / 手动同义 flag 抑制了已命中的模型条目)——
+ *          调用方(pty-manager)据此不再打「no matching entry」误导性告警。
  */
 export function buildSystemPromptFileArgs(projectDir, existingArgs = [], env = process.env, opts = {}) {
   const out = { args: [], loaded: [], model: null };
   if (!projectDir) return out;
-  if (env?.[DISABLE_AUTO_SYSTEM_PROMPT_ENV] === '1') return out;
+  if (env?.[DISABLE_AUTO_SYSTEM_PROMPT_ENV] === '1') return { ...out, suppressed: 'env' };
 
   if (opts?.modelId) {
     const candidates = [{ dir: join(projectDir, MODEL_PROMPT_DIR), scope: 'workspace' }];
@@ -73,6 +75,8 @@ export function buildSystemPromptFileArgs(projectDir, existingArgs = [], env = p
         out.args.push(flagPair[1], match.path);
         out.loaded.push(`${match.scope === 'global' ? 'global ' : ''}${MODEL_PROMPT_DIR}/${match.fileName}`);
         out.model = match.name;
+      } else {
+        out.suppressed = 'manual-flag'; // 条目命中但用户手传了同义 flag：有意跳过，非「无条目」
       }
       return out; // 命中即返回：默认 sentinel 不再参与(含手动 flag 抑制注入的情况)。
     }
