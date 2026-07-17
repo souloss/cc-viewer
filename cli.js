@@ -15,6 +15,7 @@ import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath
 import { ensureHooks, removeAllManagedHooks } from './server/lib/ensure-hooks.js';
 import { injectCliJsAt, removeCliJsInjectionAt, INJECT_START as _INJECT_START, INJECT_END as _INJECT_END, buildInjectBlock as _buildInjectBlock } from './server/lib/cli-inject.js';
 import { normalizeBasePath } from './server/lib/base-path.js';
+import { mergeSettingsIntoArgs } from './server/lib/settings-merge.js';
 import { createHardenedCleanup, installWinKeypressFallback } from './server/lib/term-signals.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -272,11 +273,12 @@ async function runProxyCommand(args) {
     // 剥离 cc-viewer 的内部短路开关，避免泄漏给 claude 子进程
     delete env.CCV_SKIP_THINKING_DISPLAY;
 
-    const settingsJson = JSON.stringify({
+    const settingsObj = {
       env: {
         ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL
       }
-    });
+    };
+    let settingsJson = JSON.stringify(settingsObj);
 
     // 注入默认 --thinking-display summarized，仅对 claude 二进制（其他命令如 `ccv run -- sometool` 跳过）。
     // 若 claude 不识别该 flag（老版本/fork）会 unknown option 崩溃——由 pty-manager.js::spawnClaude 的
@@ -286,6 +288,19 @@ async function runProxyCommand(args) {
     if (isClaudeCmd && process.env.CCV_SKIP_THINKING_DISPLAY !== '1') {
       const { withDefaultThinkingDisplay } = await import('./server/pty-manager.js');
       cmdArgs = withDefaultThinkingDisplay(cmdArgs);
+    }
+
+    // Fold a user-supplied --settings into the injected settings and emit a single flag
+    // (claude is last-wins for duplicate --settings; two parallel flags let the user's
+    // silently clobber the injected ANTHROPIC_BASE_URL and break capture). claude only:
+    // another tool's --settings belongs to that tool and must not be touched.
+    if (isClaudeCmd) {
+      const settingsMerge = mergeSettingsIntoArgs(cmdArgs, settingsObj, { cwd: process.cwd() });
+      if (settingsMerge.warningDetail) {
+        console.warn(t('cli.settingsMergeFailed', settingsMerge.warningDetail));
+      }
+      settingsJson = settingsMerge.settingsJson;
+      cmdArgs = settingsMerge.args;
     }
 
     cmdArgs.unshift(settingsJson);

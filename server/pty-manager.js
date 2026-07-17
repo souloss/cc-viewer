@@ -11,6 +11,8 @@ import { buildSystemPromptFileArgs } from './lib/system-prompt-files.js';
 import { renderSystemPromptFileArgs } from './lib/system-prompt-render.js';
 import { MODEL_PROMPT_DIR } from './lib/model-system-prompts.js';
 import { resolveSpawnModel } from './lib/spawn-model-resolver.js';
+import { mergeSettingsIntoArgs } from './lib/settings-merge.js';
+import { t } from './i18n.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -302,8 +304,6 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
       ],
     };
   }
-  const settingsJson = JSON.stringify(settingsObj);
-
   // 注入 --thinking-display summarized；以下任一情况跳过注入：
   // - 路径在拒绝集里（上次因此 crash 过）
   // - 环境变量 CCV_SKIP_THINKING_DISPLAY=1（用户全局 opt-out，与 cli.js 保持一致）
@@ -356,13 +356,25 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   }
   const launchArgs = sysPrompt.args.length ? [...finalExtraArgs, ...sysPrompt.args] : finalExtraArgs;
 
+  // Fold any user-supplied --settings into the injected settings so the final argv
+  // carries a SINGLE --settings flag. claude is last-wins for duplicate --settings
+  // (empirically verified), so a user flag sitting after ours would silently clobber
+  // the injected ANTHROPIC_BASE_URL proxy override and the CCV_IM_DENY deny hardening.
+  // Merged: injected keys win, deny is unioned, other user config rides along.
+  // Relative settings paths resolve against the cwd claude itself runs with.
+  const settingsMerge = mergeSettingsIntoArgs(launchArgs, settingsObj, { cwd: spawnDir });
+  if (settingsMerge.warning) {
+    console.warn(`[CC Viewer] ${settingsMerge.warning}`);
+  }
+  const settingsJson = settingsMerge.settingsJson;
+
   let command = claudePath;
-  let args = ['--settings', settingsJson, ...launchArgs];
+  let args = ['--settings', settingsJson, ...settingsMerge.args];
 
   // 如果是 npm 版本（cli.js），需要使用 node 来运行
   if (isNpmVersion && claudePath.endsWith('.js')) {
     command = nodePath;
-    args = [claudePath, '--settings', settingsJson, ...launchArgs];
+    args = [claudePath, '--settings', settingsJson, ...settingsMerge.args];
   }
 
   lastExitCode = null;
@@ -494,6 +506,13 @@ async function _spawnClaudeImpl(proxyPort, cwd, extraArgs = [], claudePath = nul
   if (sysPrompt.loaded.length && !_suppressNextSpawnNotice) {
     const modelSuffix = sysPrompt.model ? ` (model match: ${sysPrompt.model})` : '';
     emitSpawnNotice(`[CC Viewer] loaded ${sysPrompt.loaded.join(', ')} as system prompt${modelSuffix}`);
+  }
+  // Settings-merge failures surface via emitSpawnNotice too: console.warn only reaches
+  // the server stdout, invisible in the embedded terminal. Localized here (the console.warn
+  // above stays English for greppable server logs). Must be emitted after spawn — the
+  // outputBuffer reset right before pty.spawn would swallow an earlier write.
+  if (settingsMerge.warningDetail && !_suppressNextSpawnNotice) {
+    emitSpawnNotice(`[CC Viewer] ${t('cli.settingsMergeFailed', settingsMerge.warningDetail)}`);
   }
   _suppressNextSpawnNotice = false;
 

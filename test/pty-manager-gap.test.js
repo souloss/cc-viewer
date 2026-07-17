@@ -177,6 +177,62 @@ describe('pty-manager-gap: spawnClaude npm version + serverPort/token + IM_DENY'
   });
 });
 
+describe('pty-manager-gap: 用户 --settings 合并进注入 settings（单 flag，注入键胜出）', () => {
+  let spawned;
+
+  beforeEach(() => {
+    spawned = [];
+    _clearThinkingDisplayRejectedPaths();
+    _setPtyImportForTests(makeControllableImport(spawned));
+  });
+
+  afterEach(() => {
+    killPty();
+    _setPtyImportForTests(null);
+  });
+
+  it('用户 --settings 被剥离并合并：最终 argv 只有一个 --settings，代理 BASE_URL 胜出、用户 env 保留', async () => {
+    const userSettings = '{"env":{"ANTHROPIC_BASE_URL":"http://user-clobber","FOO":"bar"}}';
+    await spawnClaude(9000, process.cwd(), ['--settings', userSettings, '--print'], '/bin/echo');
+    const args = spawned[0].args;
+    assert.equal(args.filter(a => typeof a === 'string' && a.startsWith('--settings')).length, 1);
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+    assert.equal(settings.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9000');
+    assert.equal(settings.env.FOO, 'bar');
+    assert.ok(!args.includes(userSettings), '用户原始 settings 值不应再单独出现在 argv 里');
+    assert.ok(args.includes('--print'), '无关用户 flag 原样保留');
+  });
+
+  it('CCV_IM_DENY=1 时用户 deny 与注入 deny 取并集，allow 原样保留', async () => {
+    const prev = process.env.CCV_IM_DENY;
+    process.env.CCV_IM_DENY = '1';
+    try {
+      const userSettings = '{"permissions":{"allow":["Bash(ls:*)"],"deny":["Read(/secret/**)"]}}';
+      await spawnClaude(9000, process.cwd(), ['--settings', userSettings], '/bin/echo');
+      const args = spawned[0].args;
+      const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+      assert.ok(settings.permissions.deny.includes('Read(/secret/**)'), '用户 deny 保留');
+      assert.ok(settings.permissions.deny.includes('Bash(sudo:*)'), '注入 deny 保留');
+      assert.deepEqual(settings.permissions.allow, ['Bash(ls:*)']);
+    } finally {
+      if (prev === undefined) delete process.env.CCV_IM_DENY;
+      else process.env.CCV_IM_DENY = prev;
+    }
+  });
+
+  it('用户 --settings 值非法时照常 spawn，仅用注入 settings，且警告写入终端缓冲', async () => {
+    await spawnClaude(9000, process.cwd(), ['--settings', '{broken', '-c'], '/bin/echo');
+    const args = spawned[0].args;
+    assert.equal(args.filter(a => typeof a === 'string' && a.startsWith('--settings')).length, 1);
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+    assert.equal(settings.env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:9000');
+    assert.equal(settings.env.FOO, undefined);
+    assert.ok(args.includes('-c'));
+    // emitSpawnNotice 是用户可见面：失败值必须出现在终端缓冲里（locale 无关断言）
+    assert.ok(getOutputBuffer().includes('{broken'), '警告应通过 emitSpawnNotice 写入 outputBuffer');
+  });
+});
+
 describe('pty-manager-gap: getPtyKind / getPtySkipPermissions', () => {
   let spawned;
 

@@ -142,6 +142,26 @@ const i18nData = {
     "tr": "   PATH'te de \"claude\" native komutu bulunamadı. @anthropic-ai/claude-code'un yüklü olduğundan emin olun",
     "uk": "   Також не знайдено нативну команду \"claude\" в PATH. Переконайтеся, що @anthropic-ai/claude-code встановлено"
   },
+  "cli.settingsMergeFailed": {
+    "zh": "⚠️  无法加载用户 --settings 值 {value}（{reason}），已仅以 CC Viewer 注入的 settings 启动",
+    "en": "⚠️  Could not load user --settings value {value} ({reason}); launching with CC Viewer's injected settings only",
+    "zh-TW": "⚠️  無法載入使用者 --settings 值 {value}（{reason}），已僅以 CC Viewer 注入的 settings 啟動",
+    "ko": "⚠️  사용자 --settings 값 {value}을(를) 로드할 수 없음({reason}), CC Viewer가 주입한 settings만으로 시작합니다",
+    "ja": "⚠️  ユーザーの --settings 値 {value} を読み込めません（{reason}）。CC Viewer が注入した settings のみで起動します",
+    "de": "⚠️  Der --settings-Wert des Benutzers {value} konnte nicht geladen werden ({reason}); Start nur mit den von CC Viewer injizierten Settings",
+    "es": "⚠️  No se pudo cargar el valor --settings del usuario {value} ({reason}); se inicia solo con los settings inyectados por CC Viewer",
+    "fr": "⚠️  Impossible de charger la valeur --settings de l'utilisateur {value} ({reason}) ; lancement avec uniquement les settings injectés par CC Viewer",
+    "it": "⚠️  Impossibile caricare il valore --settings dell'utente {value} ({reason}); avvio solo con i settings iniettati da CC Viewer",
+    "da": "⚠️  Kunne ikke indlæse brugerens --settings-værdi {value} ({reason}); starter kun med CC Viewers injicerede settings",
+    "pl": "⚠️  Nie można wczytać wartości --settings użytkownika {value} ({reason}); uruchamianie tylko z ustawieniami wstrzykniętymi przez CC Viewer",
+    "ru": "⚠️  Не удалось загрузить пользовательское значение --settings {value} ({reason}); запуск только с настройками, внедрёнными CC Viewer",
+    "ar": "⚠️  تعذّر تحميل قيمة --settings الخاصة بالمستخدم {value} ({reason})؛ سيتم التشغيل بإعدادات CC Viewer المحقونة فقط",
+    "no": "⚠️  Kunne ikke laste brukerens --settings-verdi {value} ({reason}); starter kun med CC Viewers injiserte settings",
+    "pt-BR": "⚠️  Não foi possível carregar o valor --settings do usuário {value} ({reason}); iniciando apenas com os settings injetados pelo CC Viewer",
+    "th": "⚠️  ไม่สามารถโหลดค่า --settings ของผู้ใช้ {value} ({reason}) จะเริ่มด้วย settings ที่ CC Viewer ฉีดเข้าไปเท่านั้น",
+    "tr": "⚠️  Kullanıcının --settings değeri {value} yüklenemedi ({reason}); yalnızca CC Viewer'ın enjekte ettiği settings ile başlatılıyor",
+    "uk": "⚠️  Не вдалося завантажити користувацьке значення --settings {value} ({reason}); запуск лише з налаштуваннями, впровадженими CC Viewer"
+  },
   "cli.inject.notFound": {
     "zh": "❌ 找不到 Claude Code cli.js: {path}",
     "en": "❌ Claude Code cli.js not found: {path}",
