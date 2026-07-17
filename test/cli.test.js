@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, utimesSync, chmodSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -282,6 +282,61 @@ describeCli('ccv --uninstall', () => {
     rmSync(fakeHome, { recursive: true, force: true });
   });
 
+  it('reports each cleaned rc file separately', () => {
+    const zshrc = join(fakeHome, '.zshrc');
+    const bashrc = join(fakeHome, '.bashrc');
+    const block = [
+      '# >>> CC-Viewer Auto-Inject >>>',
+      'claude() { command claude "$@"; }',
+      '# <<< CC-Viewer Auto-Inject <<<',
+    ].join('\n');
+    writeFileSync(zshrc, block + '\n');
+    writeFileSync(bashrc, block + '\n');
+
+    const r = runCli(['--uninstall'], {
+      env: { HOME: fakeHome, SHELL: '/bin/zsh', LANG: 'en_US.UTF-8' },
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(!readFileSync(zshrc, 'utf-8').includes('CC-Viewer'), '.zshrc should be cleaned');
+    assert.ok(!readFileSync(bashrc, 'utf-8').includes('CC-Viewer'), '.bashrc should be cleaned');
+    assert.ok(r.stdout.includes(zshrc), 'stdout should name the cleaned .zshrc');
+    assert.ok(r.stdout.includes(bashrc), 'stdout should name the cleaned .bashrc');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('corrupted block (missing END marker): warns, leaves file untouched, no false removal', () => {
+    const zshrc = join(fakeHome, '.zshrc');
+    const corrupt = [
+      '# user config',
+      '# >>> CC-Viewer Auto-Inject >>>',
+      'claude() { command claude "$@"; }',
+      '# end marker was deleted by the user',
+    ].join('\n');
+    writeFileSync(zshrc, corrupt);
+
+    const r = runCli(['--uninstall'], {
+      env: { HOME: fakeHome, SHELL: '/bin/zsh', LANG: 'en_US.UTF-8' },
+    });
+    assert.equal(r.exitCode, 0);
+    assert.equal(readFileSync(zshrc, 'utf-8'), corrupt, 'corrupted file must not be rewritten');
+    assert.ok(r.stdout.includes('damaged'), 'should warn about the damaged block');
+    assert.ok(!r.stdout.includes(`Shell hook removed from ${zshrc}`),
+      'must not claim a removal that did not happen');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('writes the uninstall tombstone under the config dir', () => {
+    const cfgDir = join(fakeHome, '.claude');
+    writeFileSync(join(fakeHome, '.zshrc'), '# empty\n');
+    const r = runCli(['--uninstall'], {
+      env: { HOME: fakeHome, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: cfgDir, LANG: 'en_US.UTF-8' },
+    });
+    assert.equal(r.exitCode, 0);
+    assert.ok(existsSync(join(cfgDir, 'cc-viewer', 'uninstalled.flag')),
+      'uninstalled.flag should exist after --uninstall');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
   it('outputs helpful message about unset -f claude', () => {
     const zshrc = join(fakeHome, '.zshrc');
     const hookContent = [
@@ -506,5 +561,114 @@ describeCli('ccv -logger: shell hook template invariants', () => {
       'prefersNative local should be gone; use hasNpm routing instead');
     assert.ok(!/real\.includes\(['"]node_modules['"]\).*prefersNative/s.test(source),
       'realpath-based prefersNative heuristic should not be reintroduced');
+  });
+
+  it('both hook variants carry the self-unsetting ccv-missing guard', () => {
+    // A stranded hook (package npm-uninstalled while the function is still loaded
+    // in open shells / rc files) must degrade to the real claude AND remove itself,
+    // never fail with `command not found: ccv`.
+    assert.ok(
+      source.includes('hash -r 2>/dev/null; command -v ccv >/dev/null 2>&1 || { unset -f claude; command claude "$@"; return; }'),
+      'guard template must rehash, self-unset and fall back to `command claude`');
+    const uses = source.match(/\$\{ccvGoneGuard\}/g) || [];
+    assert.equal(uses.length, 2,
+      `guard must be interpolated into BOTH hook variants (native + npm), got ${uses.length}`);
+  });
+
+  it('hook self-heal invocations pass --self-heal so a tombstoned uninstall is respected', () => {
+    // Background self-heal from a stale hook must be distinguishable from an
+    // explicit user `ccv -logger`, so --uninstall's tombstone can veto it.
+    assert.ok(source.includes('( ccv -logger --self-heal >/dev/null 2>&1 & )'),
+      'backgrounded 2.x self-heal must pass --self-heal');
+    assert.ok(source.includes('ccv -logger --self-heal 2>/dev/null'),
+      'missing-marker self-heal must pass --self-heal');
+  });
+});
+
+// ─── uninstall tombstone vs -logger ───
+// The tombstone check runs before -logger's mode detection, so these tests do
+// not require a claude installation. CLAUDE_CONFIG_DIR is pinned to a shared
+// throwaway dir because the NODE_TEST_CONTEXT guard otherwise gives every
+// spawned child a different pid-scoped config dir (tombstone would be invisible).
+
+describeCli('ccv -logger: uninstall tombstone', () => {
+  let fakeHome, cfgDir, flagPath;
+
+  beforeEach(() => {
+    fakeHome = resolve(tmpdir(), `ccv-test-tomb-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    cfgDir = join(fakeHome, '.claude');
+    flagPath = join(cfgDir, 'cc-viewer', 'uninstalled.flag');
+    mkdirSync(join(cfgDir, 'cc-viewer'), { recursive: true });
+    writeFileSync(join(fakeHome, '.zshrc'), '# empty\n');
+    // Isolation for the fall-through cases: a sanitized PATH (no npm → the real
+    // global claude cli.js is never resolved) plus a fake native claude under the
+    // pinned config dir routes -logger's install path into fakeHome only — it
+    // must never touch a user-writable real claude install on a dev machine.
+    const localBin = join(cfgDir, 'local');
+    mkdirSync(localBin, { recursive: true });
+    const fakeClaude = join(localBin, 'claude');
+    writeFileSync(fakeClaude, '#!/bin/sh\necho "claude (fake-native) 2.0.0"\n');
+    chmodSync(fakeClaude, 0o755);
+  });
+
+  const envFor = () => ({
+    HOME: fakeHome, SHELL: '/bin/zsh', CLAUDE_CONFIG_DIR: cfgDir, LANG: 'en_US.UTF-8',
+    PATH: '/usr/bin:/bin',
+  });
+
+  it('-logger --self-heal with tombstone: exits 0 silently, installs nothing', () => {
+    writeFileSync(flagPath, new Date().toISOString() + '\n');
+    const r = runCli(['-logger', '--self-heal'], { env: envFor() });
+    assert.equal(r.exitCode, 0);
+    assert.ok(!readFileSync(join(fakeHome, '.zshrc'), 'utf-8').includes('CC-Viewer'),
+      'self-heal must not reinstall the hook after uninstall');
+    assert.ok(existsSync(flagPath), 'self-heal must not clear the tombstone');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('-logger --self-heal without tombstone: falls through to normal install path', () => {
+    // The self-heal happy path (hook backgrounds it after a Claude Code upgrade)
+    // must NOT be vetoed when no tombstone exists — only the veto is tombstone-gated.
+    const r = runCli(['-logger', '--self-heal'], { env: envFor() });
+    assert.ok(!r.stdout.includes('--force'),
+      'must not print the justUninstalled refusal without a tombstone');
+    assert.ok(!existsSync(flagPath), 'must not create a tombstone');
+    // Install outcome depends on whether claude is present on this machine; the
+    // invariant is reaching mode detection instead of the silent veto exit.
+    assert.ok(r.exitCode === 0 || r.exitCode === 1);
+    assert.ok((r.stdout + r.stderr).length > 0,
+      'should produce install-path output, not the silent self-heal veto');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('plain -logger with a fresh tombstone: refuses with --force hint, keeps tombstone', () => {
+    writeFileSync(flagPath, new Date().toISOString() + '\n');
+    const r = runCli(['-logger'], { env: envFor() });
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.stdout.includes('--force'), 'should point the user at ccv -logger --force');
+    assert.ok(existsSync(flagPath), 'fresh tombstone must survive a plain -logger');
+    assert.ok(!readFileSync(join(fakeHome, '.zshrc'), 'utf-8').includes('CC-Viewer'),
+      'hook must not be installed inside the grace period');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('plain -logger with an aged tombstone: clears it and proceeds', () => {
+    writeFileSync(flagPath, new Date().toISOString() + '\n');
+    const old = new Date(Date.now() - 60 * 60 * 1000); // 1h ago, past the 10min grace
+    utimesSync(flagPath, old, old);
+    const r = runCli(['-logger'], { env: envFor() });
+    // Install outcome depends on whether claude is present on this machine;
+    // the invariant is that the tombstone is consumed either way.
+    assert.ok(!existsSync(flagPath), 'aged tombstone should be cleared by plain -logger');
+    assert.ok(r.exitCode === 0 || r.exitCode === 1);
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it('-logger --force with a fresh tombstone: clears it and proceeds', () => {
+    writeFileSync(flagPath, new Date().toISOString() + '\n');
+    const r = runCli(['-logger', '--force'], { env: envFor() });
+    assert.ok(!existsSync(flagPath), '--force should clear even a fresh tombstone');
+    assert.ok(r.exitCode === 0 || r.exitCode === 1);
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 });

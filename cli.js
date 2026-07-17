@@ -5,7 +5,7 @@ if (process.platform === 'win32' && !process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '16';
 }
 
-import { readFileSync, writeFileSync, existsSync, realpathSync, unlinkSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, unlinkSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -60,6 +60,14 @@ function reportClaudeNotFound(cliPathHint) {
   }
 }
 
+// Tombstone written by --uninstall; blocks the shell hook's background self-heal
+// (`ccv -logger --self-heal`) from silently re-installing the integration.
+// Anchored to the config dir (not LOG_DIR, which honors --log-dir/CCV_LOG_DIR
+// overrides) so --uninstall and the hook always resolve the same path.
+function getUninstallFlagPath() {
+  return resolve(getClaudeConfigDir(), 'cc-viewer', 'uninstalled.flag');
+}
+
 function getShellConfigPath() {
   const shell = process.env.SHELL || '';
   if (shell.includes('zsh')) return resolve(homedir(), '.zshrc');
@@ -94,6 +102,12 @@ function buildShellHook(isNative) {
     '--help', '-h',
   ];
 
+  // Guard shared by both variants: if ccv was uninstalled, the wrapper removes
+  // itself from the live shell and falls back to the real claude binary.
+  // `hash -r` first — otherwise a stale command-hash entry in a long-lived
+  // shell lets `command -v ccv` false-pass once after the binary is deleted.
+  const ccvGoneGuard = `hash -r 2>/dev/null; command -v ccv >/dev/null 2>&1 || { unset -f claude; command claude "$@"; return; }`;
+
   if (isNative) {
     return `${SHELL_HOOK_START}
 claude() {
@@ -103,6 +117,8 @@ claude() {
     command claude "$@"
     return
   fi
+  # If ccv is gone (uninstalled), drop this stale wrapper and use claude directly
+  ${ccvGoneGuard}
   # Pass through certain commands directly without ccv interception
   case "$1" in
     ${passthroughCommands.join('|')})
@@ -128,6 +144,8 @@ claude() {
     command claude "$@"
     return
   fi
+  # If ccv is gone (uninstalled), drop this stale wrapper and use claude directly
+  ${ccvGoneGuard}
   # Pass through certain commands directly without ccv interception
   case "$1" in
     ${passthroughCommands.join('|')})
@@ -149,12 +167,12 @@ claude() {
   if [ -z "$cli_js" ]; then
     # cli.js 消失 → Claude Code 已升级到 2.1.114+（native-only 分发）。
     # 后台重写 hook（下次 shell 就是 native hook），当前调用直接走 native proxy 路径。
-    ( ccv -logger >/dev/null 2>&1 & )
+    ( ccv -logger --self-heal >/dev/null 2>&1 & )
     ccv run -- claude --ccv-internal "$@"
     return $?
   fi
   if ! grep -q "CC Viewer" "$cli_js" 2>/dev/null; then
-    ccv -logger 2>/dev/null
+    ccv -logger --self-heal 2>/dev/null
   fi
   command claude "$@"
 }
@@ -196,7 +214,8 @@ function removeShellHook() {
   for (const f of ['.zshrc', '.zprofile', '.bashrc', '.bash_profile', '.profile']) {
     allPaths.add(resolve(home, f));
   }
-  let lastResult = { path: configPath, status: 'clean' };
+  // Per-file results; empty array = no file contained the hook marker
+  const results = [];
   for (const p of allPaths) {
     try {
       if (!existsSync(p)) continue;
@@ -204,13 +223,19 @@ function removeShellHook() {
       if (!content.includes(SHELL_HOOK_START)) continue;
       const regex = new RegExp(`\\n?${SHELL_HOOK_START}[\\s\\S]*?${SHELL_HOOK_END}\\n?`, 'g');
       const newContent = content.replace(regex, '\n');
+      if (newContent === content) {
+        // START marker present but the block is malformed (e.g. END marker damaged):
+        // leave the file untouched instead of reporting a removal that didn't happen
+        results.push({ file: p, status: 'corrupt' });
+        continue;
+      }
       writeFileSync(p, newContent);
-      lastResult = { path: p, status: 'removed' };
+      results.push({ file: p, status: 'removed' });
     } catch (err) {
-      lastResult = { path: p, status: 'error', error: err.message };
+      results.push({ file: p, status: 'error', error: err.message });
     }
   }
-  return lastResult;
+  return results;
 }
 
 function injectCliJs() {
@@ -805,7 +830,7 @@ if (isVersion) {
 
 if (isUninstall) {
   const cliResult = removeCliJsInjection();
-  const shellResult = removeShellHook();
+  const shellResults = removeShellHook();
 
   if (cliResult === 'removed' || cliResult === 'clean') {
     console.log(t('cli.uninstall.cliCleaned'));
@@ -815,12 +840,18 @@ if (isUninstall) {
     console.log(t('cli.uninstall.cliFail'));
   }
 
-  if (shellResult.status === 'removed') {
-    console.log(t('cli.uninstall.hookRemoved', { path: shellResult.path }));
-  } else if (shellResult.status === 'clean' || shellResult.status === 'not_found') {
-    console.log(t('cli.uninstall.hookClean', { path: shellResult.path }));
+  if (shellResults.length === 0) {
+    console.log(t('cli.uninstall.hookClean', { path: getShellConfigPath() }));
   } else {
-    console.log(t('cli.uninstall.hookFail', { error: shellResult.error }));
+    for (const r of shellResults) {
+      if (r.status === 'removed') {
+        console.log(t('cli.uninstall.hookRemoved', { path: r.file }));
+      } else if (r.status === 'corrupt') {
+        console.log(t('cli.uninstall.corruptBlock', { file: r.file }));
+      } else {
+        console.log(t('cli.uninstall.hookFail', { file: r.file, error: r.error }));
+      }
+    }
   }
 
   // 清理 settings.json 里的 cc-viewer-managed hooks + 历史 statusLine 残留
@@ -863,12 +894,40 @@ if (isUninstall) {
     }
   } catch { }
 
+  // Tombstone: stale hooks in still-open shells background `ccv -logger --self-heal`,
+  // which would otherwise re-install everything right after this uninstall.
+  try {
+    mkdirSync(resolve(getClaudeConfigDir(), 'cc-viewer'), { recursive: true });
+    writeFileSync(getUninstallFlagPath(), new Date().toISOString() + '\n');
+  } catch { }
+
   console.log(t('cli.uninstall.reloadShell'));
   console.log(t('cli.uninstall.done'));
   process.exit(0);
 }
 
 if (isLogger) {
+  // Tombstone check must run before mode detection: a backgrounded self-heal with
+  // claude fully uninstalled must exit 0 silently, not emit reportClaudeNotFound noise.
+  try {
+    const flagPath = getUninstallFlagPath();
+    if (existsSync(flagPath)) {
+      if (args.includes('--self-heal')) {
+        // Explicitly uninstalled — never let a stale hook resurrect the integration
+        process.exit(0);
+      }
+      const ageMs = Date.now() - statSync(flagPath).mtimeMs;
+      const GRACE_MS = 10 * 60 * 1000;
+      if (ageMs < GRACE_MS && !args.includes('--force')) {
+        // Old deployed hooks self-heal via plain `ccv -logger`; a grace period keeps
+        // them from wiping a fresh tombstone during the uninstall race window.
+        console.log(t('cli.logger.justUninstalled'));
+        process.exit(0);
+      }
+      unlinkSync(flagPath);
+    }
+  } catch { }
+
   // 模式选择：有 cli.js 就走 npm 注入模式（pre-2.1.113），没有就走 native proxy
   // 模式（2.1.114+）。单一判据，不再靠 realpath 的启发式。
   const nativePath = resolveNativePath();
