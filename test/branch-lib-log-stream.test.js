@@ -285,20 +285,6 @@ describe('_collectDedup __nokey_ 分支(tail / paged 路径)', () => {
     assert.equal(result.estimatedTotal, 0);
   });
 
-  it('readPagedEntries 跳过 __nokey_ 条目(filtered 中过滤)', async () => {
-    const normal = { timestamp: '2026-01-01T00:00:00.000Z', url: '/v1/messages', mainAgent: true, body: { messages: [msg('user', 'a')] } };
-    const noKey = { type: 'special', data: 'nokey' };
-    writeFileSync(logFile,
-      [JSON.stringify(normal), JSON.stringify(noKey)].join('\n---\n') + '\n---\n');
-
-    const result = await mod.readPagedEntries(logFile, { before: '2099-01-01T00:00:00Z', limit: 10 });
-    // __nokey_ 条目在 readPagedEntries 的 filtered 循环中被 continue 跳过
-    for (const raw of result.entries) {
-      const p = JSON.parse(raw);
-      assert.ok(p.timestamp, 'paged 结果不应包含无 timestamp 的 __nokey_ 条目');
-    }
-    assert.ok(result.entries.length >= 1);
-  });
 });
 
 describe('readTailEntries 重试耗尽 fallback(>8MB 文件)', () => {

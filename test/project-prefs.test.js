@@ -83,12 +83,12 @@ describe('project-prefs lib + routes', { concurrency: false }, () => {
 
   it('resolveScoped lets fork win over global and keeps unforked global keys', () => {
     const out = lib.resolveScoped(
-      { themeColor: 'light', expandThinking: false, onlyCurrentSession: true },
+      { themeColor: 'light', expandThinking: false, expandDiff: true },
       { themeColor: 'dark', expandThinking: true },
     );
     assert.equal(out.themeColor, 'dark');       // fork wins
     assert.equal(out.expandThinking, true);      // fork wins
-    assert.equal(out.onlyCurrentSession, true);  // global passes through
+    assert.equal(out.expandDiff, true);          // global passes through
   });
 
   // ─── toggle (fork lifecycle) ────────────────────────────────────────────

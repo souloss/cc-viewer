@@ -21,6 +21,7 @@
 // reports its own in-process adapter (deps.im.getBridgeStatus) — that's what the manager probes.
 import { getDescriptor, loadConfig, loadState, saveConfig } from '../lib/im-config.js';
 import { findRecentLog } from '../lib/interceptor-core.js';
+import { listV2Sessions } from '../lib/v2/adapter.js';
 import { readSenders } from '../lib/im-senders.js';
 import { readImAppendSystem, writeImAppendSystem, buildImAppendSystemPreset, MAX_IM_APPEND_SYSTEM_CHARS } from '../lib/im-append-system.js';
 import { imDir } from '../lib/im-lock.js';
@@ -256,8 +257,16 @@ function imLogs(req, res, parsedUrl, isLocal, deps) {
   const project = `IM_${id}`;
   let latest = null;
   try {
-    const abs = findRecentLog(join(LOG_DIR, project), project); // 已排除 *_temp.jsonl
-    if (abs) latest = `${project}/${basename(abs)}`; // 相对 LOG_DIR，直接喂给 /api/local-log?file=
+    // wire-v2: prefer the newest v2 session (by meta.startTs, journal mtime as
+    // tie-break); fall back to legacy v1 files until they are migrated.
+    const sessions = listV2Sessions(join(LOG_DIR, project)).filter((s) => !s.leader && !s.discard);
+    if (sessions.length > 0) {
+      sessions.sort((a, b) => (a.startTs < b.startTs ? 1 : a.startTs > b.startTs ? -1 : 0));
+      latest = `v2:${project}/${sessions[0].sid}`; // 直接喂给 /api/local-log?file=
+    } else {
+      const abs = findRecentLog(join(LOG_DIR, project), project); // 已排除 *_temp.jsonl
+      if (abs) latest = `${project}/${basename(abs)}`; // 相对 LOG_DIR
+    }
   } catch { /* 无目录/无日志 → latest=null */ }
   res.writeHead(200, JSON_HEADERS);
   res.end(JSON.stringify({ project, latest }));

@@ -12,9 +12,24 @@ import {
   mergeImportedProfiles,
   findCcSwitchDbPath,
   _candidateDbPathsForTest,
+  _setDatabaseSyncForTest,
   readCcSwitchProviders,
   discoverCcSwitchProviders,
 } from '../server/lib/ccswitch-import.js';
+
+describe('readCcSwitchProviders degradation contract (runtime without node:sqlite)', () => {
+  it('reports the stable node:sqlite-unavailable error the UI keys its localized message on', async () => {
+    _setDatabaseSyncForTest(false); // simulate Node < 22.5 / missing --experimental-sqlite
+    try {
+      const { profiles, error } = await readCcSwitchProviders('/nonexistent/cc-switch.db');
+      assert.deepEqual(profiles, []);
+      assert.ok(error.startsWith('node:sqlite unavailable on this runtime'),
+        `ProxyModal matches this prefix for ui.proxy.ccswitchNodeUnsupported, got: ${error}`);
+    } finally {
+      _setDatabaseSyncForTest(null); // restore lazy detection for the suites below
+    }
+  });
+});
 
 describe('mapProviderToProfile', () => {
   it('完整 claude 供应商映射所有字段', () => {
@@ -180,12 +195,13 @@ describe('mergeImportedProfiles', () => {
     assert.ok(r.profiles.find(p => p.id === 'max'));
   });
 
-  it('空 existing + 首次导入', () => {
+  it('空 existing + 首次导入（max 被播种 + 导入项追加）', () => {
     const imported = [
       { id: 'ccs_a', name: 'A', baseURL: 'https://a', apiKey: 'ka', source: 'cc-switch' },
     ];
     const r = mergeImportedProfiles([], imported);
-    assert.equal(r.profiles.length, 1);
+    assert.equal(r.profiles.length, 2, 'seeded max + the imported profile');
+    assert.equal(r.profiles[0].id, 'max');
     assert.equal(r.imported, 1);
     assert.equal(r.updated, 0);
   });
@@ -199,6 +215,25 @@ describe('mergeImportedProfiles', () => {
     assert.equal(r.profiles.length, 2);
     assert.equal(r.imported, 0);
     assert.equal(r.updated, 0);
+  });
+
+  it('seeds the built-in max when existing has none (first-ever import keeps the Default option)', () => {
+    const imported = [
+      { id: 'ccs_a', name: 'A', baseURL: 'https://a', apiKey: 'ka', source: 'cc-switch' },
+    ];
+    const r = mergeImportedProfiles([], imported);
+    assert.equal(r.profiles[0].id, 'max', 'max must be seeded at the front');
+    assert.equal(r.profiles[0].name, 'Default', 'seeded max mirrors proxyProfilesPost\'s shape');
+    assert.ok(r.profiles.find((p) => p.id === 'ccs_a'));
+  });
+
+  it('preserves existing entries without an id instead of dropping them', () => {
+    const existing = [
+      { id: 'max', name: 'Default' },
+      { name: 'no-id-entry', baseURL: 'https://legacy', apiKey: 'lk' },
+    ];
+    const r = mergeImportedProfiles(existing, []);
+    assert.ok(r.profiles.find((p) => p.name === 'no-id-entry'), 'id-less entries are not ours to prune');
   });
 });
 

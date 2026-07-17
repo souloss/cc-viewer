@@ -1,6 +1,5 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { renameSyncWithRetry } from './file-api.js';
-import { join, basename } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 const SUBAGENT_SYSTEM_RE = /(?:command execution|file search|planning) specialist|general-purpose agent|security monitor|performing a web search/i;
 
@@ -15,7 +14,9 @@ const SUBAGENT_BILLING_RE = /cc_is_subagent=true\b/;
 // 两处服务端实现(本文件 + kv-cache-analyzer)由 test/interceptor-core-mainagent.test.js 互校防漂移；
 // 前端 contentFilter 那份由 test/content-filter-unit.test.js 单测覆盖。
 const TEAMMATE_SYSTEM_RE = /running as an agent in a team|Agent Teammate Communication/i;
-// Exported for server/lib/teammate-detect.js (previous-segment backfill filter).
+// 1.7.0: the last external consumer (teammate-detect.js) retired with the
+// prev-segment backfill; kept unexported-in-spirit for the KEEP-IN-SYNC trio
+// above (tests still cross-check the three copies).
 export { TEAMMATE_SYSTEM_RE, SUBAGENT_BILLING_RE };
 
 // Rotation carry-forward: prompt-prefix → teammate-name pairs extracted from a
@@ -38,20 +39,6 @@ export function extractAgentSpawnPairs(responseBody) {
     if (prefix) pairs.push([prefix, inp.name]);
   }
   return pairs;
-}
-
-// Parses the first frame of a log-file head string; returns the entry when it
-// is a rotation-context sentinel, else null. Callers pass a BOUNDED head read
-// (never a whole segment).
-export function parseRotationContextHead(headString) {
-  try {
-    const frameEnd = headString.indexOf('\n---\n');
-    if (frameEnd <= 0) return null;
-    const entry = JSON.parse(headString.slice(0, frameEnd));
-    return entry && entry.ccvRotationContext ? entry : null;
-  } catch {
-    return null;
-  }
 }
 
 export function getSystemText(body) {
@@ -298,29 +285,27 @@ export function createStreamAssembler() {
   };
 }
 
-// 日志文件名前缀【单一来源】：writer（generateNewLogFilePath / initForWorkspace）与 matcher 共用，
-// 防止两侧命名漂移。默认 `<project>_`；`--pid` 实例 `<pid>__<project>_`。完整文件名 = `${prefix}${ts}.jsonl`。
-export function logFilePrefix(projectName, instanceId) {
-  return instanceId ? `${instanceId}__${projectName}_` : `${projectName}_`;
+// Log filename prefix (single source): v1 files were always `<project>_<ts>.jsonl`
+// (`<pid>__`-prefixed variants came from the removed multi-instance feature and
+// are excluded by the matcher below). Kept for the v1 lookups that still exist
+// (migration-era readers, e.g. findRecentLog for IM).
+export function logFilePrefix(projectName) {
+  return `${projectName}_`;
 }
 
-// 日志文件名归属判定（实例隔离）。`--pid` 实例文件名为 `<pid>__<project>_<ts>…`，无 pid 为 `<project>_<ts>…`。
-//  - instanceId 非空：必须精确以 `<pid>__<project>_` 开头（只认本实例）。
-//  - instanceId 空（默认）：以 `<project>_` 开头【且】不含 pid 分隔特征 `__<project>_`。后一条堵住前缀碰撞——
-//    若用户把 --pid 取成项目名或 `<项目>_…`（如项目 proj 用 --pid=proj → `proj__proj_…` 也会 startsWith `proj_`），
-//    仅靠前缀无法排除；而任何 pid 文件按构造必含 `__<project>_`，无标签文件绝不含（即便项目名自身带 `__`），据此精确排除。
-export function logFileMatcher(projectName, instanceId) {
-  const p = logFilePrefix(projectName, instanceId);
-  if (instanceId) return (f) => f.startsWith(p);
+// v1 log filename ownership test: starts with `<project>_` and does NOT carry
+// the legacy `<pid>__<project>_` instance mark (any instance-tagged file
+// contains `__<project>_` by construction; untagged files never do, even when
+// the project name itself contains `__`).
+export function logFileMatcher(projectName) {
+  const p = logFilePrefix(projectName);
   const pidMark = `__${projectName}_`;
   return (f) => f.startsWith(p) && !f.includes(pidMark);
 }
 
-// instanceId 为可选第 3 参（默认 null = 现状）：非空时只在本实例自己的日志里找（多进程隔离），
-// 现有 2 参调用方与单测零改动。
-export function findRecentLog(dir, projectName, instanceId = null) {
+export function findRecentLog(dir, projectName) {
   try {
-    const owns = logFileMatcher(projectName, instanceId);
+    const owns = logFileMatcher(projectName);
     const files = readdirSync(dir)
       // 排除 *_temp.jsonl：临时文件是未完成的写入态（resume 流程中途产物），
       // 不应被当作"最近完整日志"（否则 _temp 因 sort 排在正式文件之后会被误选）。
@@ -331,114 +316,6 @@ export function findRecentLog(dir, projectName, instanceId = null) {
     return join(dir, files[0]);
   } catch { }
   return null;
-}
-
-// 首启接管（仅 --pid 实例）：本 pid 还没有自己的日志时，把项目里最近的【无标签】日志原子 rename 成
-// `<pid>__<project>_<ts>.jsonl`，并入该 pid 血脉（move 而非 copy：不双计入统计）。返回接管后的新路径，或 null。
-//
-// 这是 best-effort 便利特性，不是核心隔离（核心隔离=各 pid 读自己的日志，不依赖接管）。为不误抢一个仍存活的
-// 无 pid 实例（评审标记的 live-writer / 卡在 resume 的窄边角），双重守卫：① 项目里若存在任何无标签 `*_temp.jsonl`
-// （某个无 pid 实例正卡在 resume / 在写）→ 放弃；② 无标签日志 mtime 必须早于 freshnessMs(默认 5min)。仍有理论窄缝
-// （进程挂起 >5min 且无 temp），属可接受的便利取舍。并发下原子 rename 只一个赢、输者 throw→吞→null（回退全新）。
-export function claimUntaggedLog(dir, projectName, instanceId, { freshnessMs = 300000 } = {}) {
-  if (!instanceId) return null;
-  try {
-    const untagged = findRecentLog(dir, projectName, null); // 最近无标签日志（已排除 pid 文件 + temp）
-    if (!untagged) return null;
-    // ① 存在无标签 temp ⇒ 有无 pid 实例正活动/卡在 resume → 不接管。
-    const owns = logFileMatcher(projectName, null);
-    const hasUntaggedTemp = readdirSync(dir).some(f => owns(f) && f.endsWith('_temp.jsonl'));
-    if (hasUntaggedTemp) return null;
-    let st;
-    try { st = statSync(untagged); } catch { return null; }
-    if (Date.now() - st.mtimeMs < freshnessMs) return null; // ② 可能是活动写者 → 不碰
-    const claimed = join(dir, `${instanceId}__${basename(untagged)}`);
-    if (existsSync(claimed)) return null;                   // 极端撞名 → 放弃
-    renameSyncWithRetry(untagged, claimed);
-    return claimed;
-  } catch { return null; }
-}
-
-export function cleanupTempFiles(dir, projectName, instanceId = null) {
-  try {
-    const owns = logFileMatcher(projectName, instanceId);
-    const tempFiles = readdirSync(dir)
-      .filter(f => owns(f) && f.endsWith('_temp.jsonl'));
-    for (const f of tempFiles) {
-      try {
-        const tempPath = join(dir, f);
-        const newPath = tempPath.replace('_temp.jsonl', '.jsonl');
-        if (existsSync(newPath)) {
-          const tempContent = readFileSync(tempPath, 'utf-8');
-          if (tempContent.trim()) {
-            appendFileSync(newPath, tempContent);
-          }
-          unlinkSync(tempPath);
-        } else {
-          // 只有非空 temp 文件才 rename，空文件直接删除
-          const sz = statSync(tempPath).size;
-          if (sz > 0) {
-            renameSyncWithRetry(tempPath, newPath);
-          } else {
-            unlinkSync(tempPath);
-          }
-        }
-      } catch { }
-    }
-  } catch { }
-}
-
-export function migrateConversationContext(oldFile, newFile) {
-  try {
-    const content = readFileSync(oldFile, 'utf-8');
-    if (!content.trim()) return;
-
-    const parts = content.split('\n---\n').filter(p => p.trim());
-    if (parts.length === 0) return;
-
-    let originIndex = -1;
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (!/"mainAgent"\s*:\s*true/.test(parts[i])) continue;
-      try {
-        const entry = JSON.parse(parts[i]);
-        if (entry.mainAgent) {
-          const msgs = entry.body?.messages;
-          // Delta storage: 使用 _totalMessageCount（delta 条目）或 msgs.length（旧格式）
-          const msgCount = entry._totalMessageCount || (Array.isArray(msgs) ? msgs.length : 0);
-          if (msgCount === 1) {
-            originIndex = i;
-            break;
-          }
-        }
-      } catch { }
-    }
-
-    if (originIndex < 0) return;
-
-    let migrationStart = originIndex;
-    if (originIndex > 0) {
-      try {
-        const prevContent = parts[originIndex - 1];
-        if (prevContent.trim().startsWith('{')) {
-          const prev = JSON.parse(prevContent);
-          if (isPreflightEntry(prev)) {
-            migrationStart = originIndex - 1;
-          }
-        }
-      } catch { }
-    }
-
-    const migratedParts = parts.slice(migrationStart);
-    writeFileSync(newFile, migratedParts.join('\n---\n') + '\n---\n');
-
-    const remainingParts = parts.slice(0, migrationStart);
-    if (remainingParts.length > 0) {
-      writeFileSync(oldFile, remainingParts.join('\n---\n') + '\n---\n');
-    } else {
-      // 所有内容已迁移到新文件，清空旧文件（不能删除，watcher 需要检测 truncation 来触发轮转）
-      writeFileSync(oldFile, '');
-    }
-  } catch { }
 }
 
 /**
@@ -477,38 +354,6 @@ export function fingerprintMsg(m) {
     snip = c.slice(0, 80);
   }
   return (m.role || '?') + ':' + snip.replace(/\s+/g, ' ').slice(0, 80);
-}
-
-/**
- * Rotate log file when it exceeds maxSize.
- * Creates a new file (no content migration) and appends '\n' to old file
- * to trigger fs.watchFile callback for watcher migration.
- *
- * initialContent (optional) is written INTO the new file at creation time —
- * used for the rotation-context sentinel. It must be baked into creation
- * rather than queued afterwards: the old-file trigger byte below fires the
- * watcher's rotation-follow after a short debounce, and a late-flushing
- * queued write can land between the new file's initial stream read and its
- * lastByteOffset snapshot, in which case it is never delivered to clients.
- *
- * @param {string} currentFile - current log file path
- * @param {string} newFile - new log file path to rotate to
- * @param {number} maxSize - max file size in bytes
- * @param {string} [initialContent] - content the new file is created with
- * @returns {{ rotated: boolean, oldFile?: string, newFile?: string }}
- */
-export function rotateLogFile(currentFile, newFile, maxSize, initialContent = '') {
-  try {
-    if (!existsSync(currentFile)) return { rotated: false };
-    const size = statSync(currentFile).size;
-    if (size < maxSize) return { rotated: false };
-    // 不迁移旧内容，创建新文件（立即创建，避免 watcher 时序窗口）
-    try { writeFileSync(newFile, initialContent); } catch { }
-    // 触发旧文件 watcher 回调，使其检测到文件变更并切换到新文件
-    try { appendFileSync(currentFile, '\n'); } catch { }
-    return { rotated: true, oldFile: currentFile, newFile };
-  } catch { }
-  return { rotated: false };
 }
 
 /**

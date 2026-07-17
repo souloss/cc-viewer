@@ -25,6 +25,7 @@ import {
   _isSystemPromptFileRejected,
   _setSpawnModelReaderForTests,
   _defaultSpawnModelReader,
+  _setNowForTests,
 } from '../server/pty-manager.js';
 import { LOG_DIR } from '../findcc.js';
 
@@ -249,8 +250,8 @@ describe('pty-manager: spawnClaude integration', () => {
     throw new Error(`waitUntil timeout after ${timeoutMs}ms`);
   };
 
-  // 构造一个 mock pty：第一次 spawn 吐 errorText 并 exit 1，后续正常
-  const makeMockPtyOnceCrash = (errorText) => () => ({
+  // 构造一个 mock pty：第一次 spawn 吐 errorText 并按 exitPayload 退出（默认 exit 1 无 signal），后续正常
+  const makeMockPtyOnceCrash = (errorText, exitPayload = { exitCode: 1 }) => () => ({
     spawn(command, args, opts) {
       const dataHandlers = [];
       const exitHandlers = [];
@@ -265,7 +266,7 @@ describe('pty-manager: spawnClaude integration', () => {
       if (idx === 0) {
         queueMicrotask(() => {
           for (const cb of dataHandlers) cb(errorText);
-          for (const cb of exitHandlers) cb({ exitCode: 1 });
+          for (const cb of exitHandlers) cb(exitPayload);
         });
       }
       return inst;
@@ -478,26 +479,171 @@ describe('pty-manager: spawnClaude integration', () => {
     assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-appendfile'), true);
   });
 
-  it('does not retry for system-prompt-file when crash is unrelated', async () => {
+  // ─── 启动兜底（分级）：注入过 system prompt 的引导期死亡 ───
+  // 一级放宽：exit≠0 引导窗口内非信号死亡 → 即使不是 unknown option 也去注入重试一次
+  //（旧语义「unrelated crash 不重试」被有意替换——注入可能就是拖崩启动的原因）。
+  it('boot fallback tier-1: unrelated quick crash with injection → ONE retry without injection, later spawns inject again', async () => {
     _clearThinkingDisplayRejectedPaths();
     _clearSystemPromptFileRejectedPaths();
-    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-sysfile-unrelated-'));
-    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-boot-t1-'));
+    const sysFile = join(dir, 'CC_SYSTEM.md');
+    writeFileSync(sysFile, 'OVERRIDE PROMPT', 'utf-8');
     _setPtyImportForTests(makeMockPtyOnceCrash('error: some other failure\n'));
 
     const origError = console.error;
     console.error = () => {};
     try {
-      await spawnClaude(9999, dir, [], '/bin/fake-claude-sysfile-unrelated');
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-t1');
+      await waitUntil(() => spawned.length >= 2);
+
+      assert.equal(spawned.length, 2, 'quick non-signal crash with injection retries once');
+      assert.ok(spawned[0].args.includes(sysFile), 'first spawn injected');
+      assert.ok(!spawned[1].args.some(a => String(a).includes('CC_SYSTEM.md')), 'retry spawn strips injection');
+      // review P1：放宽半支绝不写永久拒绝集——瞬态崩溃不能永久禁用注入
+      assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-t1'), false,
+        'transient boot crash must NOT permanently mark the path');
+      // 一次性令牌已被重试消费：后续 spawn 恢复注入尝试(mock 只在 idx 0 崩溃)
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-t1');
+      await waitUntil(() => spawned.length >= 3);
+      assert.ok(spawned[2].args.includes(sysFile), 'subsequent spawn injects again (one-shot token consumed)');
+    } finally {
+      console.error = origError;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('boot fallback tier-1: exact "unknown option" half still marks the path PERMANENTLY (capability signal)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    // IM worker（cwd 在 LOG_DIR 内）+ 精确 unknown-option → 仍自愈重试且写永久集——
+    // 精确半支不受 insideLogDir 门控（否则 IM worker 在不支持该 flag 的 claude 上永远起不来）。
+    const imDir = join(LOG_DIR, 'IM_unknown-option');
+    const personaFile = join(imDir, 'CC_APPEND_SYSTEM.md');
+    _setPtyImportForTests(makeMockPtyOnceCrash("error: unknown option '--append-system-prompt-file'\n"));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      mkdirSync(imDir, { recursive: true });
+      writeFileSync(personaFile, 'IM PERSONA', 'utf-8');
+      await spawnClaude(9999, imDir, [], '/bin/fake-claude-im-unknown');
+      await waitUntil(() => spawned.length >= 2);
+      assert.ok(spawned[0].args.includes(personaFile), 'first spawn injected the persona');
+      assert.ok(!spawned[1].args.includes(personaFile), 'retry strips the unsupported flag injection');
+      assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-im-unknown'), true,
+        'unknown-option is a stable capability signal → permanent set');
+    } finally {
+      console.error = origError;
+      rmSync(imDir, { recursive: true, force: true });
+    }
+  });
+
+  it('boot fallback tier-1: signal-terminated quick death → NO retry (user Ctrl-C / kill)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-boot-sig-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash('', { exitCode: 130, signal: 2 })); // SIGINT
+
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-sig');
       await waitUntil(() => spawned[0] != null);
-      await new Promise(r => setTimeout(r, 30)); // 确认不会有第二次 spawn
+      await new Promise(r => setTimeout(r, 30)); // 确认没有第二次 spawn
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 1, 'signal termination must not trigger the boot fallback');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-sig'), false);
+  });
+
+  it('boot fallback tier-1: crash AFTER the boot window → NO retry (relaxed half only covers boot)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-boot-late-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash('error: some other failure\n'));
+    // 拨表：spawn 取 t=0，onExit 的窗口判定取 t=6000（> 5s 窗口）→ 放宽半支不触发
+    let t = 0;
+    _setNowForTests(() => { const v = t; t += 6000; return v; });
+
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-late');
+      await waitUntil(() => spawned[0] != null);
+      await new Promise(r => setTimeout(r, 30));
+    } finally {
+      _setNowForTests(null);
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 1, "post-boot crash is not the injection fallback's business");
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-late'), false);
+  });
+
+  it('boot fallback tier-2: quick exit 0 with injection → no retry, no reject, diagnostic notice + normal exit broadcast', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-boot-t2-'));
+    writeFileSync(join(dir, 'CC_SYSTEM.md'), 'OVERRIDE PROMPT', 'utf-8');
+    _setPtyImportForTests(makeMockPtyOnceCrash('', { exitCode: 0 }));
+    const exits = [];
+    const removeExit = onPtyExit((code) => exits.push(code));
+
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-t2');
+      await waitUntil(() => exits.length >= 1);
+      await new Promise(r => setTimeout(r, 30));
+    } finally {
+      removeExit();
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(spawned.length, 1, 'exit 0 never auto-restarts (indistinguishable from a fast user /exit)');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-t2'), false, 'no auto-disable of injection');
+    assert.deepEqual(exits, [0], 'exit broadcast reaches listeners as usual');
+    assert.match(getOutputBuffer(), /injected system prompt/, 'diagnostic notice lands in the terminal buffer');
+  });
+
+  it('boot fallback: quick crash WITHOUT injection → completely untouched', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-pty-boot-noinj-'));
+    _setPtyImportForTests(makeMockPtyOnceCrash('error: some other failure\n'));
+
+    const origError = console.error;
+    console.error = () => {};
+    try {
+      await spawnClaude(9999, dir, [], '/bin/fake-claude-boot-noinj');
+      await waitUntil(() => spawned[0] != null);
+      await new Promise(r => setTimeout(r, 30));
     } finally {
       console.error = origError;
       rmSync(dir, { recursive: true, force: true });
     }
 
-    assert.equal(spawned.length, 1, 'no retry for unrelated crash');
-    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-sysfile-unrelated'), false);
+    assert.equal(spawned.length, 1, 'no injection → boot fallback never fires');
+    assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-noinj'), false);
+  });
+
+  it('boot fallback: IM worker (cwd inside LOG_DIR) quick crash → NO de-injection retry (persona protected)', async () => {
+    _clearThinkingDisplayRejectedPaths();
+    _clearSystemPromptFileRejectedPaths();
+    const imDir = join(LOG_DIR, 'IM_boot-fallback');
+    const personaFile = join(imDir, 'CC_APPEND_SYSTEM.md');
+    _setPtyImportForTests(makeMockPtyOnceCrash('error: some other failure\n'));
+
+    try {
+      mkdirSync(imDir, { recursive: true });
+      writeFileSync(personaFile, 'IM PERSONA', 'utf-8');
+      await spawnClaude(9999, imDir, [], '/bin/fake-claude-boot-im');
+      await waitUntil(() => spawned[0] != null);
+      await new Promise(r => setTimeout(r, 30));
+      assert.ok(spawned[0].args.includes(personaFile), 'persona injected on first spawn');
+      assert.equal(spawned.length, 1, 'IM worker must not be de-persona-restarted by the relaxed half');
+      assert.equal(_isSystemPromptFileRejected('/bin/fake-claude-boot-im'), false);
+    } finally {
+      rmSync(imDir, { recursive: true, force: true });
+    }
   });
 
   // ─── 模型定制 system prompt(<dir>/system_prompt/)注入与自愈 ───

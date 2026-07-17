@@ -78,7 +78,7 @@ function _looksStaleManagedCommand(cmd) {
 
 function _purgeStaleManagedHooks(settings) {
   let removed = 0;
-  for (const sectionKey of ['PreToolUse', 'Stop']) {
+  for (const sectionKey of ['PreToolUse', 'Stop', 'SessionStart']) {
     const arr = settings.hooks?.[sectionKey];
     if (!Array.isArray(arr)) continue;
     for (let i = arr.length - 1; i >= 0; i--) {
@@ -99,7 +99,7 @@ function _purgeStaleManagedHooks(settings) {
 // 调用方负责 atomic write-back。返回 removed 数量。
 export function removeAllManagedHooks(settings) {
   let removed = 0;
-  for (const sectionKey of ['PreToolUse', 'Stop']) {
+  for (const sectionKey of ['PreToolUse', 'Stop', 'SessionStart']) {
     const arr = settings.hooks?.[sectionKey];
     if (!Array.isArray(arr)) continue;
     for (let i = arr.length - 1; i >= 0; i--) {
@@ -129,6 +129,7 @@ export function ensureHooks() {
     if (!settings.hooks) settings.hooks = {};
     if (!Array.isArray(settings.hooks.PreToolUse)) settings.hooks.PreToolUse = [];
     if (!Array.isArray(settings.hooks.Stop)) settings.hooks.Stop = [];
+    if (!Array.isArray(settings.hooks.SessionStart)) settings.hooks.SessionStart = [];
 
     let changed = false;
     // 先一次性清掉「path 已 stale 但还带 cc-viewer-managed marker」的老条目，
@@ -210,6 +211,31 @@ export function ensureHooks() {
     } else {
       settings.hooks.Stop.push({
         hooks: [turnEndDesired],
+      });
+      changed = true;
+    }
+
+    // SessionStart hook → session-start-bridge.js. Fires on startup/resume/
+    // clear/compact; no matcher (= all sources) — the bridge forwards `source`
+    // and the server gates on it. The `resume` source is the conversation-
+    // switch signal the V2Writer needs to re-bind routing after an in-terminal
+    // /resume (the wire session_id may not change, so no wire-level signal
+    // exists). Same CCVIEWER_PORT guard pattern as the other bridges.
+    const sessionStartBridgePath = resolve(SERVER_LIB, 'session-start-bridge.js');
+    const sessionStartCmd = `[ -n "$CCVIEWER_PORT" ] && node "${sessionStartBridgePath}" || true ${CCV_HOOK_MARKER}`;
+    const sessionStartDesired = _buildHookObj(sessionStartCmd);
+    const sessionStartExisting = settings.hooks.SessionStart.find(h => {
+      const cmd = h.hooks?.[0]?.command || '';
+      return cmd.includes('session-start-bridge.js');
+    });
+    if (sessionStartExisting) {
+      if (!_hookObjEqual(sessionStartExisting.hooks?.[0], sessionStartDesired)) {
+        sessionStartExisting.hooks = [_mergeHookObj(sessionStartExisting.hooks?.[0], sessionStartDesired)];
+        changed = true;
+      }
+    } else {
+      settings.hooks.SessionStart.push({
+        hooks: [sessionStartDesired],
       });
       changed = true;
     }

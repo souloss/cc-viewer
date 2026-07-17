@@ -69,6 +69,11 @@ function candidateDbPaths(opts) {
 // Exported for unit tests so the win32/darwin priority ordering can be exercised on any host.
 export { candidateDbPaths as _candidateDbPathsForTest };
 
+// Test hook: override the cached DatabaseSync — pass false to simulate a runtime
+// without node:sqlite (the getter returns the cached falsy value and the callers
+// take the unavailable path), or null to restore lazy detection.
+export function _setDatabaseSyncForTest(v) { _DatabaseSync = v; }
+
 // Returns the first existing cc-switch.db path, or null if none found.
 export function findCcSwitchDbPath() {
   for (const p of candidateDbPaths()) {
@@ -146,7 +151,9 @@ export function mapProviderToProfile(row) {
 export async function readCcSwitchProviders(dbPath) {
   const DatabaseSync = await getDatabaseSync();
   if (!DatabaseSync) {
-    return { profiles: [], error: 'node:sqlite unavailable on this runtime' };
+    // Keep the 'node:sqlite unavailable' prefix stable — the UI keys a dedicated
+    // localized message off it (ui.proxy.ccswitchNodeUnsupported).
+    return { profiles: [], error: 'node:sqlite unavailable on this runtime (requires Node >= 22.5 with --experimental-sqlite, or >= 23.4)' };
   }
   let db = null;
   try {
@@ -196,9 +203,10 @@ export async function discoverCcSwitchProviders() {
 // Merge cc-switch-imported profiles into cc-viewer's existing profile list.
 // Rules:
 // - ccs_-prefixed (previously imported): matched by id, updated with fresh data (credential refresh)
-// - proxy_-prefixed (user-created): left untouched, preserved as-is
+// - proxy_-prefixed (user-created) and any entry without a ccs_ id (including id-less ones): preserved as-is
 // - newly seen ccs_ ids: appended to the end of the list
-// - max (built-in default) is always kept at the front
+// - max (built-in default) is always present and first — seeded when missing, mirroring
+//   proxyProfilesPost's invariant, so a first-ever import can never write a list without it
 // Returns { profiles, imported, updated } counts.
 export function mergeImportedProfiles(existing, importedList) {
   const existingArr = Array.isArray(existing) ? existing : [];
@@ -209,23 +217,22 @@ export function mergeImportedProfiles(existing, importedList) {
   let newCount = 0;
   let updatedCount = 0;
 
-  // Put built-in max first (if present)
+  // Built-in max always first — reuse the existing entry, or seed the same shape
+  // proxyProfilesPost injects. Without this, a fresh install importing before ever
+  // saving a proxy would write a profiles list with no Default option.
+  const existingMax = existingArr.find(p => p && p.id === 'max');
+  result.push(existingMax || { id: 'max', name: 'Default' });
+  // Everything that is not max and not ccs_-sourced (user proxy_ profiles, unknown or
+  // id-less entries) is preserved verbatim — this function only owns the ccs_ namespace
   for (const p of existingArr) {
-    if (p.id === 'max') {
-      result.push(p);
-      break;
-    }
-  }
-  // User-created profiles (proxy_ prefix + others that are not ccs_ and not max) are preserved as-is
-  for (const p of existingArr) {
-    if (p.id === 'max') continue;
-    if (p.id && !p.id.startsWith('ccs_')) {
+    if (!p || p.id === 'max') continue;
+    if (!p.id || !p.id.startsWith('ccs_')) {
       result.push(p);
     }
   }
   // ccs_-sourced: use the freshly imported data
   for (const p of existingArr) {
-    if (p.id && p.id.startsWith('ccs_')) {
+    if (p && p.id && p.id.startsWith('ccs_')) {
       if (importedMap.has(p.id)) {
         result.push(importedMap.get(p.id));
         importedMap.delete(p.id);

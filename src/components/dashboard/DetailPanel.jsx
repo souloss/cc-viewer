@@ -1,5 +1,5 @@
 import React from 'react';
-import { Tabs, Typography, Button, Tag, Empty, Space, Select, Popover, Tooltip, message } from 'antd';
+import { Tabs, Typography, Button, Tag, Empty, Space, Select, Popover, Tooltip, message, Spin } from 'antd';
 import { CopyOutlined, FileTextOutlined, CodeOutlined, RightOutlined, DownOutlined } from '@ant-design/icons';
 import JsonViewer from '../viewers/JsonViewer';
 import ConceptHelp from '../common/ConceptHelp';
@@ -363,6 +363,9 @@ class DetailPanel extends React.Component {
   }
 
   getPrevMainAgentRequest() {
+    // Wire v3 rows path: the server returns prevMain alongside the fetched
+    // entry (the local list holds metadata rows without bodies).
+    if (this.props.hasPrevMainOverride) return this.props.prevMainOverride || null;
     const { requests, selectedIndex } = this.props;
     if (!requests || selectedIndex == null) return null;
     for (let i = selectedIndex - 1; i >= 0; i--) {
@@ -404,6 +407,23 @@ class DetailPanel extends React.Component {
     let request = this.getCurrentRequest();
     const { currentTab, onTabChange } = this.props;
 
+    // Wire v3 rows path: the entry arrives async from /api/v2-entry.
+    if (!request && this.props.detailLoading) {
+      return (
+        <div className={styles.emptyState}>
+          <Spin />
+          <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>{t('ui.detailLoading')}</div>
+        </div>
+      );
+    }
+    if (!request && this.props.detailError) {
+      return (
+        <div className={styles.emptyState}>
+          <Empty description={t('ui.detailLoadFailed')} />
+          <Button size="small" onClick={this.props.onDetailRetry} style={{ marginTop: 8 }}>{t('ui.detailRetry')}</Button>
+        </div>
+      );
+    }
     if (!request) {
       return (
         <div className={styles.emptyState}>

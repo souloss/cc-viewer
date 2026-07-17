@@ -24,7 +24,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createIncrementalReconstructor, reconstructEntries } from '../server/lib/delta-reconstructor.js';
 import { streamReconstructedEntries } from '../server/lib/log-stream.js';
-import { mergeLogFiles } from '../server/lib/log-management.js';
 import { mergeMainAgentSessions, messageFingerprint, isMergeBlockedEntry } from '../src/utils/sessionMerge.js';
 import { applyInPlaceLastMsgReplace } from '../src/utils/sessionManager.js';
 
@@ -488,40 +487,6 @@ describe('段级流式路径（streamReconstructedEntries，跨段共享 seqStat
     const f = fps(last.messages);
     assert.equal(new Set(f).size, f.length, 'epoch 交替不得产生重复消息');
     assert.equal(f.length, 8, '终态应为 ep1 最后 checkpoint 的 8 条');
-  });
-});
-
-describe('mergeLogFiles 落盘清洗', () => {
-  it('合并产物剥除全部内部字段，未补偿 stale 裸切片被丢弃', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ccv-merge-'));
-    try {
-      const { cp, A, B } = buildInversionScenario({ aShape: 'delta' });
-      // mergeLogFiles 要求 files 为 `project/file.jsonl` 相对路径且同项目
-      const { mkdirSync } = await import('node:fs');
-      mkdirSync(join(dir, 'proj'), { recursive: true });
-      // 文件 1：倒置序，stale delta A 为末条（无后续 checkpoint 可补偿，
-      // 但跨段 accumulated 已含真值 → _markStaleEntry 就地补偿为前缀）
-      const f1 = 'proj/m1.jsonl';
-      for (const e of [cp, B, A]) appendFileSync(join(dir, f1), JSON.stringify(e) + '\n---\n');
-      // 文件 2：一条普通 checkpoint（凑满 2 文件门槛）
-      const f2 = 'proj/m2.jsonl';
-      appendFileSync(join(dir, f2), JSON.stringify(checkpointEntry({ msgs: conv(2, 200), seq: 1, epoch: 'ep9' })) + '\n---\n');
-
-      const target = await mergeLogFiles(dir, [f1, f2]);
-      const rawOut = readFileSync(join(dir, target), 'utf-8');
-      for (const field of ['_seq', '_seqEpoch', '_staleReorder', '_reconstructBroken', '_deltaFormat', '_totalMessageCount', '_isCheckpoint', '_inPlaceReplaceDetected', '_eagerSnapshot']) {
-        assert.ok(!rawOut.includes(`"${field}"`), `合并产物不得含内部字段 ${field}`);
-      }
-      // 产物中不得有裸 delta 切片伪装的全量条目：所有 mainAgent 条目 messages 数 ≥ 6
-      const entries = rawOut.split('\n---\n').filter(s => s.trim()).map(s => JSON.parse(s));
-      for (const e of entries) {
-        if (e.mainAgent && Array.isArray(e.body?.messages) && e.body.messages.length > 0) {
-          assert.ok(e.body.messages.length >= 2, `产物条目 messages 数异常: ${e.body.messages.length}`);
-        }
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 

@@ -1,11 +1,14 @@
 // SSE event stream + log-registration / resume / turn-end routes (moved verbatim from server.js).
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LOG_FILE, _resumeState, resolveResumeChoice, _projectName } from '../interceptor.js';
+import { _projectName, getLiveLogSource, isContinuedLaunch } from '../interceptor.js';
 import { LOG_DIR } from '../../findcc.js';
-import { watchLogFile } from '../lib/log-watcher.js';
-import { countLogEntries, streamRawEntriesAsync, readPagedEntries } from '../lib/log-stream.js';
-import { awaitDrainOrClose } from '../lib/sse-backpressure.js';
+import { streamRawEntriesAsync } from '../lib/log-stream.js';
+import { migrationStatus } from '../lib/v2/migrate-prompt.js';
+import { reportSwallowed } from '../lib/error-report.js';
+import { sseHead, sseWrite, needsDrain, wireEnd, awaitWireDrain } from '../lib/wire-compress.js';
+import { readV2ColdBundle } from '../lib/v2/meta-rows.js';
+import { readV2SingleEntry } from '../lib/v2/adapter.js';
 import { enrichRawIfNeeded } from '../lib/enrich-plan-input.js';
 import { validateLogPath } from '../lib/log-management.js';
 import { isMainAgentEntry, extractCachedContent } from '../lib/kv-cache-analyzer.js';
@@ -49,74 +52,46 @@ function turnEndNotify(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
-// 注册新的日志文件进行 watch（供新进程复用旧服务时调用）
-function registerLog(req, res, parsedUrl, isLocal, deps) {
+// SessionStart hook notify (session-start-bridge.js): the conversation-switch
+// signal for an in-terminal /resume. Same security shape as turnEndNotify
+// (loopback-only + internal token + 16KB cap); the actual gating on
+// payload.source and the V2Writer re-bind live behind deps.onSessionStartNotify
+// (server.js → interceptor.markSessionStart).
+function sessionStartNotify(req, res, parsedUrl, isLocal, deps) {
+  if (!isLocal) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Loopback only' }));
+    return;
+  }
+  if (req.headers['x-ccviewer-internal'] !== deps.INTERNAL_TOKEN) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid bridge token' }));
+    return;
+  }
   let body = '';
-  req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', () => {
-    try {
-      const { logFile } = JSON.parse(body);
-      if (logFile && typeof logFile === 'string' && logFile.startsWith(LOG_DIR) && existsSync(logFile)) {
-        watchLogFile(deps.logWatcherOpts(logFile));
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
-      } else {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid log file path' }));
-      }
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
-    }
+  let truncated = false;
+  req.on('data', chunk => {
+    body += chunk;
+    if (body.length > 16384) { truncated = true; req.destroy(); }
   });
-}
-
-// 用户选择继续/新开日志
-function resumeChoice(req, res, parsedUrl, isLocal, deps) {
-  let body = '';
-  req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
-  req.on('end', async () => {
-    try {
-      const { choice } = JSON.parse(body);
-      if (choice !== 'continue' && choice !== 'new') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid choice' }));
-        return;
-      }
-      const result = resolveResumeChoice(choice);
-      if (!result) {
-        res.writeHead(409, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Already resolved' }));
-        return;
-      }
-      // 重新 watch 最终的日志文件
-      watchLogFile(deps.logWatcherOpts(result.logFile));
-      // 广播 resume_resolved + full_reload
-      const resolvedData = JSON.stringify({ logFile: result.logFile });
-      deps.clients.forEach(client => {
-        try {
-          client.write(`event: resume_resolved\ndata: ${resolvedData}\n\n`);
-        } catch { }
-      });
-      // 流式分段广播 full_reload，避免全量加载 OOM
-      const reloadTotal = await countLogEntries(LOG_FILE);
-      deps.clients.forEach(client => {
-        try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: reloadTotal, incremental: false })}\n\n`); } catch { }
-      });
-      await streamRawEntriesAsync(LOG_FILE, (raw) => {
-        deps.clients.forEach(client => {
-          try { client.write('event: load_chunk\ndata: ['); client.write(raw.replace(/\n/g, '')); client.write(']\n\n'); } catch { }
-        });
-      });
-      deps.clients.forEach(client => {
-        try { client.write(`event: load_end\ndata: {}\n\n`); } catch { }
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, logFile: result.logFile }));
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid request body' }));
+  req.on('end', () => {
+    if (truncated) {
+      console.warn('[session-start-notify] body exceeded 16KB cap — request destroyed');
+      return; // socket already closed by destroy()
     }
+    let payload = {};
+    let badJson = false;
+    try { payload = body ? JSON.parse(body) : {}; }
+    catch { badJson = true; console.warn('[session-start-notify] malformed JSON body'); }
+    if (badJson) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'malformed JSON body' }));
+      return;
+    }
+    try { deps.onSessionStartNotify(payload); }
+    catch (err) { reportSwallowed('session-start-notify.dispatch', err); }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
   });
 }
 
@@ -130,7 +105,10 @@ export function sseUpdateBadgeFrame(pending) {
 }
 
 async function events(req, res, parsedUrl, isLocal, deps) {
-  res.writeHead(200, {
+  // Negotiated Content-Encoding (br|identity). From here on, every byte of
+  // this response MUST go through sseWrite — a bare res.write would corrupt
+  // the compressed stream (see server/lib/wire-compress.js).
+  sseHead(req, res, 200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
@@ -144,7 +122,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 
   // SSE 心跳保活：每 30s 发送 ping 事件，防止连接被 OS/代理/浏览器静默断开
   const pingTimer = setInterval(() => {
-    try { res.write('event: ping\ndata: {}\n\n'); } catch {}
+    try { sseWrite(res, 'event: ping\ndata: {}\n\n'); } catch {}
   }, 30000);
 
   // server_config: 给前端推一次性的关键运行时常量，让前端 cooldown / debounce 等
@@ -152,20 +130,26 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   // 见 server.js 顶部 turnEnd debounce 的 SUNSET-MARKER 注释。
   // write 失败要 warn：之前静默吞会让 env override 漂移到前端硬常量 10s 而无人发觉。
   try {
-    res.write(`event: server_config\ndata: ${JSON.stringify({ turnEndDebounceMs: deps.turnEndDebounceMs })}\n\n`);
+    sseWrite(res, `event: server_config\ndata: ${JSON.stringify({ turnEndDebounceMs: deps.turnEndDebounceMs, wireV3: !!deps.wireV3, build: deps.serverBuild || '' })}\n\n`);
   } catch (err) {
     console.warn(`[server_config] SSE write failed (turnEndDebounceMs=${deps.turnEndDebounceMs}):`, err && err.message);
-  }
-
-  // 如果有待决的 resume 选择，发送 resume_prompt 事件
-  if (_resumeState) {
-    res.write(`event: resume_prompt\ndata: ${JSON.stringify({ recentFileName: _resumeState.recentFileName })}\n\n`);
   }
 
   // 补推「有新版」徽标：复用启动检查缓存的结果，让刷新/新标签页连上即恢复徽标。
   // 置于 deps.clients.push(res) 之前 → 新客户端仅得一份，不与一次性广播竞态。
   const updFrame = sseUpdateBadgeFrame(deps.pendingMajorUpdate);
-  if (updFrame) res.write(updFrame);
+  if (updFrame) sseWrite(res, updFrame);
+
+  // 1.7.0 迁移引导（P2）：当前项目仍有未转换的 v1 日志 → 连接即推 migrate_prompt。
+  // 是否弹窗由客户端决定（「不再提醒」偏好在客户端；continued=true 时无视 dismissed
+  // 再提醒一次——`-c` 续接的对话前半段在旧格式里，不迁移就看不到）。工作区切换后的
+  // 提示由 workspaces launch 路由对存量连接广播（本帧只覆盖新连接）。
+  try {
+    const mig = migrationStatus(LOG_DIR, _projectName || '');
+    if (mig.pending) {
+      sseWrite(res, `event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`);
+    }
+  } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
 
   // 增量加载参数：移动端带 since/cc/project 请求增量数据
   const sinceParam = parsedUrl.searchParams.get('since');
@@ -202,10 +186,21 @@ async function events(req, res, parsedUrl, isLocal, deps) {
   // ring=3 的容错意义：团队会话末尾常有连续 teammate 伪 mainAgent 条目，单记忆位会被
   // 挤掉真实 mainAgent；子串预过滤的理论误伤（键/值恰为 "teammate" 的真实条目）也由
   // 环内更早候选兜底。
+  // KEEP IN SYNC: server/lib/v2/adapter.js MAINAGENT_RING_DEPTH — on the v2 path
+  // the adapter's mainAgentRing (that depth) wholesale REPLACES this ring, so a
+  // mismatch would silently give v1 and v2 sessions different candidate depths.
   const MAINAGENT_SCAN_RING = 3;
   const mainAgentRawRing = [];
 
-  await streamRawEntriesAsync(LOG_FILE, async (raw) => {
+  // Wire v3 (V3.S5): flagged + v2 source ⇒ the legacy full-entry cold stream
+  // is REPLACED by rows + native lines (the byte win); the client assembler
+  // rebuilds entries locally. v1 legacy files keep the entry pipeline.
+  const _v3Src = deps.wireV3 ? getLiveLogSource() : null;
+  const v3Cold = !!(_v3Src && existsSync(join(_v3Src, 'journal.jsonl')));
+
+  // S6b: the cold-load source is the current v2 session dir when the v2
+  // writer is active (adapter stream), else the v1 file.
+  const coldLoadResult = v3Cold ? null : await streamRawEntriesAsync(getLiveLogSource(), async (raw) => {
     // 直接发送原始 JSON 字符串，不做 parse/reconstruct/stringify
     // ExitPlanMode V2 空 input 的条目按需补全 plan / planFilePath，其它原样透传
     if (res.destroyed || !res.writable) return;
@@ -215,9 +210,15 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     // 把 EPIPE 抛穿 async callback；res.on('close'|'error') 已会做 clients 数组清理。
     let drained = true;
     try {
-      res.write('event: load_chunk\ndata: [');
-      drained = res.write(out.includes('\n') ? out.replace(/\n/g, '') : out);
-      res.write(']\n\n');
+      sseWrite(res, 'event: load_chunk\ndata: [');
+      const ok = sseWrite(res, out.includes('\n') ? out.replace(/\n/g, '') : out);
+      sseWrite(res, ']\n\n');
+      // Two pressure signals: `ok` is the write target's input buffer (the
+      // ENCODER on compressed paths — its backlog would otherwise be invisible
+      // because compressed output is 20-80x smaller and rarely fills the
+      // socket), needsDrain(res) is the socket itself. awaitWireDrain below
+      // waits on whichever stream actually applies the pressure.
+      drained = ok && !needsDrain(res);
     } catch {
       return;
     }
@@ -225,7 +226,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
     // helper 内部会在 fulfill 时把另外两个监听器从 res 上摘掉，避免 N 次 backpressure
     // 累积出 N 个 stale close/error listener 触发 MaxListenersExceededWarning。
     if (!drained) {
-      await awaitDrainOrClose(res, deps.SSE_BACKPRESSURE_TIMEOUT_MS);
+      await awaitWireDrain(res, deps.SSE_BACKPRESSURE_TIMEOUT_MS);
     }
   }, {
     since: useIncremental ? sinceParam : undefined,
@@ -249,11 +250,62 @@ async function events(req, res, parsedUrl, isLocal, deps) {
         loadStartData.hasMore = !!hasMore;
         loadStartData.oldestTs = oldestTs || '';
       }
-      res.write(`event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
     },
   });
 
-  res.write(`event: load_end\ndata: {}\n\n`);
+  // Wire v3 (V3.S2/S4/S5): cold rows + native lines land BEFORE load_end so
+  // the flagged client can assemble its window in the same load cycle. The
+  // legacy chunk stream was skipped above (v3Cold) — load_start is emitted
+  // here from the rows metadata instead.
+  if (v3Cold) {
+    try {
+      const src = _v3Src;
+      // Single-flighted bundle (review P2-b): a reconnect storm coalesces to
+      // one journal fold + one native read per (dir, window). `since` scopes
+      // an incremental reconnect to the delta window (review P1-2) — the
+      // client upserts those rows instead of resetting the list.
+      const { meta, native } = await readV2ColdBundle(src, {
+        limit: useLimit ? effectiveLimit : 0,
+        since: useIncremental ? sinceParam : null,
+      });
+      // Build every payload BEFORE load_start so it can carry the exact byte
+      // total — the client renders a real received/total progress (the legacy
+      // wire's per-entry count-up has no per-frame granularity here).
+      const rowsPayload = JSON.stringify({ rows: meta.rows, totalCount: meta.totalCount, hasMore: meta.hasMore, oldestTs: meta.oldestTimestamp, incremental: !!useIncremental });
+      let v3Bytes = rowsPayload.length;
+      for (const p of native.convPayloads) v3Bytes += p.length;
+      for (const p of native.respPayloads) v3Bytes += p.length;
+      const loadStartData = { total: meta.totalCount, incremental: !!useIncremental, v3Bytes };
+      if (useLimit) {
+        loadStartData.hasMore = !!meta.hasMore;
+        loadStartData.oldestTs = meta.oldestTimestamp || '';
+      }
+      sseWrite(res, `event: load_start\ndata: ${JSON.stringify(loadStartData)}\n\n`);
+      sseWrite(res, `event: v2_requests\ndata: ${rowsPayload}\n\n`);
+      for (const payload of native.convPayloads) sseWrite(res, `event: v3_conv\ndata: ${payload}\n\n`);
+      for (const payload of native.respPayloads) sseWrite(res, `event: v3_resp\ndata: ${payload}\n\n`);
+      // kv-cache / context_window sources: rebuild the newest completed
+      // mainAgent rows. Depth 3 mirrors the legacy scan-ring fallback (review
+      // P2-e): the newest main may lack usage/cached-content or be a
+      // synthesis-gated orphan — earlier candidates then provide the values.
+      const mains = meta.rows.filter((r) => r.mainAgent && !r.inProgress).slice(-3);
+      for (const m of mains) {
+        const detail = await readV2SingleEntry(src, { seq: m.seq, sessionId: m.sessionId });
+        if (detail && detail.entry) mainAgentRawRing.push(detail.entry);
+      }
+    } catch (err) { reportSwallowed('sse.v2_requests', err); }
+  }
+
+  sseWrite(res, `event: load_end\ndata: {}\n\n`);
+
+  // S10a: v2 sources no longer invoke onScan (the two-pass window never
+  // stringifies out-of-window entries) — the adapter returns the newest-main
+  // raws as `mainAgentRing` instead. v1 sources still fill the ring via onScan.
+  if (Array.isArray(coldLoadResult?.mainAgentRing) && coldLoadResult.mainAgentRing.length > 0) {
+    mainAgentRawRing.length = 0;
+    mainAgentRawRing.push(...coldLoadResult.mainAgentRing);
+  }
 
   // Pass 1 入环的候选 newest-first 校验 + parse（≤K 次）。kv_cache 与 context_window
   // 各自取"最新一条能提供该值的真实 mainAgent"—— 与旧版逐条覆盖语义等价（环深度内）。
@@ -278,10 +330,10 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 
   // 发送最新 MainAgent 的 KV-Cache 和 context_window
   if (latestKvCache) {
-    res.write(`event: kv_cache_content\ndata: ${JSON.stringify(latestKvCache)}\n\n`);
+    sseWrite(res, `event: kv_cache_content\ndata: ${JSON.stringify(latestKvCache)}\n\n`);
   }
   if (latestContextWindow) {
-    res.write(`event: context_window\ndata: ${JSON.stringify(latestContextWindow)}\n\n`);
+    sseWrite(res, `event: context_window\ndata: ${JSON.stringify(latestContextWindow)}\n\n`);
     pushedContextWindow = true;
   }
   // Fallback: no MainAgent in log (e.g. fresh session after -c), read context-window.json
@@ -301,7 +353,7 @@ async function events(req, res, parsedUrl, isLocal, deps) {
         const effectiveSize = adaptContextWindow(contextSize, inputTokens);
         const usedPct = effectiveSize > 0 ? Math.round((totalTokens / effectiveSize) * 100) : 0;
         const data = { ...cw, context_window_size: effectiveSize, used_percentage: usedPct, remaining_percentage: 100 - usedPct };
-        res.write(`event: context_window\ndata: ${JSON.stringify(data)}\n\n`);
+        sseWrite(res, `event: context_window\ndata: ${JSON.stringify(data)}\n\n`);
       }
     } catch { }
   }
@@ -325,69 +377,31 @@ async function events(req, res, parsedUrl, isLocal, deps) {
 // API endpoint
 async function requests(req, res) {
   // 异步流式 JSON 数组输出，不做 reconstruct，发原始条目
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.write('[');
-  let first = true;
-  await streamRawEntriesAsync(LOG_FILE, (raw) => {
-    if (!first) res.write(',');
-    res.write(enrichRawIfNeeded(raw));
-    first = false;
-  });
-  res.write(']');
-  res.end();
-}
-
-// 分页历史条目端点：移动端"加载更多"按需拉取
-// 支持可选 ?file= 参数指定目标文件（用于本地日志分页），默认使用活跃会话文件
-async function entriesPage(req, res, parsedUrl) {
-  const before = parsedUrl.searchParams.get('before');
-  const limitVal = Math.min(parseInt(parsedUrl.searchParams.get('limit'), 10) || 100, 500);
-  if (!before || isNaN(new Date(before).getTime())) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'missing or invalid "before" parameter' }));
-    return;
-  }
-  const file = parsedUrl.searchParams.get('file');
-  let targetFile = LOG_FILE;
-  if (file) {
-    if (file.includes('..') || (!file.endsWith('.jsonl') && !file.endsWith('.jsonl.zip'))) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid file name' }));
-      return;
-    }
-    try { validateLogPath(LOG_DIR, file); } catch (e) {
-      const status = e.code === 'NOT_FOUND' ? 404 : e.code === 'ACCESS_DENIED' ? 403 : 400;
-      res.writeHead(status, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-      return;
-    }
-    targetFile = join(LOG_DIR, file);
-  }
+  // flush:false —— whole-stream response: the client parses the array only
+  // when complete, so per-macrotask flush boundaries would just cost ratio.
+  sseHead(req, res, 200, { 'Content-Type': 'application/json' }, { flush: false });
   try {
-    const result = await readPagedEntries(targetFile, { before, limit: limitVal });
-    // entries 是原始 JSON 字符串数组，parse 后返回给客户端
-    // ExitPlanMode V2 空 input 的条目用 enrichRawIfNeeded 在 raw 阶段补全
-    const entries = result.entries.map(raw => {
-      try { return JSON.parse(enrichRawIfNeeded(raw)); } catch { return null; }
-    }).filter(Boolean);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      entries,
-      hasMore: result.hasMore,
-      oldestTimestamp: result.oldestTimestamp,
-      count: entries.length,
-    }));
+    sseWrite(res, '[');
+    let first = true;
+    await streamRawEntriesAsync(getLiveLogSource(), (raw) => {
+      if (!first) sseWrite(res, ',');
+      sseWrite(res, enrichRawIfNeeded(raw));
+      first = false;
+    });
+    sseWrite(res, ']');
+    wireEnd(res);
   } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: err.message }));
+    // Mid-stream failure (e.g. session dir converted/removed while streaming):
+    // without this catch the rejection propagates through the dispatcher and
+    // kills the process. Headers are already sent — close the stream cleanly.
+    console.error('[api-requests]', err && err.stack || err);
+    wireEnd(res);
   }
 }
 
 export const eventsRoutes = [
   { method: 'POST', match: 'exact', path: '/api/turn-end-notify', handler: turnEndNotify },
-  { method: 'POST', match: 'exact', path: '/api/register-log', handler: registerLog },
-  { method: 'POST', match: 'exact', path: '/api/resume-choice', handler: resumeChoice },
+  { method: 'POST', match: 'exact', path: '/api/session-start-notify', handler: sessionStartNotify },
   { method: 'GET', match: 'exact', path: '/events', handler: events },
   { method: 'GET', match: 'exact', path: '/api/requests', handler: requests },
-  { method: 'GET', match: 'exact', path: '/api/entries/page', handler: entriesPage },
 ];

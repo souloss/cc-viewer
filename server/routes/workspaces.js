@@ -1,11 +1,23 @@
 // Workspace routes (moved verbatim from server.js handleRequest).
 import { existsSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
-import { LOG_FILE, initForWorkspace, resetWorkspace } from '../interceptor.js';
-import { watchLogFile, unwatchAll } from '../lib/log-watcher.js';
+import { initForWorkspace, resetWorkspace, getLiveLogSource, markContinuedLaunch, markForkSession, markResumeSession, isContinuedLaunch } from '../interceptor.js';
+import { LOG_DIR } from '../../findcc.js';
+import { migrationStatus } from '../lib/v2/migrate-prompt.js';
+import { reportSwallowed } from '../lib/error-report.js';
+
+// P2: claude continuation flags — the workspace launcher injects `-c` itself
+// (WorkspaceList's logCount heuristic), so argv scanning in cli.js never sees
+// it; this is detection channel ② of interceptor.isContinuedLaunch().
+const CONTINUE_FLAGS = new Set(['-c', '--continue', '-r', '--resume']);
+// Explicit resume flags — continued for the migrate prompt, but `-c` folder
+// adoption must NOT fire (it targets the latest main session, not the user's
+// chosen one). Mirrors cli.js's CCV_CLAUDE_RESUME channel.
+const RESUME_FLAGS = new Set(['-r', '--resume']);
 import { unwatchAllWorkflows } from '../lib/workflow-watcher.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
 import { countLogEntries, streamRawEntriesAsync } from '../lib/log-stream.js';
+import { sseWrite } from '../lib/wire-compress.js';
 
 function workspacesList(req, res, parsedUrl, isLocal, deps) {
   import('../workspace-registry.js').then(async ({ getWorkspaces }) => {
@@ -49,18 +61,28 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       const result = initForWorkspace(wsPath);
       process.env.CCV_PROJECT_DIR = wsPath;
 
-      // 启动日志监听
-      watchLogFile(deps.logWatcherOpts(LOG_FILE));
+      // 启动日志监听（S6b: v2 live feed when the v2 writer is active）
+      deps.startLogWatch();
 
       // 启动 stats worker（如果尚未启动）
       if (!deps.statsWorker) deps.startStatsWorker();
       deps.startStreamingStatusTimer();
 
+      // P2 检测通道②：workspace 启动器注入的 -c/--continue/-r/--resume（无论
+      // 是否走 PTY 分支都要打标——迁移提示的 continued 语义只取决于参数本身）。
+      const mergedArgs = [...deps.workspaceClaudeArgs, ...(Array.isArray(launchExtraArgs) ? launchExtraArgs : [])];
+      if (mergedArgs.some((a) => CONTINUE_FLAGS.has(a))) markContinuedLaunch();
+      // `--fork-session`: a continuation that mints a NEW session id on purpose —
+      // `-c` folder adoption must NOT fire for it.
+      if (mergedArgs.includes('--fork-session')) markForkSession();
+      // `-r`/`--resume`: user-chosen target session — adoption must not redirect
+      // it to the latest main session.
+      if (mergedArgs.some((a) => RESUME_FLAGS.has(a))) markResumeSession();
+
       // 启动 PTY
       const proxyPort = process.env.CCV_PROXY_PORT;
       if (proxyPort) {
         const { spawnClaude } = await import('../pty-manager.js');
-        const mergedArgs = [...deps.workspaceClaudeArgs, ...(Array.isArray(launchExtraArgs) ? launchExtraArgs : [])];
         await spawnClaude(parseInt(proxyPort), wsPath, mergedArgs, deps.workspaceClaudePath, deps.workspaceIsNpmVersion, deps.actualPort, deps.protocol, deps.INTERNAL_TOKEN);
       }
 
@@ -70,23 +92,37 @@ function workspacesLaunch(req, res, parsedUrl, isLocal, deps) {
       const startedPayload = `event: workspace_started\ndata: ${JSON.stringify({ projectName: result.projectName, path: wsPath, claudeProjectModel: readClaudeProjectModel(wsPath) })}\n\n`;
       deps.clients.forEach(client => {
         try {
-          client.write(startedPayload);
+          sseWrite(client, startedPayload);
         } catch {}
       });
 
       // 流式分段广播以刷新会话区域，避免全量加载 OOM
-      const wsReloadTotal = await countLogEntries(LOG_FILE);
+      // S6b: the live source is the v2 session dir when the v2 writer is
+      // active (a fresh workspace has no session yet → empty stream, the live
+      // feed picks up from the first request).
+      const wsReloadSource = getLiveLogSource();
+      const wsReloadTotal = await countLogEntries(wsReloadSource);
       deps.clients.forEach(client => {
-        try { client.write(`event: load_start\ndata: ${JSON.stringify({ total: wsReloadTotal, incremental: false })}\n\n`); } catch {}
+        try { sseWrite(client, `event: load_start\ndata: ${JSON.stringify({ total: wsReloadTotal, incremental: false })}\n\n`); } catch {}
       });
-      await streamRawEntriesAsync(LOG_FILE, (raw) => {
+      await streamRawEntriesAsync(wsReloadSource, (raw) => {
         deps.clients.forEach(client => {
-          try { client.write('event: load_chunk\ndata: ['); client.write(raw.replace(/\n/g, '')); client.write(']\n\n'); } catch {}
+          try { sseWrite(client, 'event: load_chunk\ndata: ['); sseWrite(client, raw.replace(/\n/g, '')); sseWrite(client, ']\n\n'); } catch {}
         });
       });
       deps.clients.forEach(client => {
-        try { client.write(`event: load_end\ndata: {}\n\n`); } catch {}
+        try { sseWrite(client, `event: load_end\ndata: {}\n\n`); } catch {}
       });
+
+      // 1.7.0 迁移引导（P2）：切进的项目仍有未转换 v1 日志 → 对存量连接广播
+      // migrate_prompt（新连接由 /events 的连接帧覆盖）。
+      try {
+        const mig = migrationStatus(LOG_DIR, result.projectName || '');
+        if (mig.pending) {
+          const frame = `event: migrate_prompt\ndata: ${JSON.stringify({ ...mig, continued: isContinuedLaunch() })}\n\n`;
+          deps.clients.forEach(client => { try { sseWrite(client, frame); } catch {} });
+        }
+      } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, projectName: result.projectName }));
@@ -139,8 +175,8 @@ function workspacesStop(req, res, parsedUrl, isLocal, deps) {
   ]).then(() => {
     // 接续原有清理流程
 
-    // 停止日志监听
-    unwatchAll();
+    // 停止日志监听（v1 tail + v2 live feed）
+    deps.stopLogWatch();
     unwatchAllWorkflows();
 
     // 重置 interceptor 状态
@@ -150,7 +186,7 @@ function workspacesStop(req, res, parsedUrl, isLocal, deps) {
     // 通知所有 SSE 客户端
     deps.clients.forEach(client => {
       try {
-        client.write(`event: workspace_stopped\ndata: {}\n\n`);
+        sseWrite(client, `event: workspace_stopped\ndata: {}\n\n`);
       } catch {}
     });
 

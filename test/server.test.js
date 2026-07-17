@@ -112,7 +112,11 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     // 时,回包应折叠成 "~/.claude"。仅临时改 env 跑一次只读 GET(绝不写真实目录),随后立即还原。
     const { homedir } = await import('node:os');
     const prev = process.env.CLAUDE_CONFIG_DIR;
+    const prevCtx = process.env.NODE_TEST_CONTEXT;
     process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+    // L1d 铁闸(2026-07-12)在测试上下文里拒绝非 tmp 的显式 CLAUDE_CONFIG_DIR；本用例只做
+    // 一次只读 GET 验证【回显映射】，临时剥掉 NODE_TEST_CONTEXT 模拟生产语义，随后立即还原。
+    delete process.env.NODE_TEST_CONTEXT;
     try {
       const res = await httpRequest(port, '/api/preferences');
       const data = res.json();
@@ -122,6 +126,7 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = prev;
+      if (prevCtx !== undefined) process.env.NODE_TEST_CONTEXT = prevCtx;
     }
   });
 
@@ -255,32 +260,13 @@ describeCli('server API endpoints', { concurrency: false }, () => {
     assert.equal(res.status, 400);
   });
 
-  // --- POST /api/resume-choice with invalid choice ---
-  it('POST /api/resume-choice rejects invalid choice', async () => {
+  // --- POST /api/resume-choice route removed (wire-v2 1.7.0) ---
+  it('POST /api/resume-choice is no longer routed (404)', async () => {
     const res = await httpRequest(port, '/api/resume-choice', {
       method: 'POST',
-      body: { choice: 'invalid' },
+      body: { choice: 'continue' },
     });
-    assert.equal(res.status, 400);
-  });
-
-  // --- POST /api/merge-logs validation ---
-  it('POST /api/merge-logs rejects less than 2 files', async () => {
-    const res = await httpRequest(port, '/api/merge-logs', {
-      method: 'POST',
-      body: { files: ['one.jsonl'] },
-    });
-    assert.equal(res.status, 400);
-    assert.ok(res.json().error.includes('2 files'));
-  });
-
-  it('POST /api/merge-logs rejects files from different projects', async () => {
-    const res = await httpRequest(port, '/api/merge-logs', {
-      method: 'POST',
-      body: { files: ['projA/a.jsonl', 'projB/b.jsonl'] },
-    });
-    assert.equal(res.status, 400);
-    assert.ok(res.json().error.includes('same project'));
+    assert.equal(res.status, 404);
   });
 
   // --- Static file / SPA fallback ---

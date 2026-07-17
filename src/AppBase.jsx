@@ -11,19 +11,21 @@ import { SettingsContext } from './contexts/SettingsContext';
 import { formatTokenCount, filterRelevantRequests, isRelevantRequest, visibleRequests, appendCacheLossMap, extractCachedContent } from './utils/helpers';
 import { snapToPreset, stepPreset } from './utils/displayScaleHelper';
 import { getProjectAlias, subscribeToAlias } from './utils/projectAlias';
-import { isMainAgent, isSessionBoundary, setTeammateNameSeeds, clearTeammateNameSeeds } from './utils/contentFilter';
+import { isMainAgent, isSessionBoundary } from './utils/contentFilter';
 import { apiUrl, getBasePath } from './utils/apiUrl';
 import { publish as publishWorkflowUpdate } from './utils/workflowStore';
 import { reportSwallowed } from './utils/errorReport';
 import { playEvent as playVoiceEvent, unlockAudio, setTurnEndCooldownMs } from './utils/voicePackPlayer';
 import { getDefaultBindingsForLocale as vpDefaultBindingsForLocale } from '../server/lib/voice-pack-events';
 import { mergeVoicePackInto } from '../server/lib/approval-modal-prefs';
-import { saveEntries, loadEntries, clearEntries, getCacheMeta, saveSessionEntries, loadSessionEntries } from './utils/entryCache';
-import { buildSessionIndex, splitHotCold, mergeSessionIndices, HOT_SESSION_COUNT, assignMessageTimestamps, applyInPlaceLastMsgReplace, getSessionStableId, resolveDisplaySessions, getLatestSessionByActivity, resolveHydratedPin, runPinHydration, applyBatchEntryTimestamps } from './utils/sessionManager';
+import { saveEntries, loadEntries, clearEntries, getCacheMeta } from './utils/entryCache';
+import { assignMessageTimestamps, applyInPlaceLastMsgReplace, getSessionStableId, resolveDisplaySessions, getLatestSessionByActivity, resolveHydratedPin, runPinHydration, applyBatchEntryTimestamps } from './utils/sessionManager';
 import { mergeMainAgentSessions as _mergeMainAgentSessions, isMergeBlockedEntry } from './utils/sessionMerge';
 import { reconstructEntries, createIncrementalReconstructor } from '../server/lib/delta-reconstructor.js';
-import { createEntrySlimmer, createIncrementalSlimmer, restoreSlimmedEntry, internEntryBigFields } from './utils/entry-slim.js';
+import { createEntrySlimmer, createIncrementalSlimmer, internEntryBigFields } from './utils/entry-slim.js';
 import { yieldToMain, runChunkedPass, INGEST_BATCH_SIZE } from './utils/ingestPipeline.js';
+import { rowToListItem } from './utils/v3Rows.js';
+import { createV3Assembler } from './utils/v3Assembler.js';
 import { reinitializeMermaid } from './hooks/useMermaidRender';
 import styles from './App.module.css';
 
@@ -84,22 +86,33 @@ class AppBase extends React.Component {
     const cacheType = cacheExpireAt ? savedCacheType : null;
     this.state = {
       requests: [],
+      // Wire v3 (flagged): request-list metadata rows — the list's data source
+      // when the server announces wireV3 via server_config. Row identity for
+      // live upserts is (sessionId, seq); timestamp|url stays the cross-channel
+      // locate/dedup identity shared with `requests`.
+      v2Rows: [],
+      v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
       selectedIndex: null,
       viewMode: 'raw',
       cacheExpireAt,
       cacheType,
       mainAgentSessions: [], // [{ messages, response }]
       // 「仅展示当前会话」锁定的会话稳定 id（= 会话起点 ts）；null = 未锁定。
-      // 服务端持久化（按项目 + 可选 --pid 实例隔离），同进程多端经 SSE 实时一致。
+      // 服务端持久化（按项目），同进程多端经 SSE 实时一致。
       // 命名提示：本字段就是服务端 /api/session-pin 里的 `pinnedSessionId`（同一个值，Ts/Id 同物）。
       pinnedSessionTs: null,
-      // 本实例 id（来自 ccv --pid），随 /api/project-name 拿回；null = 默认模式。仅用于标题 项目(id)。
-      instanceId: null,
       importModalVisible: false,
+      migratePromptVisible: false, // 1.7.0 P2: startup v1→v2 migration prompt
+      migratePromptData: null,     // {files, totalBytes, otherProjects, continued}
+      unmigratedV1Count: 0,        // v1-view hint row + migrate-button gating
+      unmigratedV1Bytes: 0,
+      v1FileCount: 0,      // v1 files ON DISK — gates the v1-view entry link
+      logView: 'v2',       // logs-modal view: 'v2' (default) | 'v1' (legacy files)
       localLogs: {},       // { projectName: [{file, timestamp, size}] }
+      localLogsV1: {},     // v1 view data ({ projectName: [{file, timestamp, size}] })
       localLogsLoading: false,
       refreshingStats: false,
-      logShowAllInstances: false, // 「显示全部实例」开关：true 时越过 --pid 硬隔离列出全部实例日志
+      wireV2Convert: null, // wire-v2 S8 迁移任务状态快照（GET /api/wire-v2-convert），弹窗打开期间轮询
       showAll: false,
       lang: getLang(),
       userProfile: null,    // { name, avatar }
@@ -108,10 +121,7 @@ class AppBase extends React.Component {
       // 用作 AppHeader 血条 calibration 'auto' 启动期的回落 hint（避 haiku init ping 误判 200K）。
       // 初值 null = 还没拿到；/api/claude-settings 与 workspace_started SSE 都会塞值。
       claudeProjectModel: null,
-      resumeModalVisible: false,
-      resumeFileName: '',
       resumeRememberChoice: false,
-      resumeAutoChoice: null, // null | "continue" | "new"；出厂默认 'continue' 由 GET /api/preferences 注入（键缺失时），这里的 null 只是 pre-hydrate 占位
       autoApproveSeconds: 0, // 自动审批倒计时秒数，0=关闭
       logDir: '',
       themeColor: /Windows/i.test(navigator.userAgent) ? 'dark' : 'light',
@@ -121,6 +131,7 @@ class AppBase extends React.Component {
       updateModalVisible: false,
       fileLoading: false,
       fileLoadingCount: 0,
+      fileLoadingBytes: null,
       isDragging: false,
       selectedLogs: new Set(),   // Set<file>
       githubStars: null,
@@ -136,10 +147,6 @@ class AppBase extends React.Component {
       contextBarLocked: false, // /clear 触发后强制血条 0K (0%)，到用户发出非 /clear 消息时解锁
       isStreaming: false,
       streamingLatest: null, // { timestamp, url, content, model } — Live typewriter overlay for latest assistant message
-      hasMoreHistory: false,
-      loadingMore: false,
-      sessionIndex: [],
-      loadingSessionId: null,
       proxyProfiles: [],
       activeProxyId: 'max',
       defaultConfig: null,
@@ -239,13 +246,10 @@ class AppBase extends React.Component {
     try {
       if (typeof document === 'undefined') return;
       const alias = getProjectAlias(projectName);
-      // --pid 实例：标题加 (id) 后缀，让多开 ccv 时能从标签页一眼分辨是哪个实例。
-      const id = this.state.instanceId;
-      const suffix = id ? `(${id})` : '';
       if (alias) {
-        document.title = `${alias}${suffix}`;
+        document.title = alias;
       } else if (projectName) {
-        document.title = `${projectName}${suffix}`;
+        document.title = projectName;
       } else {
         document.title = 'CC Viewer';
       }
@@ -314,7 +318,6 @@ class AppBase extends React.Component {
       expandThinking: !!prefs.expandThinking,
       expandDiff: !!prefs.expandDiff,
       showFullToolContent: !!prefs.showFullToolContent,
-      onlyCurrentSession: prefs.onlyCurrentSession !== undefined ? !!prefs.onlyCurrentSession : /Windows/i.test(navigator.userAgent),
       showThinkingSummaries: !!cs.showThinkingSummaries,
     };
   }
@@ -327,9 +330,6 @@ class AppBase extends React.Component {
     if (data.lang) this.setState({ lang: data.lang });
     // collapseToolResults / expandThinking / expandDiff / showFullToolContent
     // 不再镜像进 state —— render 经 _prefValues() 直接读 context.preferences。
-    if (data.resumeAutoChoice) {
-      this.setState({ resumeAutoChoice: data.resumeAutoChoice });
-    }
     if (typeof data.autoApproveSeconds === 'number') {
       this.setState({ autoApproveSeconds: data.autoApproveSeconds });
     }
@@ -408,20 +408,10 @@ class AppBase extends React.Component {
   // ─── 「仅展示当前会话」会话锁定（pin） ──────────────────────────
   // 生效的「仅展示当前会话」值：本地日志模式强制关闭（须看全量历史），否则取 _prefValues()
   // （含 Windows 未设时默认开启），与 App.jsx render 传给 ChatView 的口径一致。
+  // 1.7.0: 「仅展示当前会话」是唯一模式（v2 无跨文件日志连续性）；本地日志查看
+  // （一个 v2 会话可含多个 /clear epoch 展示会话）仍展示全部。
   _effectiveOnlyCurrentSession() {
-    if (this._isLocalLog) return false;
-    return !!this._prefValues().onlyCurrentSession;
-  }
-
-  // 移动端 splitHotCold 的「强制保热」集合：始终把当前 pin 会话纳入，防其被冷淘汰后
-  // 在 [对话] 里退化成「加载」占位（findIndex 也就再找不到它）。可附加额外 id（如刚加载的冷 session）。
-  _pinnedSessionIdSet(extra) {
-    const s = new Set();
-    if (this.state.pinnedSessionTs != null) s.add(this.state.pinnedSessionTs);
-    if (Array.isArray(extra)) {
-      for (const id of extra) { if (id != null) s.add(id); }
-    }
-    return s;
+    return !this._isLocalLog;
   }
 
   // Single definition of "the current session's stable id" — used by follow-latest
@@ -445,7 +435,7 @@ class AppBase extends React.Component {
     } catch {}
   }
 
-  // pin 持久化 → 服务端（POST /api/session-pin），由 server 按项目 + --pid 实例键落盘并 SSE 广播本进程，
+  // pin 持久化 → 服务端（POST /api/session-pin），由 server 按项目落盘并 SSE 广播本进程，
   // 多端实时一致。本地日志模式无 server，短路不发。
   _persistPin() {
     if (this._isLocalLog) return;
@@ -567,6 +557,7 @@ class AppBase extends React.Component {
       generatedTimestamps: [],   // 跟 timestamps 平行：position → _generatedTs（assistant 才有）
       prevMainAgentTs: null,      // 上一次 mainAgent entry 的 ts，给本次新增 assistant msg 赋
       prevUserId: null,
+      prevEpoch: null,            // task B: 上一条 mainAgent 的 _seqEpoch，epoch 变化=确定性会话边界
       sessions: [],
       filtered: [],
       currentSessionId: null,
@@ -577,15 +568,9 @@ class AppBase extends React.Component {
    *  同步与分帧路径共用此方法 —— mergeMainAgentSessions 的调用序列/参数/
    *  _sessionId 赋值因此与抽取前完全相同（sessionMerge 脆弱区零语义变化）。 */
   _processOneEntry(entry, i, st) {
-    // Rotation-context sentinel (first frame of a post-rotation segment):
-    // capture the carry-forward payload, seed the teammate-name registry, and
-    // never treat it as a renderable request (isRelevantRequest also rejects
-    // it as belt-and-braces for other filter paths).
-    if (entry && entry.ccvRotationContext) {
-      this._rotationContext = entry;
-      if (Array.isArray(entry.teammateNames)) setTeammateNameSeeds(entry.teammateNames);
-      return;
-    }
+    // Legacy v1 rotation-context sentinel: metadata frame from un-migrated
+    // logs — never a renderable request (v2 sessions have no rotation).
+    if (entry && entry.ccvRotationContext) return;
 
     // requestIndex
     this._requestIndexMap.set(`${entry.timestamp}|${entry.url}`, i);
@@ -709,110 +694,46 @@ class AppBase extends React.Component {
     }
   }
 
-  /** initSSE load_end 的分帧版主流程（移动端 hot/cold 分层提交原样保留）。 */
+  /** initSSE load_end 的分帧版主流程。 */
   async _runSseColdIngest(rawEntries, { isIncremental, unlockContextBar }) {
     const myToken = ++this._ingestToken;
     this._ingestRunning = true;
-    // Seed lifecycle: reset carried teammate-name seeds ONLY on non-incremental
-    // baseline loads (workspace switches land here too). Incremental reloads
-    // (SSE reconnect ?since=, mobile cache merge) carry no sentinel and must
-    // not wipe seeds they cannot re-deliver. The route re-delivers context
-    // after this load, and an in-window sentinel re-seeds during processing.
-    if (!isIncremental) {
-      clearTeammateNameSeeds();
-      this._rotationContext = null;
-      this._backfillDoneFor = null;
-      this._backfillCount = 0;
-    }
     const ctl = this._makeIngestCtl(myToken);
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
     if (core.empty) {
-      const st = { fileLoading: false, fileLoadingCount: 0 };
+      const st = { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null };
       if (unlockContextBar) st.contextBarLocked = false;
       this._commitColdIngest(myToken, st);
       return;
     }
     const { entries, mainAgentSessions, filtered } = core;
 
-    // P1: 移动端 hot/cold 分层
-    if (isMobile && mainAgentSessions.length > HOT_SESSION_COUNT) {
-      const sessionIndex = buildSessionIndex(entries, mainAgentSessions);
-      const fullIndex = isIncremental
-        ? mergeSessionIndices(this.state.sessionIndex, sessionIndex)
-        : sessionIndex;
-      const unslimmed = entries.map(e => e._slimmed ? restoreSlimmedEntry(e, entries) : e);
-      const { hotEntries, allSessions, coldGroups } = splitHotCold(
-        unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
-      );
-      this._sseSlimmer = null; this._sseReconstructor = null;
-      // 冷 session entries 异步写入 IndexedDB
-      const pn = this.state.projectName;
-      if (pn) {
-        for (const [sid, coldEntries] of coldGroups) {
-          saveSessionEntries(pn, sid, coldEntries);
-        }
-        // 主缓存保存全量 entries（而非 hotEntries），确保下次缓存恢复时有完整数据
-        saveEntries(pn, entries);
+    const newState = {
+      requests: entries,
+      selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
+      mainAgentSessions,
+      fileLoading: false,
+      fileLoadingCount: 0,
+      fileLoadingBytes: null,
+    };
+    if (unlockContextBar) newState.contextBarLocked = false;
+    this._commitColdIngest(myToken, newState, () => {
+      if (isMobile && this.state.projectName) {
+        saveEntries(this.state.projectName, entries);
       }
-      // Fix #4: selectedIndex 基于 hotEntries 而非全量 filtered
-      const hotFiltered = hotEntries.filter(e => isRelevantRequest(e));
-      const newState = {
-        requests: hotEntries,
-        selectedIndex: hotFiltered.length > 0 ? hotFiltered.length - 1 : null,
-        mainAgentSessions: allSessions,
-        sessionIndex: fullIndex,
-        fileLoading: false,
-        fileLoadingCount: 0,
-      };
-      // 增量模式保留缓存恢复时设的 hasMoreHistory；非增量（limit）模式用服务端的值
-      // hasMoreHistory 必须 AND 上 _oldestTs 非空，否则后续 loadMoreHistory() 会拼 before=null 触发 400
-      if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
-      if (unlockContextBar) newState.contextBarLocked = false;
-      this._commitColdIngest(myToken, newState);
-    } else {
-      const newState = {
-        requests: entries,
-        selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
-        mainAgentSessions,
-        fileLoading: false,
-        fileLoadingCount: 0,
-      };
-      if (!isIncremental) newState.hasMoreHistory = !!this._hasMoreHistory && !!this._oldestTs;
-      if (unlockContextBar) newState.contextBarLocked = false;
-      this._commitColdIngest(myToken, newState, () => {
-        if (isMobile && this.state.projectName) {
-          saveEntries(this.state.projectName, entries);
-        }
-        // Post-rotation teammate backfill — desktop baseline loads only. The
-        // route decides whether rotation context exists (the in-band sentinel
-        // may sit outside the load window on long post-rotation files), so
-        // the call is unconditional up to the guards; "no context" is a
-        // silent no-op. Mobile is excluded in v1: persisting pre-split
-        // entries would corrupt the _oldestTs paging cursor.
-        if (!isIncremental && !isMobile && !this._isLocalLog && !newState.hasMoreHistory) {
-          this._fetchPrevSegmentTeammates();
-        }
-      });
-    }
+    });
   }
 
   /** loadLocalLogFile load_end 的分帧版主流程。 */
   async _runLocalLogIngest(rawEntries) {
     const myToken = ++this._ingestToken;
     this._ingestRunning = true;
-    // History-switcher loads must not inherit live-session seeds or fire a
-    // stale backfill; a historical post-rotation segment self-seeds from its
-    // own head sentinel during processing.
-    clearTeammateNameSeeds();
-    this._rotationContext = null;
-    this._backfillDoneFor = null;
-    this._backfillCount = 0;
     const ctl = this._makeIngestCtl(myToken);
     const core = await this._runColdIngestCore(rawEntries, ctl);
     if (core.aborted) return;
     if (core.empty) {
-      this._commitColdIngest(myToken, { fileLoading: false, fileLoadingCount: 0, serverCachedContent: null });
+      this._commitColdIngest(myToken, { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null, serverCachedContent: null });
       return;
     }
     this._commitColdIngest(myToken, {
@@ -821,9 +742,8 @@ class AppBase extends React.Component {
       mainAgentSessions: core.mainAgentSessions,
       fileLoading: false,
       fileLoadingCount: 0,
+      fileLoadingBytes: null,
       serverCachedContent: null,
-      // logfile 只读模式恒为全量，无「加载更早」分页
-      hasMoreHistory: this._isLocalLog ? false : (!!this._hasMoreHistory && !!this._oldestTs),
     });
   }
 
@@ -876,7 +796,6 @@ class AppBase extends React.Component {
 
     // 等 SettingsProvider 完成 /api/preferences fetch,把字段同步到本地 state。
     // setLang / setClaudeConfigDir 已由 Provider 处理,这里不再重复。
-    // initSSE 仍可读 this._prefsReady(getter 代理到 context),resume_prompt 行为不变。
     this.context._prefsReady.then(data => this._hydratePrefsFromData(data));
 
     // 获取系统用户头像和名字
@@ -934,9 +853,7 @@ class AppBase extends React.Component {
       .then(res => res.json())
       .then(data => {
         const projectName = data.projectName || '';
-        const instanceId = data.instanceId || null;
-        // instanceId 与 projectName 同批入 state；标题在回调里应用，确保读到已更新的 instanceId。
-        this.setState({ projectName, instanceId }, () => this._applyDocTitle(projectName));
+        this.setState({ projectName }, () => this._applyDocTitle(projectName));
         this._resubscribeAlias(projectName);
         // 移动端：从缓存恢复数据，在 SSE 数据到达前立即渲染
         if (isMobile && projectName && !logfile && this.state.requests.length === 0) {
@@ -944,36 +861,12 @@ class AppBase extends React.Component {
             if (cached && this.state.requests.length === 0) {
               this._batchSlim(cached);
               const { mainAgentSessions, filtered } = this._processEntries(cached);
-              // P1: 缓存恢复也做 hot/cold 分层，避免全量数据驻留内存
-              if (mainAgentSessions.length > HOT_SESSION_COUNT) {
-                const sessionIndex = buildSessionIndex(cached, mainAgentSessions);
-                // slimmer 全平台：split 前还原 slimmed entries，确保 IndexedDB / hot 数据完整
-                const unslimmed = cached.map(e => e._slimmed ? restoreSlimmedEntry(e, cached) : e);
-                const { hotEntries, allSessions } = splitHotCold(
-                  unslimmed, mainAgentSessions, sessionIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
-                );
-                this._sseSlimmer = null; this._sseReconstructor = null; // 重置，下帧 SSE 重建
-                const hotFiltered = hotEntries.filter(e => isRelevantRequest(e));
-                // 计算 _oldestTs 供"加载更多"使用
-                this._oldestTs = hotEntries.length > 0 ? hotEntries[0].timestamp : null;
-                this.setState({
-                  requests: hotEntries,
-                  selectedIndex: hotFiltered.length > 0 ? hotFiltered.length - 1 : null,
-                  mainAgentSessions: allSessions,
-                  sessionIndex,
-                  hasMoreHistory: !!this._oldestTs,
-                  fileLoading: false,
-                });
-              } else {
-                this._oldestTs = cached.length > 0 ? cached[0].timestamp : null;
-                this.setState({
-                  requests: cached,
-                  selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
-                  mainAgentSessions,
-                  hasMoreHistory: !!this._oldestTs,
-                  fileLoading: false,
-                });
-              }
+              this.setState({
+                requests: cached,
+                selectedIndex: filtered.length > 0 ? filtered.length - 1 : null,
+                mainAgentSessions,
+                fileLoading: false,
+              });
             }
           });
         }
@@ -1007,6 +900,7 @@ class AppBase extends React.Component {
   }
 
   componentWillUnmount() {
+    this._stopWireV2ConvertPoll();
     window.removeEventListener('keydown', this._onScaleKeydown);
     if (Array.isArray(this._tabBridgeDisposers)) {
       for (const off of this._tabBridgeDisposers) {
@@ -1021,7 +915,6 @@ class AppBase extends React.Component {
     if (this._loadingCountTimer) cancelAnimationFrame(this._loadingCountTimer);
     if (this._loadingCountRafId) cancelAnimationFrame(this._loadingCountRafId);
     if (this._cacheSaveTimer) clearTimeout(this._cacheSaveTimer);
-    if (this._evictionTimer) clearTimeout(this._evictionTimer);
     if (this._sseTimeoutTimer) clearTimeout(this._sseTimeoutTimer);
     if (this._sseReconnectTimer) clearTimeout(this._sseReconnectTimer);
     if (this._streamingOffTimer) clearTimeout(this._streamingOffTimer);
@@ -1071,6 +964,131 @@ class AppBase extends React.Component {
     this._ingestRunning = false;
     this._liveGateBuffer = [];
   };
+
+  /** Loading progress fragment: byte progress on the v3 wire (server sends
+   *  the exact frame byte total in load_start), legacy count-up otherwise. */
+  _loadingProgressText() {
+    const b = this.state.fileLoadingBytes;
+    if (b && b.total > 0) {
+      const mb = (n) => (n / 1048576).toFixed(1);
+      const pct = Math.min(100, Math.round((b.recv / b.total) * 100));
+      return `${mb(b.recv)}/${mb(b.total)} MB (${pct}%)`;
+    }
+    return `(${this.state.fileLoadingCount})`;
+  }
+
+  /** Wire v3 loading progress: accumulate received frame bytes, rAF-throttled
+   *  into state (mirrors the legacy count-up throttling). */
+  _v3TrackBytes(event) {
+    if (!this._v3BytesTotal || this._isIncremental) return;
+    this._v3RecvBytes += (event?.data?.length || 0);
+    if (!this._v3BytesRafId) {
+      this._v3BytesRafId = requestAnimationFrame(() => {
+        this._v3BytesRafId = null;
+        if (this.state.fileLoading) {
+          this.setState({ fileLoadingBytes: { recv: Math.min(this._v3RecvBytes, this._v3BytesTotal), total: this._v3BytesTotal } });
+        }
+      });
+    }
+  }
+
+  /** Wire v3 (V3.S5): lazy assembler — replays native conv/responses lines
+   *  into v1-shape entries for the existing ingest pipeline. */
+  _v3Assembler() {
+    if (!this._v3AssemblerInst) this._v3AssemblerInst = createV3Assembler();
+    return this._v3AssemblerInst;
+  }
+
+  /** Wire v3 baseline reset (review P0-2): every path that resets the entry
+   *  baseline (fresh cold reset frame, workspace switch, full_reload) must
+   *  also drop the v3 client state, or the assembler's channel pointers, the
+   *  live dedup set and the rows list leak across cycles — stale-project rows
+   *  in the list, 404 detail fetches, unbounded growth on reconnecting tabs. */
+  _v3ResetClientState() {
+    try { this._v3AssemblerInst?.reset(); } catch (e) { reportSwallowed('v3.reset', e); }
+    this._v3SeenLive?.clear();
+    this._v3ColdRows = null;
+    this._v3PendingLive = [];
+    this._v3AdaptSource = null;
+    this._v3Adapted = null;
+  }
+
+  /** Apply one live v3 frame to the assembler. Split out from the SSE
+   *  handlers so frames buffered during the async cold assembly (review
+   *  P1-1: a live delta advancing the shared channel ptr mid-assembly
+   *  corrupts the remaining cold rows) replay through identical logic. */
+  _applyV3Conv(data) {
+    if (data.lines) this._v3Assembler().addConvLines(data.sessionId, data.channel, data.lines);
+    else if (data.line) this._v3Assembler().addConvLines(data.sessionId, data.channel, data.line);
+  }
+
+  _applyV3Resp(data) {
+    this._v3Assembler().addRespLines(data.sessionId, data.lines ?? data.line);
+  }
+
+  _applyV3Delta(row) {
+    this._ingestV2Rows([row], { reset: false });
+    // Correction re-sends replace the ROW (typeTag/cacheLoss); only new
+    // seqs or the placeholder→completed transition rebuild an entry.
+    const k = `${row.sessionId}\x00${row.seq}\x00${row.inProgress ? 1 : 0}`;
+    if (this._v3SeenLive?.has(k)) return;
+    (this._v3SeenLive ??= new Set()).add(k);
+    this._ingestLiveEntry(this._v3Assembler().buildEntry(row));
+  }
+
+  /** Drain frames buffered while the cold assembly owned the assembler. */
+  _v3DrainPendingLive() {
+    const pending = this._v3PendingLive || [];
+    this._v3PendingLive = [];
+    for (const p of pending) {
+      try {
+        if (p.kind === 'conv') this._applyV3Conv(p.data);
+        else if (p.kind === 'resp') this._applyV3Resp(p.data);
+        else if (p.kind === 'delta') this._applyV3Delta(p.data);
+      } catch (e) { reportSwallowed('v3.pending-drain', e); }
+    }
+  }
+
+  /** Live entry injection shared by the legacy `data:` frames (via
+   *  handleEventMessage) and the V3.S5 assembler-built entries. Gated during
+   *  the ingest pipeline AND the v3 chunked cold assembly (both commit via
+   *  the pipeline, which drains the gate buffer). */
+  _ingestLiveEntry(entry) {
+    if (this._ingestRunning || this._v3Assembling) {
+      this._liveGateBuffer.push(entry);
+      return;
+    }
+    this._pendingEntries.push(entry);
+    if (!this._flushRafId) {
+      this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
+    }
+  }
+
+  /** Wire v3 (V3.S3a): ingest metadata rows. `reset` replaces the whole list
+   *  (cold v2_requests frame — reconnects re-send it, so replace is idempotent);
+   *  otherwise upsert by (sessionId, seq) — live deltas send a placeholder row,
+   *  its completed upgrade, and possibly a classification correction. */
+  _ingestV2Rows(rows, { reset = false, totalCount, hasMore, oldestTs } = {}) {
+    this.setState((prev) => {
+      let next;
+      if (reset) {
+        next = rows;
+      } else {
+        next = prev.v2Rows.slice();
+        const idx = new Map(next.map((r, i) => [`${r.sessionId}\x00${r.seq}`, i]));
+        for (const row of rows) {
+          const k = `${row.sessionId}\x00${row.seq}`;
+          const at = idx.get(k);
+          if (at !== undefined) next[at] = row;
+          else { idx.set(k, next.length); next.push(row); }
+        }
+      }
+      const meta = reset
+        ? { totalCount: totalCount ?? rows.length, hasMore: !!hasMore, oldestTs: oldestTs || '' }
+        : { ...prev.v2RowsMeta, totalCount: prev.v2RowsMeta.totalCount + (next.length - prev.v2Rows.length) };
+      return { v2Rows: next, v2RowsMeta: meta };
+    });
+  }
 
   _reconnectSSE() {
     // SSE 连接真死（心跳超时 / 重试上限），清除流式 overlay 避免卡死
@@ -1138,144 +1156,6 @@ class AppBase extends React.Component {
       }
     };
     this._loadingCountTimer = requestAnimationFrame(step);
-  }
-
-  /**
-   * Post-rotation teammate backfill: fetch teammate-only entries from the
-   * previous log segment and prepend them so pre-split teammate rows reappear.
-   * One-shot per rotation context; superseded fetches (workspace switch / new
-   * cold ingest mid-flight) are dropped via the ingest token, mirroring the
-   * reload-token discipline used elsewhere.
-   */
-  async _fetchPrevSegmentTeammates() {
-    const ctxKey = this._rotationContext?.from || '__probe__';
-    if (this._backfillDoneFor === ctxKey) return;
-    const tok = this._ingestToken;
-    let lines;
-    try {
-      const res = await fetch(apiUrl('/api/prev-segment-teammates'));
-      if (!res.ok) return;
-      const text = await res.text();
-      lines = text.split('\n').filter(Boolean).map((l) => {
-        try { return JSON.parse(l); } catch { return null; }
-      }).filter(Boolean);
-    } catch { return; }
-    if (this._ingestToken !== tok || this._unmounted) return; // superseded mid-flight
-    if (!lines || lines.length === 0) return;
-    this._backfillDoneFor = ctxKey;
-    const ctx = lines[0];
-    const done = lines[lines.length - 1];
-    // The route's context line is the primary seed channel — the in-band
-    // sentinel may be outside the client's load window entirely.
-    if (Array.isArray(ctx?.teammateNames) && ctx.teammateNames.length > 0) {
-      setTeammateNameSeeds(ctx.teammateNames);
-    }
-    if (!done || done.error || !done.prevSegment) return; // not post-rotation / no predecessor
-    const entries = lines.slice(1, -1).filter((e) => e && e.timestamp && e.url && !e.done);
-    const fresh = entries.filter((e) => !this._requestIndexMap.has(`${e.timestamp}|${e.url}`));
-    if (fresh.length === 0) return;
-    // Prepend precedent (loadMoreHistory): merge → slim → reprocess → commit.
-    const reconstructed = reconstructEntries(fresh);
-    const merged = [...reconstructed, ...this.state.requests];
-    this._batchSlim(merged);
-    const { mainAgentSessions } = this._processEntries(merged);
-    if (this._ingestToken !== tok || this._unmounted) return;
-    this._backfillCount = (this._backfillCount || 0) + reconstructed.length;
-    this.setState((prev) => {
-      // Shift by the count of rows the ACTIVE view actually gained —
-      // selectedIndex indexes visibleRequests, which depends on showAll.
-      const addedVisible = visibleRequests(reconstructed, prev.showAll).length;
-      return {
-        requests: merged,
-        mainAgentSessions,
-        // Keep the DetailPanel selection on the same logical row.
-        selectedIndex: prev.selectedIndex == null ? null : prev.selectedIndex + addedVisible,
-      };
-    });
-  }
-
-  async loadMoreHistory() {
-    if (!this.state.hasMoreHistory || this._loadingMore) return;
-    // 防御 _hasMoreHistory=true 而 _oldestTs 为 null 的不一致状态：
-    // 没有锚点时间戳就别去拼 before=null，否则服务端 400。把 hasMoreHistory 同步
-    // 关掉避免上层 loader 反复触发。
-    if (!this._oldestTs) {
-      this.setState({ hasMoreHistory: false });
-      return;
-    }
-    this._loadingMore = true;
-    this.setState({ loadingMore: true });
-    try {
-      // logfile 只读模式已全量加载（hasMoreHistory 恒 false），不会触发本函数；此分页逻辑仅供 live 模式使用。
-      const pageUrl = `/api/entries/page?before=${encodeURIComponent(this._oldestTs)}&limit=100`;
-      const res = await fetch(apiUrl(pageUrl));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (Array.isArray(data.entries) && data.entries.length > 0) {
-        const reconstructed = reconstructEntries(data.entries);
-        // Paged current-file entries are OLDER than the current baseline but
-        // NEWER than any backfilled previous-segment block — splice them after
-        // the backfilled head so the array stays time-ordered (the sub-agent
-        // interleave cursor depends on it).
-        const bf = this._backfillCount || 0;
-        const merged = bf > 0
-          ? [...this.state.requests.slice(0, bf), ...reconstructed, ...this.state.requests.slice(bf)]
-          : [...reconstructed, ...this.state.requests];
-        this._batchSlim(merged);
-        const { mainAgentSessions } = this._processEntries(merged);
-        this._oldestTs = data.oldestTimestamp;
-
-        // P1: 移动端 hot/cold 分层
-        if (isMobile && mainAgentSessions.length > HOT_SESSION_COUNT) {
-          const sessionIndex = buildSessionIndex(merged, mainAgentSessions);
-          const fullIndex = mergeSessionIndices(this.state.sessionIndex, sessionIndex);
-          const unslimmed = merged.map(e => e._slimmed ? restoreSlimmedEntry(e, merged) : e);
-          const { hotEntries, allSessions, coldGroups } = splitHotCold(
-            unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
-          );
-          this._sseSlimmer = null; this._sseReconstructor = null;
-          const pn = this.state.projectName;
-          if (pn) {
-            for (const [sid, coldEntries] of coldGroups) {
-              saveSessionEntries(pn, sid, coldEntries);
-            }
-            saveEntries(pn, merged);
-          }
-          this.setState({
-            requests: hotEntries,
-            mainAgentSessions: allSessions,
-            sessionIndex: fullIndex,
-            hasMoreHistory: !!data.hasMore && !!data.oldestTimestamp,
-            loadingMore: false,
-          });
-        } else {
-          this.setState((prev) => {
-            // Count against the ACTIVE view: raw pages contain non-relevant
-            // entries that showAll displays but the default view hides.
-            const addedVisible = visibleRequests(reconstructed, prev.showAll).length;
-            return {
-              requests: merged,
-              mainAgentSessions,
-              hasMoreHistory: !!data.hasMore && !!data.oldestTimestamp,
-              loadingMore: false,
-              // Keep the DetailPanel selection on the same logical row after the
-              // prepend (pre-existing latent flaw, fixed alongside the backfill).
-              selectedIndex: prev.selectedIndex == null ? null : prev.selectedIndex + addedVisible,
-            };
-          });
-          if (isMobile && this.state.projectName) {
-            saveEntries(this.state.projectName, merged);
-          }
-        }
-      } else {
-        this.setState({ hasMoreHistory: false, loadingMore: false });
-      }
-    } catch (e) {
-      console.error('loadMoreHistory failed:', e);
-      this.setState({ loadingMore: false });
-      message.error(t('ui.loadMoreHistoryFailed'));
-    }
-    this._loadingMore = false;
   }
 
   initSSE() {
@@ -1359,35 +1239,30 @@ class AppBase extends React.Component {
           });
         } catch (e) { reportSwallowed('sse.stream-progress', e); }
       });
-      this.eventSource.addEventListener('resume_prompt', (event) => {
-        this._resetSSETimeout();
-        try {
-          const data = JSON.parse(event.data);
-          // 等待偏好加载完成再判断是否跳过弹窗（避免竞态）
-          (this.context._prefsReady || Promise.resolve({})).then((initialPrefs) => {
-            // 优先读 live preferences（本会话内改过开关需立即生效，否则关了开关当次仍自动继承）；
-            // provider 尚未 setState 时回落启动快照
-            const prefs = this.context?.preferences || initialPrefs;
-            if (prefs?.resumeAutoChoice) {
-              // 自动跳过：直接发送选择到服务端，不触碰偏好设置（避免 setState 竞态清除偏好）
-              fetch(apiUrl('/api/resume-choice'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ choice: prefs.resumeAutoChoice }),
-              }).catch(err => console.error('resume-choice failed:', err));
-            } else {
-              this.setState({ resumeModalVisible: true, resumeFileName: data.recentFileName || '' });
-            }
-          });
-        } catch (e) { reportSwallowed('sse.resume_prompt', e); }
-      });
-      this.eventSource.addEventListener('resume_resolved', () => {
-        this._resetSSETimeout();
-        this.setState({ resumeModalVisible: false, resumeFileName: '', resumeRememberChoice: false });
-      });
       // update_completed 事件已废弃：自 1.6.203 起后台 detached npm install 负责升级，
       // 当前进程内存里仍是旧版本，广播"已升级完成"会误导用户。保留 update_major_available
       // 作为"有新版可用"的统一信号（包含跨大版本提示 + 本版本忙时跳过两种场景）。
+      // 1.7.0 P2：存在未迁移 v1 日志 → 弹迁移引导。是否展示由客户端决定：
+      // 「不再提醒」偏好挡常规提示；continued=true（-c 续接旧对话）无视 dismissed
+      // 再提醒——前半段对话在旧格式里，不迁移就看不到。
+      // One-shot per page load (review P1)：/events 每次【重连】（心跳超时、网络
+      // 抖动）都会重推本帧，且 continued 分支绕过 dismissed —— 不设一次性守卫
+      // 会反复弹窗，甚至在用户已行动后再弹。工作区切换的广播携带新项目语境，
+      // 由 workspace_started 重置守卫。
+      this.eventSource.addEventListener('migrate_prompt', (event) => {
+        this._resetSSETimeout();
+        try {
+          const data = JSON.parse(event.data);
+          if (this._migratePromptShown) return; // already shown/acted this page
+          (this.context._prefsReady || Promise.resolve({})).then((initialPrefs) => {
+            if (this._migratePromptShown) return; // raced a second frame
+            const prefs = this.context?.preferences || initialPrefs;
+            if (prefs?.wireV2MigratePromptDismissed && !data.continued) return;
+            this._migratePromptShown = true;
+            this.setState({ migratePromptVisible: true, migratePromptData: data });
+          });
+        } catch (e) { reportSwallowed('sse.migrate_prompt', e); }
+      });
       this.eventSource.addEventListener('update_major_available', (event) => {
         this._resetSSETimeout();
         try {
@@ -1402,11 +1277,13 @@ class AppBase extends React.Component {
           this._chunkedEntries = [];
           this._chunkedTotal = data.total || 0;
           this._isIncremental = !!data.incremental;
-          this._hasMoreHistory = !!data.hasMore;
-          this._oldestTs = data.oldestTs || null;
+          // Wire v3: the server pre-computes the exact frame byte total —
+          // progress is received/total bytes instead of the legacy count-up.
+          this._v3BytesTotal = data.v3Bytes || 0;
+          this._v3RecvBytes = 0;
           // 增量模式下已有缓存数据在显示，不需要 loading 遮罩
           if (!this._isIncremental) {
-            this.setState({ fileLoading: true, fileLoadingCount: 0 });
+            this.setState({ fileLoading: true, fileLoadingCount: 0, fileLoadingBytes: this._v3BytesTotal > 0 ? { recv: 0, total: this._v3BytesTotal } : null });
           }
         } catch (e) { reportSwallowed('sse.load_start', e); }
       });
@@ -1429,6 +1306,15 @@ class AppBase extends React.Component {
       this.eventSource.addEventListener('load_end', () => {
         this._resetSSETimeout();
         if (this._loadingCountRafId) { cancelAnimationFrame(this._loadingCountRafId); this._loadingCountRafId = null; }
+        // Wire v3 (V3.S5): flagged cold loads carry no legacy chunks — build
+        // the window's entries from rows + native lines instead. All v3
+        // frames precede load_end on the wire, so the assembler is complete.
+        // Assembly is CHUNKED with main-thread yields (a synchronous build
+        // over the whole window blocks paint — the loading UI would freeze);
+        // live entries arriving during the async window are gated into
+        // _liveGateBuffer (drained by the pipeline commit, same as during
+        // the ingest pipeline itself).
+        const finish = () => {
         const delta = this._chunkedEntries;
         this._chunkedEntries = [];
         this._chunkedTotal = 0;
@@ -1454,8 +1340,8 @@ class AppBase extends React.Component {
         let rawEntries;
         if (isIncremental && isMobile && this.state.requests.length > 0) {
           if (delta.length === 0) {
-            // 无新数据，缓存已是最新，跳过重建（保留缓存恢复时已设置的 hasMoreHistory）
-            const st = { fileLoading: false, fileLoadingCount: 0 };
+            // 无新数据，缓存已是最新，跳过重建
+            const st = { fileLoading: false, fileLoadingCount: 0, fileLoadingBytes: null };
             if (unlockContextBar) st.contextBarLocked = false;
             this.setState(st);
             return;
@@ -1475,12 +1361,46 @@ class AppBase extends React.Component {
         // 分帧管线：reconstruct → 分帧 slim → 分帧 process → 原子提交。
         // async 不 await（EventSource 回调）；在途期间 live 条目入闸门缓冲（handleEventMessage）。
         this._runSseColdIngest(rawEntries, { isIncremental, unlockContextBar });
+        };
+
+        if (this._wireV3 && this._v3ColdRows && this._chunkedEntries.length === 0) {
+          const rows = this._v3ColdRows;
+          this._v3ColdRows = null;
+          this._v3Assembling = true;
+          (async () => {
+            const entries = [];
+            const asm = this._v3Assembler();
+            try {
+              for (let i = 0; i < rows.length; i++) {
+                try { entries.push(asm.buildEntry(rows[i])); } catch (e) { reportSwallowed('v3.cold-assemble', e); }
+                if ((i + 1) % 100 === 0) await yieldToMain();
+              }
+            } finally {
+              this._v3Assembling = false;
+            }
+            this._chunkedEntries = entries;
+            // finish() enters the ingest pipeline synchronously (sets
+            // _ingestRunning before any await), so draining the buffered live
+            // frames AFTER it routes their entries into the pipeline's gate
+            // buffer — no window where a live entry merges against the
+            // pre-commit baseline (review P1-1).
+            finish();
+            this._v3DrainPendingLive();
+          })();
+          return;
+        }
+        this._v3ColdRows = null;
+        finish();
       });
       this.eventSource.addEventListener('full_reload', (event) => {
         this._resetSSETimeout();
         // 服务端要求整体重载 = baseline 重置：废弃在途分帧管线（防其稍后提交陈旧基线），
         // 闸门缓冲泄回 _pendingEntries（dedup 兜底与重载数据的重复）。
         this._abortColdIngest({ drain: true });
+        // Baseline reset also drops the v3 client state (review P0-2): stale
+        // rows would keep feeding _listSource after the reload's new baseline.
+        this._v3ResetClientState();
+        this.setState({ v2Rows: [], v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' } });
         // animateLoadingCount 回调有数百 ms 窗口：期间若新分帧管线启动（token 再 bump），
         // 本次 full_reload 的延迟 setState 不得覆盖新管线提交 —— 回调内按 token 失配丢弃。
         const reloadToken = this._ingestToken;
@@ -1529,6 +1449,8 @@ class AppBase extends React.Component {
         this._resetSSETimeout();
         try {
           const data = JSON.parse(event.data);
+          // 新项目语境：允许迁移引导针对切入的项目再弹一次（P2 one-shot 守卫复位）。
+          this._migratePromptShown = false;
           // 取消旧动画，防止旧 full_reload 回调覆盖新数据
           if (this._loadingCountTimer) {
             cancelAnimationFrame(this._loadingCountTimer);
@@ -1537,6 +1459,7 @@ class AppBase extends React.Component {
           // workspace 切换 = baseline 重置：废弃在途分帧管线，防旧项目的巨型基线
           // 在切换后才提交、覆盖新项目数据（闸门缓冲属旧项目，直接丢弃不泄洪）
           this._abortColdIngest();
+          this._v3ResetClientState(); // review P0-2: old project's rows/assembler must not survive the switch
           this._rebuildRequestIndex([]);
           // 切项目要连 _currentSessionId 一并清掉：否则 _maintainPinState 的 lazy-lock 兜底
           // (getSessionStableId(null) || this._currentSessionId) 会拿旧项目的会话 id 误锁新项目，
@@ -1560,6 +1483,8 @@ class AppBase extends React.Component {
             viewMode: 'chat',
             cliMode: true,
             requests: [],
+            v2Rows: [],
+            v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
             mainAgentSessions: [],
             // 切项目：清空旧项目 pin，由 App.componentDidUpdate 按新 projectName 重新 hydrate
             pinnedSessionTs: null,
@@ -1576,10 +1501,13 @@ class AppBase extends React.Component {
       this.eventSource.addEventListener('workspace_stopped', () => {
         this._resetSSETimeout();
         this._teardownTransientLiveState();
+        this._v3ResetClientState(); // review P0-2
         this._rebuildRequestIndex([]);
         this._currentSessionId = null; // 同 workspace_started：清旧会话 id，避免 lazy-lock 误锁
         this.setState({
           workspaceMode: true,
+          v2Rows: [],
+          v2RowsMeta: { totalCount: 0, hasMore: false, oldestTs: '' },
           requests: [],
           mainAgentSessions: [],
           projectName: '',
@@ -1648,7 +1576,77 @@ class AppBase extends React.Component {
         try {
           const cfg = JSON.parse(event?.data || '{}');
           if (typeof cfg.turnEndDebounceMs === 'number') setTurnEndCooldownMs(cfg.turnEndDebounceMs);
+          // Wire v3 flag: synchronous instance field (NOT React state) — the
+          // load_chunk/v2_requests handlers in this same load cycle must read
+          // the fresh value; setState would lag a task behind. A forceUpdate
+          // is unnecessary: rows arriving (setState) re-render, and flag-off
+          // keeps v2Rows empty so _listSource stays on the legacy source.
+          this._wireV3 = cfg.wireV3 === true;
+          // Version-skew guard (review P2-a): a reconnect that reaches an
+          // UPGRADED server would feed this stale bundle a wire it may not
+          // understand — reload to pull the matching dist (index.html is
+          // no-store, assets content-hashed, so this always heals).
+          if (cfg.build) {
+            if (this._serverBuild && this._serverBuild !== cfg.build) {
+              window.location.reload();
+              return;
+            }
+            this._serverBuild = cfg.build;
+          }
         } catch { /* tolerate parse error */ }
+      });
+      // Wire v3 (V3.S2/S3a): request-list metadata rows. Cold frame replaces
+      // the row source wholesale; live deltas upsert by (sessionId, seq).
+      // V3.S5: the same rows drive the entry assembler — the cold frame's
+      // entries land in _chunkedEntries (the legacy chunk buffer, processed at
+      // load_end by the existing pipeline); live rows inject one entry each.
+      this.eventSource.addEventListener('v2_requests', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          const rows = Array.isArray(data.rows) ? data.rows : [];
+          // Full reset frame (fresh cold load / reconnect replay): drop every
+          // piece of v3 client state FIRST — a reconnect re-sends the window
+          // and the assembler/seen-set/rows must not accumulate across cycles
+          // (review P0-2: stale rows after workspace switch; unbounded growth;
+          // stale channel ptr mis-assembly). Incremental frames (since-scoped
+          // delta window, review P1-2) upsert instead.
+          if (data.incremental) {
+            this._ingestV2Rows(rows, { reset: false });
+          } else {
+            this._v3ResetClientState();
+            this._ingestV2Rows(rows, { reset: true, totalCount: data.totalCount, hasMore: data.hasMore, oldestTs: data.oldestTs });
+          }
+          this._v3ColdRows = rows; // consumed at load_end (after v3_conv/v3_resp frames land)
+        } catch (e) { reportSwallowed('sse.v2_requests', e); }
+      });
+      this.eventSource.addEventListener('v2_requests_delta', (event) => {
+        this._resetSSETimeout();
+        try {
+          const row = JSON.parse(event?.data || '{}');
+          if (!row || !Number.isInteger(row.seq)) return;
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'delta', data: row }); return; }
+          this._applyV3Delta(row);
+        } catch (e) { reportSwallowed('sse.v2_requests_delta', e); }
+      });
+      this.eventSource.addEventListener('v3_conv', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'conv', data }); return; }
+          this._applyV3Conv(data);
+        } catch (e) { reportSwallowed('sse.v3_conv', e); }
+      });
+      this.eventSource.addEventListener('v3_resp', (event) => {
+        this._resetSSETimeout();
+        this._v3TrackBytes(event);
+        try {
+          const data = JSON.parse(event?.data || '{}');
+          if (this._v3Assembling) { this._v3PendingLive.push({ kind: 'resp', data }); return; }
+          this._applyV3Resp(data);
+        } catch (e) { reportSwallowed('sse.v3_resp', e); }
       });
       // session_pin SSE — 本进程任一端改了「当前会话」pin 后广播，让同实例多端（电脑+手机）实时一致。
       // 采纳服务端值时置 _applyingRemotePin，避免 _maintainPinState 把它当本地改动回 POST（防回环）。
@@ -1745,9 +1743,6 @@ class AppBase extends React.Component {
     // 与 /events (CLI 模式) 完全隔离，不会触发 terminal/workspace 等 CLI 行为
     this._isLocalLog = true;
     this._localLogFile = file;
-    // 全量加载，无分页：防御上一次状态残留
-    this._hasMoreHistory = false;
-    this._oldestTs = null;
     this.setState({ fileLoading: true, fileLoadingCount: 0, serverCachedContent: null });
 
     // 关闭上一次的加载连接（防止快速切换时资源泄漏）
@@ -1759,11 +1754,8 @@ class AppBase extends React.Component {
     const es = new EventSource(apiUrl(`/api/local-log?file=${encodeURIComponent(file)}`));
     this._localLogES = es;
 
-    es.addEventListener('load_start', (event) => {
+    es.addEventListener('load_start', () => {
       try {
-        const data = JSON.parse(event.data);
-        this._hasMoreHistory = !!data.hasMore;
-        this._oldestTs = data.oldestTs || null;
         this.setState({ fileLoadingCount: 0 });
       } catch (e) { reportSwallowed('sse.local-log.load_start', e); }
     });
@@ -1800,14 +1792,7 @@ class AppBase extends React.Component {
       // 冷启动分帧管线在途：live 条目入闸门缓冲，提交后统一泄洪（_commitColdIngest）。
       // 否则 live flush 会基于旧 prev.requests 合并、随后被管线的基线提交整体覆盖，
       // 且 _sseSlimmer/_sseReconstructor 会对错误基线初始化（sessionMerge 脆弱区）。
-      if (this._ingestRunning) {
-        this._liveGateBuffer.push(entry);
-        return;
-      }
-      this._pendingEntries.push(entry);
-      if (!this._flushRafId) {
-        this._flushRafId = requestAnimationFrame(this._flushPendingEntries);
-      }
+      this._ingestLiveEntry(entry);
     } catch (error) {
       console.error('处理事件消息失败:', error);
     }
@@ -1841,13 +1826,8 @@ class AppBase extends React.Component {
       }
 
       for (const rawEntry of batch) {
-        // Rotation-context sentinel on the LIVE path (rotation while this
-        // client is connected): capture + seed, never enter state.requests.
-        if (rawEntry && rawEntry.ccvRotationContext) {
-          this._rotationContext = rawEntry;
-          if (Array.isArray(rawEntry.teammateNames)) setTeammateNameSeeds(rawEntry.teammateNames);
-          continue;
-        }
+        // Legacy v1 rotation sentinel: never a renderable request.
+        if (rawEntry && rawEntry.ccvRotationContext) continue;
         // v3: intern body.tools / body.system → pool 共享引用，消除 fullEntry 累积
         // v5: 同时 intern body.messages 内 tool_result block.content（lazy-clone 三层
         //     messages/content/block）。下方 L1170-1175 mutate `messages[i]._timestamp`
@@ -1934,6 +1914,10 @@ class AppBase extends React.Component {
             count: messages.length,
             prevUserId: lastSession ? lastSession.userId : null,
             userId,
+            // task B: v2 session epoch change is a definitive boundary — split
+            // even a short prior session (cold-load fallback → live supersede).
+            prevEpoch: lastSession ? lastSession._seqEpoch : null,
+            epoch: entry._seqEpoch || null,
           });
 
           // SSE 实时流每条 entry 都是完整 request+response，不存在"中间态"；
@@ -2005,108 +1989,13 @@ class AppBase extends React.Component {
       if (isMobile && this.state.projectName) {
         if (this._cacheSaveTimer) clearTimeout(this._cacheSaveTimer);
         this._cacheSaveTimer = setTimeout(() => {
-          // hot/cold 分层激活时跳过 saveEntries（state.requests 只有热数据，
-          // 写入会覆盖 load_end 保存的全量缓存）。冷数据已通过 per-session 存储持久化。
-          if (this.state.projectName && this.state.sessionIndex.length === 0) {
+          if (this.state.projectName) {
             saveEntries(this.state.projectName, this.state.requests);
           }
         }, 5000);
-        // P1: 延迟淘汰冷 session，避免频繁触发
-        if (this.state.mainAgentSessions.length > HOT_SESSION_COUNT + 2) {
-          if (!this._evictionTimer) {
-            this._evictionTimer = setTimeout(() => {
-              this._evictionTimer = null;
-              this._evictColdSessions();
-            }, 10000);
-          }
-        }
       }
     });
   };
-
-  // ─── P1: cold session 加载 / 淘汰 ──────────────────────────
-
-  async loadSession(sessionId) {
-    if (this._loadingSessionId != null) return;
-    this._loadingSessionId = sessionId;
-    this.setState({ loadingSessionId: sessionId });
-
-    try {
-      // 1. 从 IndexedDB 加载
-      let entries = await loadSessionEntries(this.state.projectName, sessionId);
-
-      // 2. fallback: 从 REST API 加载
-      if (!entries || entries.length === 0) {
-        const meta = (this.state.sessionIndex || []).find(s => s.sessionId === sessionId);
-        if (meta && meta.lastTs) {
-          const res = await fetch(apiUrl(`/api/entries/page?before=${encodeURIComponent(meta.lastTs)}&limit=200`));
-          const data = await res.json();
-          entries = data.entries || [];
-        }
-      }
-
-      if (entries && entries.length > 0) {
-        const reconstructed = reconstructEntries(entries);
-        const merged = [...reconstructed, ...this.state.requests];
-        this._batchSlim(merged);
-        const { mainAgentSessions } = this._processEntries(merged);
-
-        const sessionIndex = buildSessionIndex(merged, mainAgentSessions);
-        const fullIndex = mergeSessionIndices(this.state.sessionIndex, sessionIndex);
-        // Fix #3: pin 加载的 session，防止 splitHotCold 立即淘汰（并入「仅展示当前会话」锁定的 pin）
-        const unslimmed = merged.map(e => e._slimmed ? restoreSlimmedEntry(e, merged) : e);
-        const { hotEntries, allSessions, coldGroups } = splitHotCold(
-          unslimmed, mainAgentSessions, fullIndex, HOT_SESSION_COUNT,
-          this._pinnedSessionIdSet([sessionId])
-        );
-        this._sseSlimmer = null; this._sseReconstructor = null;
-        const pn = this.state.projectName;
-        if (pn) {
-          for (const [sid, coldEntries] of coldGroups) {
-            saveSessionEntries(pn, sid, coldEntries);
-          }
-          saveEntries(pn, merged);
-        }
-
-        this.setState({
-          requests: hotEntries,
-          mainAgentSessions: allSessions,
-          sessionIndex: fullIndex,
-          loadingSessionId: null,
-        });
-      } else {
-        this.setState({ loadingSessionId: null });
-      }
-    } catch (e) {
-      console.error('loadSession failed:', e);
-      this.setState({ loadingSessionId: null });
-    }
-    this._loadingSessionId = null;
-  }
-
-  _evictColdSessions() {
-    const { requests, mainAgentSessions, projectName } = this.state;
-    if (!isMobile || mainAgentSessions.length <= HOT_SESSION_COUNT) return;
-
-    const unslimmed = requests.map(e => e._slimmed ? restoreSlimmedEntry(e, requests) : e);
-    const { hotEntries, allSessions, coldGroups } = splitHotCold(
-      unslimmed, mainAgentSessions, this.state.sessionIndex, HOT_SESSION_COUNT, this._pinnedSessionIdSet()
-    );
-    this._sseSlimmer = null; this._sseReconstructor = null;
-    const fullIndex = this.state.sessionIndex;
-    if (projectName) {
-      for (const [sid, coldEntries] of coldGroups) {
-        saveSessionEntries(projectName, sid, coldEntries);
-      }
-      // 不调 saveEntries：state.requests 可能已是 hotEntries，写入会覆盖全量缓存。
-      // 冷数据已通过 saveSessionEntries 持久化，全量缓存由 load_end 维护。
-    }
-    this.setState({
-      requests: hotEntries,
-      mainAgentSessions: allSessions,
-      sessionIndex: fullIndex,
-    });
-  }
 
   // ─── 数据处理 ───────────────────────────────────────────
 
@@ -2437,10 +2326,6 @@ class AppBase extends React.Component {
     this.context.updatePreferences({ showFullToolContent: checked });
   };
 
-  handleOnlyCurrentSessionChange = (checked) => {
-    this.context.updatePreferences({ onlyCurrentSession: checked });
-  };
-
   handleFilterIrrelevantChange = (checked) => {
     this.setState(prev => {
       const newShowAll = !checked;
@@ -2455,10 +2340,10 @@ class AppBase extends React.Component {
 
   // ─── 日志管理 ──────────────────────────────────────────
 
-  // 集中构造 /api/local-logs URL：「显示全部实例」开启时带 ?all=1。打开弹窗 / 刷新统计 /
-  // 合并·归档·删除后这几处 refetch 都经此 helper，开关一改即自动跟随（apiUrl 的 token 追加已正确处理已有 ?）。
+  // 集中构造 /api/local-logs URL：打开弹窗 / 刷新统计 / 删除后这几处 refetch 都经此
+  // helper（apiUrl 的 token 追加已正确处理已有 ?）。1.7.0 起列表恒为 v2 会话。
   _localLogsUrl() {
-    return apiUrl(this.state.logShowAllInstances ? '/api/local-logs?all=1' : '/api/local-logs');
+    return apiUrl('/api/local-logs');
   }
 
   handleImportLocalLogs = () => {
@@ -2466,21 +2351,124 @@ class AppBase extends React.Component {
     fetch(this._localLogsUrl())
       .then(res => res.json())
       .then(data => {
-        const { _currentProject, ...logs } = data;
-        this.setState({ localLogs: logs, currentProject: _currentProject || '', localLogsLoading: false });
+        const { _currentProject, _unmigratedV1Count, _unmigratedV1Bytes, _v1FileCount, ...logs } = data;
+        this.setState({
+          localLogs: logs,
+          currentProject: _currentProject || '',
+          localLogsLoading: false,
+          unmigratedV1Count: _unmigratedV1Count || 0,
+          unmigratedV1Bytes: _unmigratedV1Bytes || 0,
+          v1FileCount: _v1FileCount || 0,
+        });
       })
       .catch(() => {
         this.setState({ localLogs: {}, localLogsLoading: false });
       });
+    if (this.state.logView === 'v1') this._fetchV1Logs();
+    this._startWireV2ConvertPoll();
   };
 
-  // 「显示全部实例」开关：翻转后用新 scope 重新拉取列表（开关状态持久，不随弹窗关闭重置）。
-  handleToggleShowAllLogs = () => {
-    this.setState(prev => ({ logShowAllInstances: !prev.logShowAllInstances }), () => this.handleImportLocalLogs());
+  // v1 view data — fetched lazily on entering the view (and on refreshes while
+  // in it), never as part of the default modal open.
+  _fetchV1Logs = () => {
+    fetch(apiUrl('/api/local-logs?view=v1'))
+      .then(res => res.json())
+      .then(data => {
+        const { _currentProject, ...logs } = data;
+        this.setState({ localLogsV1: logs });
+      })
+      .catch(() => this.setState({ localLogsV1: {} }));
+  };
+
+  // Switch between the v2 (default) and v1 (legacy files) views of the logs
+  // modal. Selection is view-scoped — clear it so a hidden row can't be deleted.
+  handleSetLogView = (view) => {
+    this.setState({ logView: view, selectedLogs: new Set() });
+    if (view === 'v1') this._fetchV1Logs();
+  };
+
+  // wire-v2 S8: poll the resident migration task while the modal is open. The
+  // task itself is server-side and survives the modal (and the browser); the
+  // poll is pure presentation. A done-transition refreshes the list once.
+  _fetchWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'))
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!data) return;
+        const prev = this.state.wireV2Convert;
+        const wasActive = !!(prev && (prev.running || (prev.state && (prev.state.status === 'running' || prev.state.status === 'verifying'))));
+        const isActive = !!(data.running || (data.state && (data.state.status === 'running' || data.state.status === 'verifying')));
+        this.setState({ wireV2Convert: data });
+        if (wasActive && !isActive && data.state && data.state.status === 'done' && this.state.importModalVisible) {
+          this.handleImportLocalLogs(); // migration finished while watching — show the result
+        }
+      })
+      .catch(() => { });
+  };
+
+  _startWireV2ConvertPoll = () => {
+    this._fetchWireV2Convert();
+    if (this._wireV2ConvertTimer) return;
+    this._wireV2ConvertTimer = setInterval(this._fetchWireV2Convert, 2000);
+  };
+
+  _stopWireV2ConvertPoll = () => {
+    if (this._wireV2ConvertTimer) {
+      clearInterval(this._wireV2ConvertTimer);
+      this._wireV2ConvertTimer = null;
+    }
+  };
+
+  handleStartWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.error) throw new Error(data.error);
+        message.success(t('ui.wireV2ConvertStarted'));
+        this._fetchWireV2Convert();
+      })
+      .catch((err) => {
+        reportSwallowed('fetch.wire-v2-convert', err);
+        message.error(String(err?.message || err));
+      });
+  };
+
+  handleStopWireV2Convert = () => {
+    fetch(apiUrl('/api/wire-v2-convert'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'stop' }),
+    })
+      .then(res => res.json())
+      .then(() => this._fetchWireV2Convert())
+      .catch((err) => reportSwallowed('fetch.wire-v2-convert', err));
+  };
+
+  // 1.7.0 P2 迁移引导弹窗：立即迁移 = 启动常驻转换任务并打开日志弹窗看进度；
+  // 暂不 = 关闭（勾选「不再提醒」则持久化偏好；continued 场景服务端会再次提示）。
+  handleMigrateNow = () => {
+    this.setState({ migratePromptVisible: false });
+    this.handleStartWireV2Convert();
+    // Progress UI lives in the modal's v1 view since 1.7.0 — open straight into it.
+    this.handleSetLogView('v1');
+    this.handleImportLocalLogs();
+  };
+
+  handleMigrateLater = (dontRemind) => {
+    this.setState({ migratePromptVisible: false });
+    if (dontRemind) {
+      this.context.updatePreferences({ wireV2MigratePromptDismissed: true });
+    }
   };
 
   handleCloseImportModal = () => {
-    this.setState({ importModalVisible: false, selectedLogs: new Set() });
+    this._stopWireV2ConvertPoll();
+    // Reset to the v2 view so a reopened modal always starts on the default list.
+    this.setState({ importModalVisible: false, selectedLogs: new Set(), logView: 'v2' });
   };
 
   handleRefreshStats = () => {
@@ -2493,8 +2481,8 @@ class AppBase extends React.Component {
       })
       .then(res => res.json())
       .then(data => {
-        const { _currentProject, ...logs } = data;
-        this.setState({ localLogs: logs, refreshingStats: false });
+        const { _currentProject, _unmigratedV1Count, _unmigratedV1Bytes, ...logs } = data;
+        this.setState({ localLogs: logs, refreshingStats: false, unmigratedV1Count: _unmigratedV1Count || 0, unmigratedV1Bytes: _unmigratedV1Bytes || 0 });
         message.success(t('ui.refreshStatsSuccess'));
       })
       .catch(() => {
@@ -2522,94 +2510,6 @@ class AppBase extends React.Component {
       if (checked) selectedLogs.add(file);
       else selectedLogs.delete(file);
       return { selectedLogs };
-    });
-  };
-
-  handleMergeLogs = () => {
-    const { selectedLogs, localLogs, currentProject } = this.state;
-    if (selectedLogs.size < 2) return;
-
-    const logs = localLogs[currentProject];
-    if (!logs) return;
-
-    const indices = [];
-    logs.forEach((log, i) => {
-      if (selectedLogs.has(log.file)) indices.push(i);
-    });
-    indices.sort((a, b) => a - b);
-
-    if (selectedLogs.has(logs[0].file)) {
-      message.warning(t('ui.mergeLatestNotAllowed'));
-      return;
-    }
-
-    for (let i = 1; i < indices.length; i++) {
-      if (indices[i] - indices[i - 1] !== 1) {
-        message.warning(t('ui.mergeNotConsecutive'));
-        return;
-      }
-    }
-
-    const totalSize = indices.reduce((sum, i) => sum + logs[i].size, 0);
-    if (totalSize > 400 * 1024 * 1024) {
-      message.warning(t('ui.mergeTooLarge'));
-      return;
-    }
-
-    const files = indices.map(i => logs[i].file).reverse();
-
-    fetch(apiUrl('/api/merge-logs'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files }),
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.ok) {
-          message.success(t('ui.mergeSuccess'));
-          this.setState({ selectedLogs: new Set() });
-          this.handleImportLocalLogs();
-        } else {
-          message.error(data.error || 'Merge failed');
-        }
-      })
-      .catch(() => message.error('Merge failed'));
-  };
-
-  handleArchiveLogs = () => {
-    const { selectedLogs, localLogs, currentProject } = this.state;
-    if (selectedLogs.size === 0) return;
-    const logs = localLogs[currentProject];
-    if (!logs) return;
-    const latestFile = logs[0]?.file;
-    const candidates = [...selectedLogs].filter(f => f.endsWith('.jsonl') && f !== latestFile);
-    if (candidates.length === 0) {
-      message.warning(t('ui.mergeLatestNotAllowed'));
-      return;
-    }
-
-    Modal.confirm({
-      title: t('ui.archiveLogs'),
-      content: t('ui.archiveLogsConfirm', { count: candidates.length }),
-      okText: t('ui.archiveLogs'),
-      cancelText: t('ui.cancel'),
-      onOk: () => {
-        fetch(apiUrl('/api/archive-logs'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ files: candidates }),
-        })
-          .then(res => res.json())
-          .then(data => {
-            const archived = data.archived?.length || 0;
-            const failed = (data.failed?.length || 0) + (data.skipped?.length || 0);
-            if (archived > 0) message.success(t('ui.archiveSuccess', { count: archived }));
-            if (failed > 0) message.error(t('ui.archiveFailed', { count: failed }));
-            this.setState({ selectedLogs: new Set() });
-            this.handleImportLocalLogs();
-          })
-          .catch(() => message.error(t('ui.archiveFailed', { count: candidates.length })));
-      },
     });
   };
 
@@ -2665,7 +2565,10 @@ class AppBase extends React.Component {
   };
 
   handleDownloadLogFile = (file) => {
-    const url = apiUrl(`/api/download-log?file=${encodeURIComponent(file)}`);
+    // v2 sessions are folders → download the lossless session-dir zip
+    // (`format=raw`). v1 `.jsonl` keeps the rebuilt-stream default unchanged.
+    const raw = file.startsWith('v2:') ? '&format=raw' : '';
+    const url = apiUrl(`/api/download-log?file=${encodeURIComponent(file)}${raw}`);
     const a = document.createElement('a');
     a.href = url;
     a.download = '';
@@ -2675,29 +2578,6 @@ class AppBase extends React.Component {
   };
 
   // ─── 恢复会话 ──────────────────────────────────────────
-
-  handleResumeChoice = (choice) => {
-    if (this.state.resumeRememberChoice) {
-      this.setState({ resumeAutoChoice: choice });
-      this.context.updatePreferences({ resumeAutoChoice: choice });
-    }
-    fetch(apiUrl('/api/resume-choice'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ choice }),
-    }).catch(err => console.error('resume-choice failed:', err));
-  };
-
-  handleResumeAutoChoiceToggle = (enabled) => {
-    const value = enabled ? 'continue' : null;
-    this.setState({ resumeAutoChoice: value });
-    this.context.updatePreferences({ resumeAutoChoice: value });
-  };
-
-  handleResumeAutoChoiceChange = (value) => {
-    this.setState({ resumeAutoChoice: value });
-    this.context.updatePreferences({ resumeAutoChoice: value });
-  };
 
   _finishLocalLoad = (entries, fileNames) => {
     if (entries.length === 0) {
@@ -2710,8 +2590,6 @@ class AppBase extends React.Component {
       const { mainAgentSessions, filtered } = this._processEntries(entries);
       this._isLocalLog = true;
       this._localLogFile = fileNames.length === 1 ? fileNames[0] : `${fileNames.length} files`;
-      this._hasMoreHistory = false;
-      this._oldestTs = null;
       if (this.eventSource) { this.eventSource.close(); this.eventSource = null; }
       if (this._streamingOffTimer) { clearTimeout(this._streamingOffTimer); this._streamingOffTimer = null; }
       this.setState({
@@ -2721,7 +2599,6 @@ class AppBase extends React.Component {
         importModalVisible: false,
         fileLoading: false,
         fileLoadingCount: 0,
-        hasMoreHistory: false,
       });
     });
   };
@@ -2796,8 +2673,25 @@ class AppBase extends React.Component {
   // ─── 共享渲染辅助 ─────────────────────────────────────
 
   /** render() 前置计算，子类在 render 开头调用 */
+  /** Wire v3 (V3.S3a): the request-list data source — metadata rows (adapted
+   *  to list-item shape, memoized by rows-array reference) when the server
+   *  announced wireV3 and rows have arrived; the legacy entries otherwise.
+   *  EVERY selectedIndex-coupled call site must use this, not state.requests,
+   *  or selection desynchronizes between the two shapes. */
+  _listSource() {
+    const rows = this.state.v2Rows;
+    if (!this._wireV3 || !rows || rows.length === 0) return this.state.requests;
+    if (this._v3AdaptSource !== rows) {
+      this._v3AdaptSource = rows;
+      this._v3Adapted = rows.map(rowToListItem);
+    }
+    return this._v3Adapted;
+  }
+
   renderPrepare() {
-    const { requests, selectedIndex, showAll, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.state;
+    const { selectedIndex, showAll, fileLoading, fileLoadingCount, mainAgentSessions, viewMode } = this.state;
+    const requests = this._listSource();
+    const useRows = requests !== this.state.requests;
 
     // 过滤心跳请求
     if (this._filteredSource !== requests || this._filteredShowAll !== showAll) {
@@ -2807,29 +2701,50 @@ class AppBase extends React.Component {
     }
     const filteredRequests = this._filteredRequests;
 
-    // 增量 cache loss map
-    if (this._cacheLossShowAll !== showAll) {
-      this._cacheLossShowAll = showAll;
+    // 增量 cache loss map — legacy path only: rows carry server-computed
+    // cacheLoss inline (adapted items have no bodies for the client compute).
+    if (useRows) {
       this._cacheLossMap = new Map();
       this._cacheLossLastMainAgent = null;
       this._cacheLossProcessedCount = 0;
-    }
-    if (filteredRequests.length < this._cacheLossProcessedCount) {
-      this._cacheLossMap = new Map();
-      this._cacheLossLastMainAgent = null;
-      this._cacheLossProcessedCount = 0;
-    }
-    if (filteredRequests.length > this._cacheLossProcessedCount) {
-      this._cacheLossLastMainAgent = appendCacheLossMap(
-        this._cacheLossMap, filteredRequests,
-        this._cacheLossProcessedCount, this._cacheLossLastMainAgent
-      );
-      this._cacheLossProcessedCount = filteredRequests.length;
+    } else {
+      if (this._cacheLossShowAll !== showAll) {
+        this._cacheLossShowAll = showAll;
+        this._cacheLossMap = new Map();
+        this._cacheLossLastMainAgent = null;
+        this._cacheLossProcessedCount = 0;
+      }
+      if (filteredRequests.length < this._cacheLossProcessedCount) {
+        this._cacheLossMap = new Map();
+        this._cacheLossLastMainAgent = null;
+        this._cacheLossProcessedCount = 0;
+      }
+      if (filteredRequests.length > this._cacheLossProcessedCount) {
+        this._cacheLossLastMainAgent = appendCacheLossMap(
+          this._cacheLossMap, filteredRequests,
+          this._cacheLossProcessedCount, this._cacheLossLastMainAgent
+        );
+        this._cacheLossProcessedCount = filteredRequests.length;
+      }
     }
 
     const selectedRequest = selectedIndex !== null ? filteredRequests[selectedIndex] : null;
 
-    return { filteredRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode };
+    // Wire v3 (V3.S5): deep consumers (ChatView bubbles, AppHeader stats and
+    // prompts, team modal, tool-result maps) need entry bodies. On the rows
+    // path those live in state.requests (assembler-built entries), NOT in the
+    // adapted rows the list renders — hand them a separate filtered view.
+    let deepRequests = filteredRequests;
+    if (useRows) {
+      if (this._deepSource !== this.state.requests || this._deepShowAll !== showAll) {
+        this._deepSource = this.state.requests;
+        this._deepShowAll = showAll;
+        this._deepRequests = visibleRequests(this.state.requests, showAll);
+      }
+      deepRequests = this._deepRequests;
+    }
+
+    return { filteredRequests, deepRequests, selectedRequest, fileLoading, fileLoadingCount, mainAgentSessions, viewMode };
   }
 
   /** 工作区选择器渲染（PC/Mobile 共用） */

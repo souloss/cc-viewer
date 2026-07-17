@@ -221,6 +221,73 @@ describeCli('cli-modes: ccv run -- claude（native claude 分支 + thinking-disp
   });
 });
 
+// ════════════════════ runProxyCommand: user --settings merge (claude only) ════════════════════
+// A user-supplied --settings must be folded into the injected settings (single flag, injected
+// keys win) on the claude path, dropped with a localized warning when unloadable, and left
+// completely untouched for non-claude commands.
+
+// Fixture: echo-args fake `claude` that exits 7 (non-zero so runCli captures parent stderr
+// where the merge warning lands), plus an echo-args `sometool` for the non-claude gate case.
+function settingsMergeBin() {
+  const dir = mkTmp('ccv-g2-settingsmerge-');
+  const bin = join(dir, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const claude = join(bin, 'claude');
+  writeFileSync(claude, '#!/bin/sh\necho "FAKE_CLAUDE_ARGS: $@"\nexit 7\n');
+  chmodSync(claude, 0o755);
+  const sometool = join(bin, 'sometool');
+  writeFileSync(sometool, '#!/bin/sh\necho "SOMETOOL_ARGS: $@"\nexit 0\n');
+  chmodSync(sometool, 0o755);
+  return { dir, bin, home: join(dir, 'home') };
+}
+
+describeCli('cli-modes: ccv run -- claude 用户 --settings 合并', { concurrency: false }, () => {
+  const envFor = (f) => ({
+    PATH: `${f.bin}:/usr/bin:/bin`,
+    HOME: f.home,
+    NPM_CONFIG_PREFIX: join(f.dir, 'noprefix'),
+  });
+
+  it('user --settings is stripped and merged: single flag, injected BASE_URL + user env key both present', () => {
+    const f = settingsMergeBin();
+    const r = runCli(['run', '--', 'claude', '--settings', '{"env":{"FOO":"bar"}}', 'hello-arg'],
+      { env: envFor(f) });
+    assert.equal(r.exitCode, 7, 'fake claude exit code must pass through (spawn happened)');
+    const argsLine = r.stdout.split('\n').find(l => l.includes('FAKE_CLAUDE_ARGS:')) || '';
+    assert.equal((argsLine.match(/--settings/g) || []).length, 1, 'exactly one --settings in final argv');
+    assert.ok(argsLine.includes('ANTHROPIC_BASE_URL'), 'injected proxy env must be in the merged JSON');
+    assert.ok(argsLine.includes('"FOO":"bar"'), 'user env key must survive the merge');
+    assert.ok(!argsLine.includes('{"env":{"FOO":"bar"}}'), 'the raw user value must not remain as its own token');
+    assert.ok(argsLine.includes('hello-arg'), 'unrelated user args pass through');
+  });
+
+  it('unloadable user --settings: dropped with a warning naming the value, claude still spawns injected-only', () => {
+    const f = settingsMergeBin();
+    const r = runCli(['run', '--', 'claude', '--settings', '{broken', 'ok-arg'],
+      { env: envFor(f) });
+    assert.equal(r.exitCode, 7, 'spawn must not be blocked by the bad settings value');
+    const argsLine = r.stdout.split('\n').find(l => l.includes('FAKE_CLAUDE_ARGS:')) || '';
+    assert.equal((argsLine.match(/--settings/g) || []).length, 1);
+    assert.ok(argsLine.includes('ANTHROPIC_BASE_URL'));
+    assert.ok(!argsLine.includes('{broken'), 'the bad value must not reach claude');
+    assert.ok(argsLine.includes('ok-arg'));
+    assert.ok(r.stderr.includes('{broken'), 'warning naming the failed value must reach stderr (locale-independent)');
+  });
+
+  it('non-claude command: its own --settings is left completely untouched (isClaudeCmd gate)', () => {
+    const f = settingsMergeBin();
+    const r = runCli(['run', '--', 'sometool', '--settings', '{"x":1}'],
+      { env: envFor(f) });
+    assert.equal(r.exitCode, 0);
+    const argsLine = r.stdout.split('\n').find(l => l.includes('SOMETOOL_ARGS:')) || '';
+    // pre-existing behavior: ccv still prepends its injected --settings for any command;
+    // the tool's own flag+value must survive verbatim as separate tokens (no strip, no merge)
+    assert.equal((argsLine.match(/--settings/g) || []).length, 2, 'prepended + the tool\'s own flag');
+    assert.ok(argsLine.includes('{"x":1}'), 'the tool\'s own settings value must be untouched');
+    assert.ok(!argsLine.includes('"x":1,'), 'no merge must have happened');
+  });
+});
+
 // ════════════════════ runCliMode：claude not found 早退 ════════════════════
 // 默认 PTY 模式（无 run / 无 -SDK）→ runCliMode → resolveNpm/Native 双 null →
 // reportClaudeNotFound + exit 1。覆盖 302-314 + reportClaudeNotFound 的 not-found 分支。
