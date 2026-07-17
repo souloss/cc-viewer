@@ -6,6 +6,7 @@ import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../../findcc.js';
 import { PROFILE_PATH, _defaultConfig, getActiveProfileId, setActiveProfileForWorkspace, _loadProxyProfile } from '../interceptor.js';
 import { migrateProxyProfileList } from '../lib/interceptor-core.js';
 import { discoverCcSwitchProviders, mergeImportedProfiles } from '../lib/ccswitch-import.js';
+import { reportSwallowed } from '../lib/error-report.js';
 import { setLang } from '../i18n.js';
 import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manager.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
@@ -331,7 +332,7 @@ async function ccswitchProvidersGet(req, res, _parsedUrl, isLocal, _deps) {
 async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
   if (!isLocal) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'cc-switch import is local-only' }));
+    res.end(JSON.stringify({ ok: false, error: 'cc-switch import is local-only' }));
     return;
   }
   let body = '';
@@ -346,11 +347,39 @@ async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
         res.end(JSON.stringify({ ok: false, error: result.error, imported: 0, updated: 0 }));
         return;
       }
-      // 读现有 profile.json
+      // Read existing profile.json. A missing file is a legitimate first import,
+      // but a file that exists and fails to parse must ABORT: merging into an
+      // empty base and writing back would silently wipe every user-created
+      // proxy_ profile (existing IS the source of truth here, unlike
+      // proxyProfilesPost where the client sends the full desired list).
       let existing = { profiles: [] };
-      try {
-        if (existsSync(PROFILE_PATH)) existing = JSON.parse(readFileSync(PROFILE_PATH, 'utf-8'));
-      } catch { /* 首次导入无文件 */ }
+      if (existsSync(PROFILE_PATH)) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(readFileSync(PROFILE_PATH, 'utf-8'));
+        } catch (err) {
+          reportSwallowed('ccswitch-import.read-existing', err);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json is unreadable; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        // JSON that parses to a non-object (null, array, number) is just as
+        // destructive to merge into — treat it the same as a parse failure.
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json has an unexpected shape; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        existing = parsed;
+      }
       // merge
       const merged = mergeImportedProfiles(existing.profiles || [], result.profiles);
       const toWrite = { ...existing, profiles: merged.profiles };
@@ -383,8 +412,10 @@ async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
         dbPath: result.dbPath,
       }));
     } catch (err) {
+      // ok:false keeps the response contract uniform — the client decides
+      // success strictly on data.ok, never on the presence of counter fields.
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: String(err && err.message || err) }));
+      res.end(JSON.stringify({ ok: false, error: String(err && err.message || err) }));
     }
   });
 }
