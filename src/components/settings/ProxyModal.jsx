@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Modal, Button, Input, Radio, Select, Tag, message } from 'antd';
-import { EditOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { EditOutlined, DeleteOutlined, PlusOutlined, ImportOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { isMobile } from '../../env';
+import { apiUrl, appendToken } from '../../utils/apiUrl';
+import { reportSwallowed } from '../../utils/errorReport';
 import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import ConceptHelp from '../common/ConceptHelp';
 import styles from './ProxyModal.module.css';
@@ -56,6 +58,47 @@ export default function ProxyModal({
   const [editingProxy, setEditingProxy] = useState(null);
   const [editForm, setEditForm] = useState(EMPTY_FORM);
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState(null);
+  const [importing, setImporting] = useState(false);
+
+  // Import from cc-switch: POST /api/ccswitch-import (local-only) merges into
+  // profile.json. Success is decided STRICTLY on resp.ok + data.ok — the 403
+  // (remote client) and 400 (server exception) shapes carry no imported/updated
+  // counters, so any counter-based heuristic misreads them as success.
+  // After success the list is refetched directly for immediate UI update (the
+  // server also broadcasts SSE proxy_profile {profile:'refresh'} as a fallback).
+  const handleImportFromCcSwitch = async () => {
+    setImporting(true);
+    try {
+      const resp = await fetch(appendToken(apiUrl('/api/ccswitch-import')), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setActive: false }),
+      });
+      let data = null;
+      try { data = await resp.json(); } catch (e) { reportSwallowed('fetch.ccswitch-import-json', e); }
+      if (resp.ok && data && data.ok === true) {
+        message.success(t('ui.proxy.ccswitchImported', { imported: data.imported || 0, updated: data.updated || 0 }));
+        try {
+          const pr = await fetch(appendToken(apiUrl('/api/proxy-profiles')));
+          const pd = await pr.json();
+          if (pd.profiles && onProxyProfileChange) {
+            onProxyProfileChange({ active: pd.active, profiles: pd.profiles });
+          }
+        } catch (e) { reportSwallowed('fetch.ccswitch-refresh', e); /* SSE refresh is the fallback */ }
+      } else if (data && typeof data.error === 'string' && data.error.startsWith('node:sqlite unavailable')) {
+        // Runtime lacks node:sqlite (Node < 22.5, or 22.x without --experimental-sqlite):
+        // an actionable message beats the generic "cc-switch not detected".
+        message.error(t('ui.proxy.ccswitchNodeUnsupported'));
+      } else {
+        message.error(t('ui.proxy.ccswitchImportFail') + (data && data.error ? ': ' + data.error : ''));
+      }
+    } catch (err) {
+      reportSwallowed('fetch.ccswitch-import', err);
+      message.error(t('ui.proxy.ccswitchImportFail'));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   // open 变化时 reset 表单状态 + 删除确认。等价于原 AppHeader.jsx:1935 onCancel 里 setState({editingProxy:null})
   useEffect(() => {
@@ -202,6 +245,10 @@ export default function ProxyModal({
         <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 12 }} onClick={handleStartNew}>
           {t('ui.proxy.addProxy')}
         </Button>
+        <Button block type="dashed" icon={<ImportOutlined />} style={{ marginTop: 8 }} loading={importing} onClick={handleImportFromCcSwitch}>
+          {t('ui.proxy.ccswitchImport')}
+        </Button>
+        <div className={styles.proxyEditHint}>{t('ui.proxy.ccswitchImportHint')}</div>
       </div>
   );
 

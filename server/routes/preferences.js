@@ -5,6 +5,8 @@ import { homedir } from 'node:os';
 import { LOG_DIR, setLogDir, getClaudeConfigDir } from '../../findcc.js';
 import { PROFILE_PATH, _defaultConfig, getActiveProfileId, setActiveProfileForWorkspace, _loadProxyProfile } from '../interceptor.js';
 import { migrateProxyProfileList } from '../lib/interceptor-core.js';
+import { discoverCcSwitchProviders, mergeImportedProfiles } from '../lib/ccswitch-import.js';
+import { reportSwallowed } from '../lib/error-report.js';
 import { setLang } from '../i18n.js';
 import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manager.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
@@ -299,6 +301,125 @@ function proxyProfilesPost(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// ── cc-switch 导入 ─────────────────────────────────────
+// cc-switch 是 Tauri 桌面应用，把供应商凭证存 SQLite（cc-switch.db providers 表）。
+// 本路由跨平台探测 cc-switch 数据目录，只读查 claude 类型供应商，映射成 cc-viewer profile。
+// GET=预览（不落盘）；POST=执行导入（merge 进 profile.json + SSE 广播刷新）。
+
+async function ccswitchProvidersGet(req, res, _parsedUrl, isLocal, _deps) {
+  try {
+    const result = await discoverCcSwitchProviders();
+    // 脱敏：非本机不下发明文 apiKey（与 proxyProfilesGet 的 maskProfiles 策略一致）
+    const profiles = isLocal ? result.profiles : (result.profiles || []).map(p => ({
+      ...p,
+      apiKey: p.apiKey ? `${p.apiKey.slice(0, 4)}****` : '',
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      profiles,
+      currentId: result.currentId || null,
+      dbPath: result.dbPath,
+      error: result.error,
+    }));
+  } catch (err) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ profiles: [], error: String(err && err.message || err) }));
+  }
+}
+
+// POST body 可选 { setActive: true } —— 是否把 cc-switch 的 current 设为 cc-viewer active。
+// 默认不设（避免覆盖用户当前选择）。导入只 merge 列表，凭证刷新幂等。
+async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
+  if (!isLocal) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'cc-switch import is local-only' }));
+    return;
+  }
+  let body = '';
+  req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
+  req.on('end', async () => {
+    try {
+      const incoming = body ? JSON.parse(body) : {};
+      const setActive = incoming && incoming.setActive === true;
+      const result = await discoverCcSwitchProviders();
+      if (result.error && result.profiles.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: result.error, imported: 0, updated: 0 }));
+        return;
+      }
+      // Read existing profile.json. A missing file is a legitimate first import,
+      // but a file that exists and fails to parse must ABORT: merging into an
+      // empty base and writing back would silently wipe every user-created
+      // proxy_ profile (existing IS the source of truth here, unlike
+      // proxyProfilesPost where the client sends the full desired list).
+      let existing = { profiles: [] };
+      if (existsSync(PROFILE_PATH)) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(readFileSync(PROFILE_PATH, 'utf-8'));
+        } catch (err) {
+          reportSwallowed('ccswitch-import.read-existing', err);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json is unreadable; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        // JSON that parses to a non-object (null, array, number) is just as
+        // destructive to merge into — treat it the same as a parse failure.
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json has an unexpected shape; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        existing = parsed;
+      }
+      // merge
+      const merged = mergeImportedProfiles(existing.profiles || [], result.profiles);
+      const toWrite = { ...existing, profiles: merged.profiles };
+      // 落盘
+      const dir = dirname(PROFILE_PATH);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(PROFILE_PATH, JSON.stringify(toWrite, null, 2), { mode: 0o600 });
+      // active 处理：setActive=true 且 cc-switch 有 current → 切换；否则保持现状
+      let activeChanged = false;
+      if (setActive && result.currentId) {
+        setActiveProfileForWorkspace(result.currentId);
+        activeChanged = true;
+      } else {
+        _loadProxyProfile(); // 刷新列表（可能增删了）
+      }
+      // SSE 广播给前端刷新（profile: 'refresh' 是 truthy 哨兵，
+      // 触发 AppBase SSE handler 的 if(data.profile) 重新 GET 全量列表）
+      const effectiveActive = getActiveProfileId();
+      sendEventToClients(deps.clients, 'proxy_profile', {
+        active: effectiveActive,
+        profile: 'refresh',
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        imported: merged.imported,
+        updated: merged.updated,
+        total: merged.profiles.length,
+        activeChanged,
+        dbPath: result.dbPath,
+      }));
+    } catch (err) {
+      // ok:false keeps the response contract uniform — the client decides
+      // success strictly on data.ok, never on the presence of counter fields.
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: String(err && err.message || err) }));
+    }
+  });
+}
+
 export const preferencesRoutes = [
   { method: 'GET', match: 'exact', path: '/api/preferences', handler: preferencesGet },
   { method: 'POST', match: 'exact', path: '/api/preferences', handler: preferencesPost },
@@ -306,4 +427,6 @@ export const preferencesRoutes = [
   { method: 'POST', match: 'exact', path: '/api/claude-settings', handler: claudeSettingsPost },
   { method: 'GET', match: 'exact', path: '/api/proxy-profiles', handler: proxyProfilesGet },
   { method: 'POST', match: 'exact', path: '/api/proxy-profiles', handler: proxyProfilesPost },
+  { method: 'GET', match: 'exact', path: '/api/ccswitch-providers', handler: ccswitchProvidersGet },
+  { method: 'POST', match: 'exact', path: '/api/ccswitch-import', handler: ccswitchImportPost },
 ];
