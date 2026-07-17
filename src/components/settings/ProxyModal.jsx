@@ -242,13 +242,14 @@ export default function ProxyModal({
           ))}
         </div>
 
-        <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 12 }} onClick={handleStartNew}>
-          {t('ui.proxy.addProxy')}
-        </Button>
-        <Button block type="dashed" icon={<ImportOutlined />} style={{ marginTop: 8 }} loading={importing} onClick={handleImportFromCcSwitch}>
-          {t('ui.proxy.ccswitchImport')}
-        </Button>
-        <div className={styles.proxyEditHint}>{t('ui.proxy.ccswitchImportHint')}</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <Button type="dashed" icon={<ImportOutlined />} style={{ flex: 1 }} loading={importing} onClick={handleImportFromCcSwitch}>
+            {t('ui.proxy.ccswitchImport')}
+          </Button>
+          <Button type="dashed" icon={<PlusOutlined />} style={{ flex: 1 }} onClick={handleStartNew}>
+            {t('ui.proxy.addProxy')}
+          </Button>
+        </div>
       </div>
   );
 
