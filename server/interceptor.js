@@ -319,6 +319,47 @@ export function getLiveLogSource() {
   }
 }
 
+// SessionStart hook notify (session-start-bridge.js → /api/session-start-notify
+// → server.js deps). The only source acted on is 'resume': an in-terminal
+// /resume switches the running claude to a PAST conversation while the wire
+// session_id may stay the same, so without this signal the writer keeps
+// routing the resumed conversation into the OLD session dir (and the panel —
+// keyed on `_seqEpoch = v2:<dir identity>` — never switches). The transcript
+// basename is the resumed conversation's stable identity; the hook session_id
+// is a fresh uuid usable as the new dir identity when nothing was recorded.
+// 'startup'/'clear'/'compact' are deliberately ignored (startup needs nothing;
+// /clear already has epoch machinery; teammate processes inherit
+// CCVIEWER_PORT and fire startup events at this endpoint — the source gate
+// drops them).
+export function markSessionStart(payload) {
+  try {
+    const { source, sessionId, transcriptPath, cwd } = payload || {};
+    if (source !== 'resume') return;
+    if (!transcriptPath || typeof transcriptPath !== 'string') {
+      console.warn('[ccv session-start] resume signal without transcript_path — ignored');
+      return;
+    }
+    // Soft cross-project guard: a foreign project's claude that somehow
+    // carries our CCVIEWER_PORT must not re-bind THIS project's writer. Only
+    // enforced when both sides are known (workspace mode may leave
+    // _projectName empty until bound).
+    if (cwd && typeof cwd === 'string' && _projectName) {
+      const cwdProject = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      if (cwdProject !== _projectName) {
+        console.warn(`[ccv session-start] resume signal from project "${cwdProject}" ignored (bound to "${_projectName}")`);
+        return;
+      }
+    }
+    const transcriptUuid = basename(transcriptPath, '.jsonl');
+    _v2Writer.beginResumeSwitch({
+      transcriptUuid,
+      hookSid: (typeof sessionId === 'string' && sessionId) ? sessionId : null,
+    });
+  } catch (err) {
+    reportSwallowed('session-start.mark', err);
+  }
+}
+
 // P2 (-c migration guidance): three detection channels, any one marks this
 // launch as "continuing an older conversation" — the migrate prompt then
 // re-prompts even a dismissed user, because the conversation's first half

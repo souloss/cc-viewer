@@ -176,6 +176,65 @@ describe('POST /api/turn-end-notify 默认臂', () => {
 });
 
 // ---------------------------------------------------------------------------
+describe('POST /api/session-start-notify（/resume 会话切换信号）', () => {
+  const TOKEN = 'tok-branch';
+  const notifyHandler = () => eventsMod.eventsRoutes.find((r) => r.path === '/api/session-start-notify' && r.method === 'POST').handler;
+  function depsS(calls) {
+    return { INTERNAL_TOKEN: TOKEN, onSessionStartNotify: (p) => calls.push(p) };
+  }
+  function drive({ isLocal = true, token = TOKEN, body = null, deps }) {
+    const req = new EventEmitter();
+    req.headers = token === undefined ? {} : { 'x-ccviewer-internal': token };
+    req.destroy = () => {};
+    const res = makeRes();
+    return new Promise((resolve) => {
+      res.on('finish', () => resolve(res));
+      notifyHandler()(req, res, url('/api/session-start-notify'), isLocal, deps);
+      if (body !== null) req.emit('data', body);
+      req.emit('end');
+    });
+  }
+
+  it('非 loopback → 403，回调不触发', async () => {
+    const calls = [];
+    const res = await drive({ isLocal: false, deps: depsS(calls) });
+    assert.equal(res.statusCode, 403);
+    assert.equal(calls.length, 0);
+  });
+
+  it('token 不符 → 403', async () => {
+    const calls = [];
+    const res = await drive({ token: 'wrong', deps: depsS(calls) });
+    assert.equal(res.statusCode, 403);
+    assert.equal(calls.length, 0);
+  });
+
+  it('坏 JSON → 400', async () => {
+    const calls = [];
+    const res = await drive({ body: '{{nope', deps: depsS(calls) });
+    assert.equal(res.statusCode, 400);
+    assert.equal(calls.length, 0);
+  });
+
+  it('合法载荷 → 200 且原样递交 deps.onSessionStartNotify', async () => {
+    const calls = [];
+    const payload = { source: 'resume', sessionId: 's1', transcriptPath: '/t/orig.jsonl', cwd: '/w', ts: 1 };
+    const res = await drive({ body: JSON.stringify(payload), deps: depsS(calls) });
+    assert.equal(res.statusCode, 200);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], payload);
+  });
+
+  it('回调抛异常 → 被吞（reportSwallowed），仍 200', async () => {
+    const res = await drive({
+      body: JSON.stringify({ source: 'resume' }),
+      deps: { INTERNAL_TOKEN: TOKEN, onSessionStartNotify: () => { throw new Error('boom'); } },
+    });
+    assert.equal(res.statusCode, 200);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('GET /events 写路径 + 扫描分支', () => {
   it('ping write catch：ping write 抛被吞', async (t) => {
     await seedV2([mainAgentEntry('2026-06-06T01:00:00.000Z', 10)]);

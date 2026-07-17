@@ -22,7 +22,7 @@ import { AsyncWriteQueue } from '../async-write-queue.js';
 import { reportSwallowed } from '../error-report.js';
 import { ensureSessionDirSync, compactLocalTs14, sanitizePathComponent } from './layout.js';
 import { resolveSessionDirName, latestMainSession } from './session-select.js';
-import { acquireSessionClaim, releaseSessionClaim } from './session-owner.js';
+import { acquireSessionClaim, releaseSessionClaim, isForeignLiveOwned } from './session-owner.js';
 import { BlobStore } from './blob-store.js';
 import { Journal } from './journal.js';
 import { ConversationStore } from './conversation-store.js';
@@ -97,6 +97,12 @@ export class V2Writer {
     this._forkSession = false;
     this._resumeSession = false;
     this._adopted = false;
+    // In-terminal /resume switch (SessionStart hook, source:'resume'): the
+    // next MAIN request must be re-routed to the resumed conversation's dir.
+    // {transcriptUuid, hookSid} | null; last-wins, consumed one-shot, no TTL
+    // (after a /resume the next main request belongs to the resumed
+    // conversation no matter how much later it is typed).
+    this._pendingResumeSwitch = null;
   }
 
   /** P2: true once any session's FIRST main wire already carried assistant
@@ -164,6 +170,86 @@ export class V2Writer {
       this._claimedDirs.add(prev.dir);
     }
     return { dirName: basename(prev.dir), identityUUID: prev.sessionId };
+  }
+
+  /** In-terminal /resume signal (interceptor.markSessionStart → here): arm a
+   *  one-shot routing switch. `transcriptUuid` is the resumed conversation's
+   *  stable identity (transcript basename); `hookSid` is the fresh session
+   *  uuid the hook minted — used as the NEW dir identity when the resumed
+   *  conversation was never recorded by ccv (it must not be the old wire sid:
+   *  `<ts>_<oldSid>` would be re-resolved back to the OLD dir by
+   *  resolveSessionDirName). Last-wins across repeated /resume picks. */
+  beginResumeSwitch({ transcriptUuid, hookSid } = {}) {
+    try {
+      if (!transcriptUuid || typeof transcriptUuid !== 'string') return;
+      this._pendingResumeSwitch = {
+        transcriptUuid,
+        hookSid: (typeof hookSid === 'string' && hookSid) ? hookSid : null,
+      };
+    } catch (err) {
+      reportSwallowed('v2-write.resume-switch', err);
+    }
+  }
+
+  /**
+   * Consume the pending /resume switch for the arriving MAIN request: pick
+   * the target dir, take its claim, drop the old same-sid binding, and return
+   * an adoptTarget for `_session()` (the same channel `-c` adoption uses).
+   * Target precedence: the recorded dir of the resumed conversation
+   * (resolveSessionDirName by transcript uuid — the log re-joins its original
+   * folder, identity preserved) unless another LIVE window holds its claim
+   * (acquire fails → fork semantics, mirror of `_resolveAdoption`); else a
+   * fresh `<ts>_<hookSid>` dir. Works for BOTH wire behaviors: same-sid
+   * (re-bind: delete the old map entry so `_session` re-creates it against
+   * the new dir) and fresh-sid (plain targeted adoption).
+   * @param {string|null} prevSid - the writer's active sid BEFORE this
+   *   request: on a fresh-sid resume the departing conversation is keyed by
+   *   it, not by the incoming `sid`
+   * @returns {{dirName:string, identityUUID:string}}
+   */
+  _resolveResumeSwitch(sid, project, prevSid = null) {
+    const sw = this._pendingResumeSwitch;
+    this._pendingResumeSwitch = null; // one-shot
+    const projectDir = join(this._logDir, sanitizePathComponent(project));
+    let dirName = resolveSessionDirName(projectDir, sw.transcriptUuid, this._sessionsDirName);
+    let identity = sw.transcriptUuid;
+    if (dirName) {
+      const targetDir = join(projectDir, this._sessionsDirName, dirName);
+      // Liveness guard is UNCONDITIONAL (mirror _resolveAdoption's
+      // unconditional skipForeignLive): even a non-claiming writer must never
+      // re-bind into a dir another live window is writing. The acquire below
+      // additionally arbitrates for claiming writers.
+      if (isForeignLiveOwned(targetDir)
+        || (this._claimsEnabled() && !acquireSessionClaim(targetDir).ok)) {
+        dirName = null; // live foreign owner — never share its journal
+      }
+    }
+    if (dirName) {
+      // Adopt the recorded dir under ITS identity (meta.sessionId,
+      // first-write-wins) so `_seqEpoch` continues that conversation.
+      try {
+        const m = JSON.parse(readFileSync(join(projectDir, this._sessionsDirName, dirName, 'meta.json'), 'utf-8'));
+        if (m && m.sessionId) identity = m.sessionId;
+      } catch { /* torn meta — transcriptUuid is the correct fallback identity */ }
+    } else {
+      identity = sw.hookSid || `resume-${process.pid}-${Date.now()}`;
+      dirName = `${compactLocalTs14(new Date().toISOString())}_${identity}`;
+    }
+    // Drop the departing conversation's binding and release its claim — this
+    // process has switched away and will not write it again, so other windows
+    // may now resume/adopt it. Same-sid wire (the observed behavior): the old
+    // binding is keyed by the INCOMING sid; fresh-sid wire: it is keyed by
+    // prevSid (review P2 — without this branch the old dir's claim + map
+    // entry leaked until process exit).
+    const oldKey = this._sessions.has(sid) ? sid
+      : (prevSid && prevSid !== sid && this._sessions.has(prevSid)) ? prevSid : null;
+    if (oldKey !== null) {
+      const old = this._sessions.get(oldKey);
+      this._sessions.delete(oldKey);
+      releaseSessionClaim(old.paths.dir);
+      this._claimedDirs.delete(old.paths.dir);
+    }
+    return { dirName, identityUUID: identity };
   }
 
   /** Multi-window isolation: does this writer claim its session dirs? Only a
@@ -279,6 +365,13 @@ export class V2Writer {
       if (!this._diskOk()) return null;
 
       const parsed = parseUserId(entry.body && entry.body.metadata && entry.body.metadata.user_id);
+      // Captured BEFORE the reassignment below: when a /resume switch arrives
+      // on a FRESH wire sid, the departing conversation's binding is keyed by
+      // this previous sid, not the incoming one (review P2 — the fresh-sid
+      // variant would otherwise leak the old dir's claim + map entry until
+      // process exit, blocking other windows from resuming that ended
+      // conversation).
+      const prevSid = this._currentSid;
       let sid;
       if (parsed) {
         sid = parsed.sessionId;
@@ -306,8 +399,26 @@ export class V2Writer {
       // before the folder is created; null on every non-adoption path.
       let adoptTarget = null;
       if (parsed) {
-        adoptTarget = this._resolveAdoption(sid, project, originalMessages, entry);
-        if (adoptTarget) this._adopted = true;
+        // In-terminal /resume switch outranks launch adoption: the pending
+        // signal is consumed by the first REAL main request (countTokens
+        // probes and heartbeats wear main-agent body shapes but are not the
+        // user's resumed turn — consuming on them would re-bind too early
+        // with the same result, but keep the gate strict for clarity).
+        if (this._pendingResumeSwitch && entry.mainAgent
+          && !entry.isCountTokens && !entry.isHeartbeat) {
+          // Locally guarded (review P2): the switch resolution does dir-scan
+          // fs work (resolveSessionDirName → readdirSync) whose residual
+          // throw surface (EACCES/ENOTDIR) would otherwise escape to the
+          // outer catch and drop THIS request entirely — the resumed
+          // conversation's first main turn. A failure must degrade to normal
+          // routing (recorded in the current dir), never to a lost entry.
+          try { adoptTarget = this._resolveResumeSwitch(sid, project, prevSid); }
+          catch (err) { reportSwallowed('v2-write.resume-switch-apply', err); }
+        }
+        if (!adoptTarget) {
+          adoptTarget = this._resolveAdoption(sid, project, originalMessages, entry);
+          if (adoptTarget) this._adopted = true;
+        }
       }
 
       // entry.timestamp = this session's first-request time → meta.startTs +
@@ -532,9 +643,12 @@ export class V2Writer {
     return s ? s.paths.dir : null;
   }
 
-  /** Lifecycle hook (resume / workspace reset): drop in-memory conversation
-   *  continuity so the next request snapshots fresh. Journal seq keeps counting
-   *  (same process, same session dirs — seq must stay monotonic per session). */
+  /** Lifecycle hook: drop in-memory conversation continuity so the next
+   *  request snapshots fresh. Journal seq keeps counting (same process, same
+   *  session dirs — seq must stay monotonic per session). NOTE: the
+   *  in-terminal /resume switch does NOT ride this — it needs a DIR re-bind,
+   *  not just fresh continuity (see beginResumeSwitch); this stays for
+   *  in-place resets that keep the dir. */
   resetConversations() {
     try {
       for (const s of this._sessions.values()) {
@@ -564,6 +678,9 @@ export class V2Writer {
       // A second workspace's `-c` must be able to adopt afresh — the previous
       // workspace's adoption doesn't carry over.
       this._adopted = false;
+      // A /resume signal armed in the previous workspace context is
+      // meaningless after the switch (its transcript belongs to that project).
+      this._pendingResumeSwitch = null;
     } catch (err) {
       reportSwallowed('v2-write.reset-sessions', err);
     }

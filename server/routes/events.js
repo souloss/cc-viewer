@@ -52,6 +52,49 @@ function turnEndNotify(req, res, parsedUrl, isLocal, deps) {
   });
 }
 
+// SessionStart hook notify (session-start-bridge.js): the conversation-switch
+// signal for an in-terminal /resume. Same security shape as turnEndNotify
+// (loopback-only + internal token + 16KB cap); the actual gating on
+// payload.source and the V2Writer re-bind live behind deps.onSessionStartNotify
+// (server.js → interceptor.markSessionStart).
+function sessionStartNotify(req, res, parsedUrl, isLocal, deps) {
+  if (!isLocal) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Loopback only' }));
+    return;
+  }
+  if (req.headers['x-ccviewer-internal'] !== deps.INTERNAL_TOKEN) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid bridge token' }));
+    return;
+  }
+  let body = '';
+  let truncated = false;
+  req.on('data', chunk => {
+    body += chunk;
+    if (body.length > 16384) { truncated = true; req.destroy(); }
+  });
+  req.on('end', () => {
+    if (truncated) {
+      console.warn('[session-start-notify] body exceeded 16KB cap — request destroyed');
+      return; // socket already closed by destroy()
+    }
+    let payload = {};
+    let badJson = false;
+    try { payload = body ? JSON.parse(body) : {}; }
+    catch { badJson = true; console.warn('[session-start-notify] malformed JSON body'); }
+    if (badJson) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'malformed JSON body' }));
+      return;
+    }
+    try { deps.onSessionStartNotify(payload); }
+    catch (err) { reportSwallowed('session-start-notify.dispatch', err); }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
 // SSE endpoint
 // 构造「有新版」徽标的 SSE 帧（pending = {version, source}）。pending 为空返回 null。
 // 抽成纯函数便于单测帧格式；events() 在新连接上调用它补推，使版本徽标跨刷新持续显示。
@@ -358,6 +401,7 @@ async function requests(req, res) {
 
 export const eventsRoutes = [
   { method: 'POST', match: 'exact', path: '/api/turn-end-notify', handler: turnEndNotify },
+  { method: 'POST', match: 'exact', path: '/api/session-start-notify', handler: sessionStartNotify },
   { method: 'GET', match: 'exact', path: '/events', handler: events },
   { method: 'GET', match: 'exact', path: '/api/requests', handler: requests },
 ];

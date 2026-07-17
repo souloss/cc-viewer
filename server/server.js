@@ -76,7 +76,7 @@ function execWithStdin(cmd, args, input, options) {
     child.stdin.end();
   });
 }
-import { _initPromise, _projectName, _logDir, _v2Writer, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText } from './interceptor.js';
+import { _initPromise, _projectName, _logDir, _v2Writer, streamingState, resetStreamingState, PROFILE_PATH, setLivePort, getImLiveText, resetImLiveText, markSessionStart } from './interceptor.js';
 import { V2LiveFeed } from './lib/v2/live-feed.js';
 import { sanitizePathComponent } from './lib/v2/layout.js';
 import { maybeResumeConvert } from './lib/v2/convert-manager.js';
@@ -554,6 +554,9 @@ const deps = {
   startLogWatch,
   stopLogWatch,
   scheduleTurnEndBroadcast: _scheduleTurnEndBroadcast,
+  // SessionStart hook notify → conversation-switch signal (in-terminal
+  // /resume). The source gate + V2Writer re-bind live in the interceptor.
+  onSessionStartNotify: markSessionStart,
   ensureImWatch: _ensureImWatch,
   maskProfiles: _maskProfiles,
   maskApiKey: _maskApiKey,

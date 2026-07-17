@@ -194,3 +194,42 @@ describe('getLiveLogSource skips a foreign-live claimed session (wiring)', () =>
     assert.equal(interceptor.getLiveLogSource(), fDir, 'dead claim = unowned — served again');
   });
 });
+
+// ---------------------------------------------------------------------------
+// markSessionStart wiring (SessionStart hook → V2Writer.beginResumeSwitch):
+// only source:'resume' arms the switch; foreign-project cwd and missing
+// transcript_path are ignored; the transcript basename becomes the target id.
+// ---------------------------------------------------------------------------
+describe('markSessionStart arms the writer resume switch', () => {
+  const T_UUID = 'dddd4444-89ab-4cde-8f01-23456789abcd';
+
+  it('source:resume with matching cwd → pending switch armed with transcript uuid', () => {
+    interceptor.initForWorkspace(join(tmpDir, 'ws', 'projHook'));
+    writer()._pendingResumeSwitch = null;
+    interceptor.markSessionStart({
+      source: 'resume',
+      sessionId: 'eeee5555-89ab-4cde-8f01-23456789abcd',
+      transcriptPath: `/Users/x/.claude/projects/p/${T_UUID}.jsonl`,
+      cwd: '/Users/x/work/projHook',
+    });
+    assert.ok(writer()._pendingResumeSwitch, 'armed');
+    assert.equal(writer()._pendingResumeSwitch.transcriptUuid, T_UUID);
+    assert.equal(writer()._pendingResumeSwitch.hookSid, 'eeee5555-89ab-4cde-8f01-23456789abcd');
+  });
+
+  it('non-resume sources are ignored (teammate startup events land here too)', () => {
+    writer()._pendingResumeSwitch = null;
+    for (const source of ['startup', 'clear', 'compact', undefined]) {
+      interceptor.markSessionStart({ source, transcriptPath: `/t/${T_UUID}.jsonl`, cwd: '/Users/x/work/projHook' });
+    }
+    assert.equal(writer()._pendingResumeSwitch, null);
+  });
+
+  it('foreign-project cwd is ignored; missing transcript_path is ignored', () => {
+    writer()._pendingResumeSwitch = null;
+    interceptor.markSessionStart({ source: 'resume', transcriptPath: `/t/${T_UUID}.jsonl`, cwd: '/elsewhere/otherProj' });
+    assert.equal(writer()._pendingResumeSwitch, null, 'cross-project signal dropped');
+    interceptor.markSessionStart({ source: 'resume', cwd: '/Users/x/work/projHook' });
+    assert.equal(writer()._pendingResumeSwitch, null, 'no transcript_path → dropped');
+  });
+});
