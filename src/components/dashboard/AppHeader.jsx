@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Space, Tag, Button, Dropdown, Popover, Modal, Collapse, Drawer, Switch, Tabs, Spin, Input, Select, Segmented, Tooltip, message } from 'antd';
 import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
-import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
+import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, LineChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
 import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, readCalibrationModel, computeContextPercent, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
 import { contextSeverityColor } from '../../utils/formatters';
@@ -137,6 +137,18 @@ class AppHeader extends React.Component {
 
   // 汉堡菜单的「纯描述符」单一数据源：{ key, icon, label, onClick, dividerAfter? }，不含 divider 节点。
   // 四处复用：下拉 antd items 构建(getMenuItems)、汉堡右侧快捷方式行、Electron header model(pins)、
+  // Proxy stats (like retry config) only applies when traffic goes through a
+  // proxy/third-party gateway. "Confirmed proxy" = a non-built-in profile is
+  // active, or the built-in Default points at a non-official endpoint (same
+  // api.anthropic.com test as ProxyModal's Max warning). Official subscription
+  // (or config not yet loaded) → entry hidden (review P2).
+  _isProxyMode() {
+    const { activeProxyId, defaultConfig } = this.props;
+    if (activeProxyId && activeProxyId !== 'max') return true;
+    const origin = defaultConfig?.origin || '';
+    return !!origin && !/api\.anthropic\.com/i.test(origin);
+  }
+
   // Electron 点击回传派发(_handleHeaderAction case 'menuShortcut')。
   // onClick 全部是 bound class-field arrow / inline arrow，可脱离菜单上下文 standalone 调用。
   _getMenuDescriptors() {
@@ -232,7 +244,7 @@ class AppHeader extends React.Component {
   };
 
   _buildHeaderModel() {
-    const { viewMode, themeColor, terminalVisible, cliMode, isLocalLog, activeProxyId, proxyProfiles } = this.props;
+    const { viewMode, themeColor, terminalVisible, proxyStatsVisible, cliMode, isLocalLog, activeProxyId, proxyProfiles } = this.props;
     let proxy = null;
     if (activeProxyId && activeProxyId !== 'max') {
       const p = (proxyProfiles || []).find(x => x.id === activeProxyId);
@@ -269,6 +281,7 @@ class AppHeader extends React.Component {
       approval: this._buildApprovalInfo(),
       theme: showThemeBlock ? { mode: themeColor === 'light' ? 'light' : 'dark', title: themeColor === 'light' ? t('ui.themeColor.light') : t('ui.themeColor.dark') } : null,
       terminal: (cliMode && viewMode === 'chat' && !isLocalLog) ? { active: !!terminalVisible, label: t('ui.terminal') } : null,
+      proxyStats: (cliMode && viewMode === 'chat' && !isLocalLog && this._isProxyMode()) ? { active: !!proxyStatsVisible, label: t('ui.proxyStats.title') } : null,
       viewMode: { mode: viewMode, label: viewMode === 'raw' ? t('ui.chatMode') : t('ui.rawMode') },
       im,
       pins,
@@ -306,7 +319,7 @@ class AppHeader extends React.Component {
 
   _handleHeaderAction(payload) {
     if (!payload || !payload.type) return;
-    const { themeColor, onThemeColorChange, onToggleTerminal, onToggleViewMode, onApprovalReopen } = this.props;
+    const { themeColor, onThemeColorChange, onToggleTerminal, onToggleProxyStats, onToggleViewMode, onApprovalReopen } = this.props;
     switch (payload.type) {
       case 'menuOpen': this.setState((s) => ({ electronMenuOpen: !s.electronMenuOpen })); break;
       // win32 自定义标题栏的 File/Edit/View/Window:tab bar 只放按钮,下拉在这里(全高内容视图)
@@ -320,6 +333,7 @@ class AppHeader extends React.Component {
       }, this._syncMenuBarState); break;
       case 'theme': if (onThemeColorChange) onThemeColorChange(themeColor === 'light' ? 'dark' : 'light'); break;
       case 'terminal': if (onToggleTerminal) onToggleTerminal(); break;
+      case 'proxyStats': if (onToggleProxyStats) onToggleProxyStats(); break;
       case 'viewMode': if (onToggleViewMode) onToggleViewMode(); break;
       case 'approval': if (onApprovalReopen) onApprovalReopen(); break;
       case 'proxy': this.setState({ proxyModalVisible: true }); break;
@@ -708,6 +722,8 @@ class AppHeader extends React.Component {
       nextProps.cliMode !== this.props.cliMode ||
       nextProps.sdkMode !== this.props.sdkMode ||
       nextProps.terminalVisible !== this.props.terminalVisible ||
+      nextProps.proxyStatsVisible !== this.props.proxyStatsVisible ||
+      nextProps.onToggleProxyStats !== this.props.onToggleProxyStats ||
       nextProps.contextWindow !== this.props.contextWindow ||
       nextProps.contextBarOptimistic !== this.props.contextBarOptimistic ||
       nextProps.contextBarLocked !== this.props.contextBarLocked ||
@@ -1562,7 +1578,7 @@ class AppHeader extends React.Component {
   }
 
   render() {
-    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, themeColor, onThemeColorChange, displayScale, onDisplayScaleChange, autoApproveSeconds, onAutoApproveChange } = this.props;
+    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, proxyStatsVisible, onToggleProxyStats, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, themeColor, onThemeColorChange, displayScale, onDisplayScaleChange, autoApproveSeconds, onAutoApproveChange } = this.props;
     const { countdownText } = this.state;
     // 这 4 个偏好的唯一真相源是 SettingsContext（P0③）。AppHeader 已绑 SettingsContext，
     // 直接派生消费 + 调 updatePreferences，不再经 App 的 prop drilling。默认值与 AppBase._prefValues() 一致。
@@ -1843,6 +1859,17 @@ class AppHeader extends React.Component {
           >
             {viewMode === 'raw' ? t('ui.chatMode') : t('ui.rawMode')}
           </Button>
+          )}
+          {!isElectronTab && cliMode && viewMode === 'chat' && !isLocalLog && this._isProxyMode() && (
+            <Button
+              className={styles.compactBtn}
+              type={proxyStatsVisible ? 'primary' : 'default'}
+              ghost={proxyStatsVisible}
+              icon={<LineChartOutlined />}
+              onClick={onToggleProxyStats}
+            >
+              {t('ui.proxyStats.title')}
+            </Button>
           )}
         </Space>
         <MemoryDetailModal

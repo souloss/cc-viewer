@@ -126,7 +126,7 @@ describe('stats-worker v2: session parsing via init', () => {
     assert.ok(messages.some(m => m.type === 'init-done'));
 
     const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
-    assert.equal(stats._v, 11);
+    assert.equal(stats._v, 12);
     // v10: per-unit size = recursive session-dir bytes; journalSize = cache key.
     const sizedUnit = Object.values(stats.files)[0];
     assert.ok(sizedUnit.size >= sizedUnit.journalSize, 'folder size includes journal + conv/blob files');
@@ -448,7 +448,7 @@ describe('stats-worker discardable-session cache interplay', () => {
     const messages = await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
     assert.ok(messages.some(m => m.type === 'init-done'));
     const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
-    assert.equal(stats._v, 11);
+    assert.equal(stats._v, 12);
     assert.equal(stats.files['sessions/sid-probe'], undefined, 'stale cached probe unit dropped');
     assert.ok(stats.files['sessions/sid-real'], 'real session counted');
     assert.equal(stats.summary.fileCount, 1);

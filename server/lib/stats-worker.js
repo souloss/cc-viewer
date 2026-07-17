@@ -5,7 +5,7 @@
 // waste, review P1). Legacy v1 *.jsonl files are no longer counted — their
 // numbers return once the user migrates (ccv convert / the migrate prompt).
 import { parentPort } from 'node:worker_threads';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readJsonlTolerant, listSessionIds } from './v2/replay.js';
 import { dirSizeSync } from './v2/layout.js';
@@ -15,6 +15,7 @@ import {
   INTER_SESSION_TYPES, isSystemText, extractUserTexts, isSuggestionMode,
   collectPromptsFromEvents, sortEpochFiles,
 } from './user-prompt-extract.js';
+import { aggregateRecords, mergeProxyFileCache, parseDailyFileName } from './proxy-stats.js';
 
 // Prompt/preview extraction moved to the shared server/lib/user-prompt-extract.js
 // (also feeds the V2Writer prompts.jsonl cache and the log-list read side).
@@ -29,7 +30,12 @@ export { INTER_SESSION_TYPES, isSystemText, extractUserTexts };
 //      invalidates pre-discard caches so their probe units can't be reused
 //      back into filesStats, which lets the discard check sit AFTER the
 //      cache-reuse branch (cache hits skip the journal head scan entirely)
-const STATS_VERSION = 11;
+// v12: proxyStats field (proxy retry detail aggregation from per-day
+//      proxy_YYYY-MM-DD.jsonl shards; the bump invalidates v10 caches written
+//      by the pre-rebase feat/proxy-stats branch and v11 caches that lack the
+//      proxy fields). The per-file records cache lives in worker memory only
+//      (_proxyCacheByDir) — never persisted into the stats JSON.
+const STATS_VERSION = 12;
 
 /**
  * Parse one v2 session directory into the same stats shape parseJsonlFile
@@ -168,7 +174,14 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
   // Scan units = v2 session dirs. The cache key is the journal's size+mtime:
   // every request/completion appends journal lines, so any change moves it.
   const sessionIds = listSessionIds(projectDir).sort();
-  if (sessionIds.length === 0) return;
+  // Proxy retry shards (proxy_YYYY-MM-DD.jsonl) live at the project top level
+  // and can exist without any v2 session (proxy-only usage) — only bail out
+  // when BOTH are absent so aggregateProxyStats still runs for proxy-only dirs.
+  let proxyFiles = [];
+  try {
+    proxyFiles = readdirSync(projectDir).filter(f => f.startsWith('proxy_') && f.endsWith('.jsonl'));
+  } catch { /* unreadable project dir → nothing to aggregate from it either */ }
+  if (sessionIds.length === 0 && proxyFiles.length === 0) return;
 
   const filesStats = {};
   const topModels = {};
@@ -234,8 +247,9 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
     }
   }
 
-  // No parsable session yet (dirs without journals) — keep whatever exists.
-  if (Object.keys(filesStats).length === 0) return;
+  // No parsable session yet (dirs without journals) — keep whatever exists,
+  // unless proxy shards are present (they alone justify a stats write).
+  if (Object.keys(filesStats).length === 0 && proxyFiles.length === 0) return;
 
   // 计算全局汇总
   let totalRequests = 0;
@@ -256,6 +270,12 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
     totalCacheCreation += f.summary.cache_creation_input_tokens;
   }
 
+  // 代理重试明细聚合：扫描 proxy_YYYY-MM-DD.jsonl 文件，聚合成 proxyStats。
+  // 与 token 统计同文件同 worker，避免新建独立 worker。明细文件按天分片，聚合逻辑在
+  // proxy-stats.js:aggregateRecords（纯函数，可单测）。增量优化：仅对 size+mtime 变化的分片
+  // 重新解析，未变化分片复用 worker 内存缓存（mergeProxyFileCache + _proxyCacheByDir）。
+  const proxyStats = aggregateProxyStats(projectDir);
+
   const stats = {
     _v: STATS_VERSION,
     project: projectName,
@@ -272,6 +292,7 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
       cache_read_input_tokens: totalCacheRead,
       cache_creation_input_tokens: totalCacheCreation,
     },
+    proxyStats,
   };
 
   try {
@@ -279,6 +300,99 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
   } catch (err) {
     parentPort?.postMessage({ type: 'error', message: `Failed to write stats: ${err.message}` });
   }
+}
+
+/**
+ * 扫描项目目录下所有 proxy_YYYY-MM-DD.jsonl 明细文件，聚合成 proxyStats 结构。
+ * 增量优化：proxy 明细按天分片且仅追加——文件 size+mtime 未变即内容未变，复用上次解析的 records，
+ * 仅对变化/新增文件重新 readFileSync+解析（仿会话 JSONL 的 files[f] 缓存）。
+ *
+ * Review P1 fix: the per-file records cache is WORKER-MEMORY ONLY
+ * (_proxyCacheByDir). It was previously persisted as `proxyStatsFiles` inside
+ * `<project>.json`, which duplicated every raw record on disk (unbounded
+ * growth) and made every stats update rewrite — and every /api/proxy-stats
+ * read re-parse — the full history. A worker restart just re-parses the
+ * shards once; the JSON now carries only the aggregated `proxyStats`.
+ *
+ * @param {string} projectDir
+ * @returns {object} aggregated proxyStats
+ */
+const _proxyCacheByDir = new Map(); // projectDir → per-file cache {name:{records,size,lastModified}}
+
+function aggregateProxyStats(projectDir) {
+  let proxyFiles = [];
+  try {
+    proxyFiles = readdirSync(projectDir)
+      .filter(f => f.startsWith('proxy_') && f.endsWith('.jsonl'))
+      .sort();
+  } catch {
+    return aggregateRecords([]);
+  }
+  if (proxyFiles.length === 0) return aggregateRecords([]);
+
+  // Optional retention (review P2): per-day shards otherwise grow without
+  // bound and every one participates in aggregation forever. Opt-in via
+  // CCV_PROXY_STATS_RETAIN_DAYS=N — shards dated older than N days ago are
+  // deleted before aggregation (and drop out of the memory cache, which is
+  // rebuilt from the surviving file list). Deliberately OFF by default:
+  // silently deleting a user's detail history is a policy the user must
+  // choose, so without the env var nothing is ever removed.
+  const retainDays = parseInt(process.env.CCV_PROXY_STATS_RETAIN_DAYS, 10);
+  if (Number.isFinite(retainDays) && retainDays > 0) {
+    const cutoff = new Date(Date.now() - retainDays * 86400000);
+    const cutoffStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
+    proxyFiles = proxyFiles.filter((f) => {
+      const date = parseDailyFileName(f); // strict proxy_YYYY-MM-DD.jsonl; unparsable names are never deleted
+      if (!date || date >= cutoffStr) return true;
+      try { unlinkSync(join(projectDir, f)); } catch { /* deletion failed — keep it in this scan, retry next time */ }
+      return false;
+    });
+    if (proxyFiles.length === 0) return aggregateRecords([]);
+  }
+
+  const cachedFiles = _proxyCacheByDir.get(projectDir) || {};
+
+  const files = [];
+  for (const f of proxyFiles) {
+    const filePath = join(projectDir, f);
+    let stat;
+    try {
+      stat = statSync(filePath);
+    } catch {
+      continue; // stat 失败跳过此文件
+    }
+    const size = stat.size;
+    const lastModified = stat.mtime.toISOString();
+    const cached = cachedFiles[f];
+    const unchanged = cached && cached.size === size && cached.lastModified === lastModified;
+    if (unchanged) {
+      // 命中缓存：不传 records，由 mergeProxyFileCache 复用 cached.records
+      files.push({ name: f, size, lastModified });
+    } else {
+      // 变化/新增：重新解析记录（仅变化文件）
+      const records = [];
+      try {
+        const content = readFileSync(filePath, 'utf-8');
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            records.push(JSON.parse(trimmed));
+          } catch {
+            // 跳过无法解析的行
+          }
+        }
+      } catch {
+        // 文件读取失败：跳过（不进 cache，下次仍会重试）
+        continue;
+      }
+      files.push({ name: f, size, lastModified, records });
+    }
+  }
+
+  const { records: allRecords, cache } = mergeProxyFileCache({ existingCache: cachedFiles, files });
+  _proxyCacheByDir.set(projectDir, cache);
+  return aggregateRecords(allRecords);
 }
 
 /**

@@ -40,6 +40,8 @@ import { teamRoutes } from './routes/team.js';
 import { authRoutes } from './routes/auth.js';
 import { dingtalkRoutes } from './routes/dingtalk.js';
 import { imRoutes } from './routes/im.js';
+import { proxyStatsRoutes } from './routes/proxy-stats.js';
+import { setProxyStatsListener } from './lib/proxy-stats.js';
 import * as imCore from './lib/im-bridge-core.js';
 import * as imProcMgr from './lib/im-process-manager.js';
 import './lib/adapters/dingtalk-adapter.js'; // side-effect: registers the DingTalk adapter
@@ -431,6 +433,34 @@ function notifyStatsWorker(logFile) {
   }
 }
 
+// 供 proxy.js 在写入代理重试明细后通知 stats-worker 重扫聚合。
+// 单独 export 避免循环依赖（proxy.js 不能直接 import server.js 的 deps）。
+// Review P1 fix: one worker message per proxied LLM request made the worker
+// re-aggregate the whole project on EVERY request (O(N²) over a busy day —
+// the session-log path has the log-watcher debounce, the proxy path had
+// none). Trailing coalesce: the first notify schedules a flush, further
+// notifies within the window only update the pending file. unref() so a
+// pending flush never holds the process open on shutdown.
+const PROXY_STATS_DEBOUNCE_MS = 2000;
+let _proxyStatsFlushTimer = null;
+let _proxyStatsPendingFile = null;
+export function notifyProxyStats(logFile) {
+  _proxyStatsPendingFile = logFile;
+  if (_proxyStatsFlushTimer) return;
+  _proxyStatsFlushTimer = setTimeout(() => {
+    _proxyStatsFlushTimer = null;
+    const pending = _proxyStatsPendingFile;
+    _proxyStatsPendingFile = null;
+    if (!statsWorker) startStatsWorker();
+    notifyStatsWorker(pending);
+  }, PROXY_STATS_DEBOUNCE_MS);
+  _proxyStatsFlushTimer.unref?.();
+}
+// Dependency inversion (review P2): server.js owns the statsWorker, so IT
+// registers the notify callback with the proxy-stats lib; proxy.js only emits
+// through the lib and never reaches back into this module.
+setProxyStatsListener(notifyProxyStats);
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -662,6 +692,7 @@ const _routes = [
   ...teamRoutes,
   ...dingtalkRoutes,
   ...imRoutes,
+  ...proxyStatsRoutes,
 ];
 const dispatch = createDispatcher(_routes);
 

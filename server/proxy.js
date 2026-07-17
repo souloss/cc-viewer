@@ -1,7 +1,7 @@
 
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import * as interceptor from './interceptor.js';
 import { setupInterceptor } from './interceptor.js';
@@ -9,10 +9,18 @@ import { extractApiErrorMessage, formatProxyRequestError } from './lib/proxy-err
 import { getProxyDispatcher } from './lib/proxy-env.js';
 import { getClaudeConfigDir } from '../findcc.js';
 import { isAnthropicApiPath } from './lib/interceptor-core.js';
-import { executeRequest } from './lib/proxy-retry.js';
+import { executeRequest, extractModel } from './lib/proxy-retry.js';
+import { buildRecord, appendRecord, dailyFilePath, todayStr, emitProxyStatsUpdate } from './lib/proxy-stats.js';
+import { LOG_DIR } from '../findcc.js';
 
 // Setup interceptor to patch fetch
 setupInterceptor();
+
+// 通知 stats-worker 重扫 proxy 明细（review P2：原实现动态 import('./server.js') 反向触达
+// statsWorker 单例——若未来出现 proxy-only 进程，首条请求会因模块加载副作用意外拉起第二个
+// viewer。现在方向摆正：server.js（statsWorker 属主）加载时经 proxy-stats.js 的
+// setProxyStatsListener 注册回调，本模块只 emit；server 未加载则 emit 为 no-op）。
+const _notifyProxyStats = emitProxyStatsUpdate;
 
 // 强制上游返回未压缩响应，取代仅剥 zstd 的旧策略。
 // 原因：链路中的网关/代理（典型是本地 MITM 网络代理）可能把上游的压缩 body 原样透传，
@@ -123,7 +131,7 @@ export function startProxy() {
         const cleanReq = req.url.startsWith('/') ? req.url.slice(1) : req.url;
         const fullUrl = `${cleanBase}/${cleanReq}`;
 
-        // 大模型 API 请求（/v1/messages 等）走重试引擎：serial/race/stagger 重试。
+        // 大模型 API 请求（/v1/messages 等）走重试引擎：serial/race/stagger 重试 + 明细统计。
         // 重试引擎内部用 x-cc-viewer-trace 头让 interceptor 记录每次重试尝试到会话日志（网络视图数据源），
         // 模型替换由重试引擎用 resolveProfileModel 纯函数完成（interceptor 对 trace 请求会再跑一次，幂等 no-op）。
         // 非大模型 API 请求走原逻辑（同样用 x-cc-viewer-trace 让 interceptor 记录，但不经重试引擎）。
@@ -212,17 +220,18 @@ export function startProxy() {
   });
 }
 
-// ── 大模型 API 请求处理：重试引擎 ──────────────────────
-// mode=off 时退化为单次 fetch（与原透传一致）。
+// ── 大模型 API 请求处理：重试引擎 + 明细统计 ──────────────────────
+// mode=off 时仍写 1 条明细（attempts=1）以支撑可用率统计；完全禁用统计用 CCV_PROXY_STATS=off。
 // 重试配置由 interceptor._retryConfigState 提供（live binding，watchFile 热刷新），
 // 每请求取最新值，UI 改 retry-config.json 后下一个请求即生效，无需重启。
 const _retryConfigGetter = () => interceptor._retryConfigState;
 
 async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyDispatcher) {
+  const statsEnabled = process.env.CCV_PROXY_STATS !== 'off';
   const retryConfig = _retryConfigGetter(); // live binding：每请求取最新重试配置
   const profile = interceptor._activeProfile || null;
 
-  // 清理可能的 trace 头（executeRequest 会重新加，避免旧值干扰）；interceptor 会正常记录请求
+  // 清理可能的 trace 头（singleFetch 会重新加，避免旧值干扰）；interceptor 会正常记录请求
   // 同时清理 hop-by-hop / 传输编码头：body 已被 buffer 成完整 Buffer，
   // 残留的 transfer-encoding:chunked / content-length 会让 undici 拒绝（invalid transfer-encoding header）
   const retryFetchOptions = {
@@ -239,6 +248,9 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
   if (body.length > 0) {
     retryFetchOptions.body = body;
   }
+
+  // Model name for the stats detail record (extracted from the request body)
+  const model = extractModel(body);
 
   // Client-disconnect propagation: without this, a client that gave up leaves
   // the retry loop hammering (and billing) the upstream for up to
@@ -259,7 +271,7 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
     ctx: { dispatcher: proxyDispatcher, profile, signal: clientAbort.signal },
   });
 
-  const { response, attempts, finalStatus } = result;
+  const { response, attempts, retryCodes, durationMs, finalStatus, succeeded, upstreamStatus } = result;
 
   // Client already gone: nothing to write; the engine has aborted upstream work.
   if (clientAbort.signal.aborted || res.writableEnded) {
@@ -276,6 +288,37 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
     }
   }
   responseHeaders['x-forward-attempts'] = String(attempts);
+
+  // 写代理重试明细（主线程写，之后通知 stats-worker 重扫聚合）
+  if (statsEnabled && interceptor._projectName) {
+    try {
+      const projectDir = join(LOG_DIR, interceptor._projectName);
+      const filePath = dailyFilePath(projectDir, todayStr());
+      const record = buildRecord({
+        method: req.method,
+        path: req.url,
+        model,
+        profileId: profile?.id || 'default',
+        profileName: profile?.name || 'Default',
+        // Review P2 fix: upstreamStatus was hard-wired to finalStatus, killing
+        // the dual-status distinction (race/stagger fallbacks can differ).
+        upstreamStatus: upstreamStatus ?? finalStatus,
+        finalStatus,
+        attempts,
+        durationMs,
+        succeeded,
+        retryCodes,
+      });
+      appendRecord(filePath, record);
+      // 通知 stats-worker 重扫该 proxy 明细文件（缓存 dynamic import，非每请求新建）
+      const fileName = basename(filePath);
+      _notifyProxyStats(fileName);
+    } catch (err) {
+      if (process.env.CCV_DEBUG) {
+        console.error('[CC-Viewer Proxy] Failed to write proxy stats:', err.message);
+      }
+    }
+  }
 
   // 网络异常（finalStatus=0）或竞速全失败：返回 502 + Proxy Error，与原 catch 分支一致
   if (finalStatus === 0) {
