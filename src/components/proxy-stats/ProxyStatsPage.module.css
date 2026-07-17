@@ -69,7 +69,9 @@
   margin-top: 12px;
 }
 
-.topRow > .ant-table-wrapper {
+/* Review P2 fix: without :global() the antd class is hashed by CSS Modules and
+   the selector never matches, leaving the two tables unevenly sized. */
+.topRow > :global(.ant-table-wrapper) {
   flex: 1;
 }
 

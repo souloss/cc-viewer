@@ -323,3 +323,38 @@ describe('proxy-stats mergeProxyFileCache 增量缓存', () => {
     assert.equal(stats.summary.totalRequests, 2);
   });
 });
+
+// ── appendRecord (async write queue) + notifier registry — review P2 ─────────
+describe('proxy-stats appendRecord / notifier (review P2)', () => {
+  it('appendRecord writes through the async queue; flushRecords awaits it', async () => {
+    const { appendRecord, flushRecords } = await import('../server/lib/proxy-stats.js');
+    const { mkdtempSync, rmSync, readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'ccv-append-record-'));
+    try {
+      const file = join(dir, 'sub', 'proxy_2026-07-14.jsonl'); // sub dir must be auto-created
+      appendRecord(file, buildRecord({ method: 'POST', path: '/v1/messages', model: 'm', finalStatus: 200, attempts: 1, durationMs: 5, retryCodes: [] }));
+      appendRecord(file, buildRecord({ method: 'POST', path: '/v1/messages', model: 'm', finalStatus: 503, attempts: 2, durationMs: 9, retryCodes: [503] }));
+      await flushRecords();
+      const lines = readFileSync(file, 'utf-8').trim().split('\n');
+      assert.equal(lines.length, 2, 'both records flushed in order');
+      assert.equal(JSON.parse(lines[0]).final_status, 200);
+      assert.equal(JSON.parse(lines[1]).final_status, 503);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emitProxyStatsUpdate is a no-op without a listener and forwards with one', async () => {
+    const { setProxyStatsListener, emitProxyStatsUpdate } = await import('../server/lib/proxy-stats.js');
+    emitProxyStatsUpdate('proxy_x.jsonl'); // must not throw with no listener
+    const seen = [];
+    setProxyStatsListener((f) => seen.push(f));
+    emitProxyStatsUpdate('proxy_y.jsonl');
+    assert.deepEqual(seen, ['proxy_y.jsonl']);
+    setProxyStatsListener(() => { throw new Error('boom'); });
+    emitProxyStatsUpdate('proxy_z.jsonl'); // listener errors are contained
+    setProxyStatsListener(null); // cleanup for other suites
+  });
+});

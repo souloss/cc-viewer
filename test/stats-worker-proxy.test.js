@@ -21,7 +21,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { writeFileSync, mkdirSync, rmSync, readFileSync, appendFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -190,5 +190,35 @@ describe('stats-worker proxy aggregation', { concurrency: false }, () => {
     assert.ok(stats.files['sessions/sid-1'], 'session stats intact');
     assert.ok(stats.proxyStats, 'proxyStats present even with zero proxy traffic');
     assert.equal(stats.proxyStats.summary.totalRequests, 0);
+  });
+
+  it('CCV_PROXY_STATS_RETAIN_DAYS prunes shards older than the window (review P2)', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeMinimalSession(projectDir);
+    const oldShard = join(projectDir, 'proxy_2020-01-01.jsonl');
+    writeFileSync(oldShard, proxyRecord({ ts: '2020-01-01T01:00:00.000Z' }) + '\n');
+    writeFileSync(join(projectDir, 'proxy_2099-01-01.jsonl'), proxyRecord({ ts: '2099-01-01T01:00:00.000Z' }) + '\n');
+
+    process.env.CCV_PROXY_STATS_RETAIN_DAYS = '30'; // worker inherits process.env at spawn
+    try {
+      await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    } finally {
+      delete process.env.CCV_PROXY_STATS_RETAIN_DAYS;
+    }
+    assert.equal(existsSync(oldShard), false, 'shard older than the window must be deleted');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.proxyStats.summary.totalRequests, 1, 'only the surviving shard aggregates');
+  });
+
+  it('without the retention env nothing is ever deleted (opt-in policy)', async () => {
+    const projectDir = join(logDir, 'proj');
+    makeMinimalSession(projectDir);
+    const oldShard = join(projectDir, 'proxy_2020-01-01.jsonl');
+    writeFileSync(oldShard, proxyRecord({ ts: '2020-01-01T01:00:00.000Z' }) + '\n');
+
+    await runWorker({ type: 'init', logDir, projectName: 'proj' }, 'init-done');
+    assert.equal(existsSync(oldShard), true, 'no env → no deletion');
+    const stats = JSON.parse(readFileSync(join(projectDir, 'proj.json'), 'utf-8'));
+    assert.equal(stats.proxyStats.summary.totalRequests, 1);
   });
 });

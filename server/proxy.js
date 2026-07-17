@@ -10,29 +10,17 @@ import { getProxyDispatcher } from './lib/proxy-env.js';
 import { getClaudeConfigDir } from '../findcc.js';
 import { isAnthropicApiPath } from './lib/interceptor-core.js';
 import { executeRequest, extractModel } from './lib/proxy-retry.js';
-import { buildRecord, appendRecord, dailyFilePath, todayStr } from './lib/proxy-stats.js';
+import { buildRecord, appendRecord, dailyFilePath, todayStr, emitProxyStatsUpdate } from './lib/proxy-stats.js';
 import { LOG_DIR } from '../findcc.js';
 
 // Setup interceptor to patch fetch
 setupInterceptor();
 
-// 动态导入 server.js 的缓存 promise：避免每请求重复 import('./server.js')（ESM 首次后命中缓存，
-// 但仍省去每次调用 import() 的微任务/属性查找开销）。server.js 会在加载期 import 本模块（setupInterceptor），
-// 故不能静态 import（循环引用），用此缓存代理在首次调用时解析一次。
-let _serverModPromise = null;
-function _getServerModule() {
-  if (!_serverModPromise) _serverModPromise = import('./server.js');
-  return _serverModPromise;
-}
-// 通知 stats-worker 重扫某个 proxy 明细文件；失败时按 CCV_DEBUG 记录（stats 写入是诊断性副作用，
-// 不应静默吞掉）。server 端无 src/utils/errorReport.js，沿用本文件既有的 CCV_DEBUG console.error 模式。
-function _notifyProxyStats(fileName) {
-  _getServerModule().then(m => m.notifyProxyStats?.(fileName)).catch((err) => {
-    if (process.env.CCV_DEBUG) {
-      console.error('[CC-Viewer Proxy] notifyProxyStats failed:', err?.message || err);
-    }
-  });
-}
+// 通知 stats-worker 重扫 proxy 明细（review P2：原实现动态 import('./server.js') 反向触达
+// statsWorker 单例——若未来出现 proxy-only 进程，首条请求会因模块加载副作用意外拉起第二个
+// viewer。现在方向摆正：server.js（statsWorker 属主）加载时经 proxy-stats.js 的
+// setProxyStatsListener 注册回调，本模块只 emit；server 未加载则 emit 为 no-op）。
+const _notifyProxyStats = emitProxyStatsUpdate;
 
 // 强制上游返回未压缩响应，取代仅剥 zstd 的旧策略。
 // 原因：链路中的网关/代理（典型是本地 MITM 网络代理）可能把上游的压缩 body 原样透传，
@@ -283,7 +271,7 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
     ctx: { dispatcher: proxyDispatcher, profile, signal: clientAbort.signal },
   });
 
-  const { response, attempts, retryCodes, durationMs, finalStatus, succeeded } = result;
+  const { response, attempts, retryCodes, durationMs, finalStatus, succeeded, upstreamStatus } = result;
 
   // Client already gone: nothing to write; the engine has aborted upstream work.
   if (clientAbort.signal.aborted || res.writableEnded) {
@@ -312,7 +300,9 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
         model,
         profileId: profile?.id || 'default',
         profileName: profile?.name || 'Default',
-        upstreamStatus: finalStatus,
+        // Review P2 fix: upstreamStatus was hard-wired to finalStatus, killing
+        // the dual-status distinction (race/stagger fallbacks can differ).
+        upstreamStatus: upstreamStatus ?? finalStatus,
         finalStatus,
         attempts,
         durationMs,

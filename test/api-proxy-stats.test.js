@@ -146,4 +146,31 @@ describe('POST /api/refresh-proxy-stats', { concurrency: false }, () => {
     assert.equal(res.status, 500);
     assert.match(res.body.error, /not available/);
   });
+
+  it('coalesces concurrent refreshes: one scan, one listener, all waiters resolved (review P2)', () => {
+    const worker = new EventEmitter();
+    let posts = 0;
+    worker.postMessage = () => { posts += 1; };
+    const deps = { statsWorker: worker, startStatsWorker() {} };
+    const res1 = mkRes();
+    const res2 = mkRes();
+    const res3 = mkRes();
+    postRoute.handler({}, res1, {}, true, deps);
+    postRoute.handler({}, res2, {}, true, deps); // joins in-flight scan
+    postRoute.handler({}, res3, {}, true, deps); // joins in-flight scan
+    assert.equal(posts, 1, 'only the first request may start a scan');
+    assert.equal(worker.listenerCount('message'), 1, 'only one shared done-listener');
+    worker.emit('message', { type: 'scan-all-done' });
+    for (const r of [res1, res2, res3]) {
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ok, true);
+    }
+    assert.equal(worker.listenerCount('message'), 0);
+    // The latch must reset: a new refresh after completion starts a fresh scan
+    const res4 = mkRes();
+    postRoute.handler({}, res4, {}, true, deps);
+    assert.equal(posts, 2, 'post-completion refresh starts a new scan');
+    worker.emit('message', { type: 'scan-all-done' });
+    assert.equal(res4.status, 200);
+  });
 });

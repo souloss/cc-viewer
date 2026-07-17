@@ -5,7 +5,7 @@
 // waste, review P1). Legacy v1 *.jsonl files are no longer counted — their
 // numbers return once the user migrates (ccv convert / the migrate prompt).
 import { parentPort } from 'node:worker_threads';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readJsonlTolerant, listSessionIds } from './v2/replay.js';
 import { dirSizeSync } from './v2/layout.js';
@@ -15,7 +15,7 @@ import {
   INTER_SESSION_TYPES, isSystemText, extractUserTexts, isSuggestionMode,
   collectPromptsFromEvents, sortEpochFiles,
 } from './user-prompt-extract.js';
-import { aggregateRecords, mergeProxyFileCache } from './proxy-stats.js';
+import { aggregateRecords, mergeProxyFileCache, parseDailyFileName } from './proxy-stats.js';
 
 // Prompt/preview extraction moved to the shared server/lib/user-prompt-extract.js
 // (also feeds the V2Writer prompts.jsonl cache and the log-list read side).
@@ -329,6 +329,26 @@ function aggregateProxyStats(projectDir) {
     return aggregateRecords([]);
   }
   if (proxyFiles.length === 0) return aggregateRecords([]);
+
+  // Optional retention (review P2): per-day shards otherwise grow without
+  // bound and every one participates in aggregation forever. Opt-in via
+  // CCV_PROXY_STATS_RETAIN_DAYS=N — shards dated older than N days ago are
+  // deleted before aggregation (and drop out of the memory cache, which is
+  // rebuilt from the surviving file list). Deliberately OFF by default:
+  // silently deleting a user's detail history is a policy the user must
+  // choose, so without the env var nothing is ever removed.
+  const retainDays = parseInt(process.env.CCV_PROXY_STATS_RETAIN_DAYS, 10);
+  if (Number.isFinite(retainDays) && retainDays > 0) {
+    const cutoff = new Date(Date.now() - retainDays * 86400000);
+    const cutoffStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
+    proxyFiles = proxyFiles.filter((f) => {
+      const date = parseDailyFileName(f); // strict proxy_YYYY-MM-DD.jsonl; unparsable names are never deleted
+      if (!date || date >= cutoffStr) return true;
+      try { unlinkSync(join(projectDir, f)); } catch { /* deletion failed — keep it in this scan, retry next time */ }
+      return false;
+    });
+    if (proxyFiles.length === 0) return aggregateRecords([]);
+  }
 
   const cachedFiles = _proxyCacheByDir.get(projectDir) || {};
 

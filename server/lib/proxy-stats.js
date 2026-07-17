@@ -6,8 +6,9 @@
 //   - Details are sharded per day as proxy_YYYY-MM-DD.jsonl, synonymous with llm-retry-proxy's retry_YYYY-MM-DD.jsonl.
 //   - Aggregation is done by stats-worker (Worker thread) calling aggregateRecords; the main thread only handles appendRecord.
 //   - Fully separated from cc-viewer's existing session logs (*.jsonl written by interceptor), no cross-contamination.
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { AsyncWriteQueue } from './async-write-queue.js';
 
 // ── Detail record schema ──────────────────────────────────────────────
 // Appends one JSON line after each proxied LLM API request completes. Fields align with llm-retry-proxy's retry records.
@@ -98,16 +99,58 @@ export function parseDailyFileName(fileName) {
 }
 
 /**
- * Append a detail record to the per-day sharded file. Atomic append (appendFileSync), concurrency-safe.
- * Creates the directory automatically if it doesn't exist (mkdirSync recursive).
+ * Append a detail record to the per-day sharded file (line-ordered, non-blocking).
+ * Creates the directory automatically on first use (mkdirSync recursive, cached).
+ *
+ * Review P2 fix: this sat on the proxy hot path (before the first response
+ * byte) doing a synchronous mkdir + appendFileSync per request. Writes now go
+ * through the shared AsyncWriteQueue (single writer, ordered, falls back to
+ * sync on process exit so records are never lost) and the mkdir runs once per
+ * directory via a process-level cache.
  * @param {string} filePath Absolute path of the detail file
  * @param {object} record Standardized record produced by buildRecord
+ * @param {Function} [onDone] Called after the line hits the queue's writer (tests)
  */
-export function appendRecord(filePath, record) {
+const _statsWriteQueue = new AsyncWriteQueue(''); // paths are always explicit (appendTo)
+const _dirsEnsured = new Set();
+
+export function appendRecord(filePath, record, onDone) {
+  const dir = join(filePath, '..');
+  if (!_dirsEnsured.has(dir)) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      _dirsEnsured.add(dir);
+    } catch { /* No permission — the queued append will surface the failure as a silent no-op */ }
+  }
+  _statsWriteQueue.appendTo(filePath, JSON.stringify(record) + '\n', onDone);
+}
+
+/** Await all queued detail writes (tests / graceful shutdown). */
+export function flushRecords() {
+  return _statsWriteQueue.flush();
+}
+
+// ── Stats-update notifier (dependency inversion, review P2) ────────────────
+// proxy.js used to dynamically import('./server.js') to reach the statsWorker
+// singleton — if a future proxy-only process did that first, server.js's
+// module-load side effects would boot a second viewer. The owner (server.js)
+// now registers its notify callback here at load time; proxy.js just emits.
+// No listener registered (server.js not loaded) → emit is a no-op.
+let _statsUpdateListener = null;
+
+export function setProxyStatsListener(fn) {
+  _statsUpdateListener = typeof fn === 'function' ? fn : null;
+}
+
+export function emitProxyStatsUpdate(fileName) {
+  if (!_statsUpdateListener) return;
   try {
-    mkdirSync(join(filePath, '..'), { recursive: true });
-  } catch { /* Directory already exists or no permission; appendFileSync will report again */ }
-  appendFileSync(filePath, JSON.stringify(record) + '\n', { flag: 'a' });
+    _statsUpdateListener(fileName);
+  } catch (err) {
+    if (process.env.CCV_DEBUG) {
+      console.error('[CC-Viewer Proxy] proxy stats notify failed:', err?.message);
+    }
+  }
 }
 
 // ── Aggregate computation ──────────────────────────────────────────────────────

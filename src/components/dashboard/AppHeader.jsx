@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Space, Tag, Button, Dropdown, Popover, Modal, Collapse, Drawer, Switch, Tabs, Spin, Input, Select, Segmented, Tooltip, message } from 'antd';
 import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
-import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
+import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, LineChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
 import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, readCalibrationModel, computeContextPercent, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
 import { contextSeverityColor } from '../../utils/formatters';
@@ -137,6 +137,18 @@ class AppHeader extends React.Component {
 
   // 汉堡菜单的「纯描述符」单一数据源：{ key, icon, label, onClick, dividerAfter? }，不含 divider 节点。
   // 四处复用：下拉 antd items 构建(getMenuItems)、汉堡右侧快捷方式行、Electron header model(pins)、
+  // Proxy stats (like retry config) only applies when traffic goes through a
+  // proxy/third-party gateway. "Confirmed proxy" = a non-built-in profile is
+  // active, or the built-in Default points at a non-official endpoint (same
+  // api.anthropic.com test as ProxyModal's Max warning). Official subscription
+  // (or config not yet loaded) → entry hidden (review P2).
+  _isProxyMode() {
+    const { activeProxyId, defaultConfig } = this.props;
+    if (activeProxyId && activeProxyId !== 'max') return true;
+    const origin = defaultConfig?.origin || '';
+    return !!origin && !/api\.anthropic\.com/i.test(origin);
+  }
+
   // Electron 点击回传派发(_handleHeaderAction case 'menuShortcut')。
   // onClick 全部是 bound class-field arrow / inline arrow，可脱离菜单上下文 standalone 调用。
   _getMenuDescriptors() {
@@ -269,7 +281,7 @@ class AppHeader extends React.Component {
       approval: this._buildApprovalInfo(),
       theme: showThemeBlock ? { mode: themeColor === 'light' ? 'light' : 'dark', title: themeColor === 'light' ? t('ui.themeColor.light') : t('ui.themeColor.dark') } : null,
       terminal: (cliMode && viewMode === 'chat' && !isLocalLog) ? { active: !!terminalVisible, label: t('ui.terminal') } : null,
-      proxyStats: (cliMode && viewMode === 'chat' && !isLocalLog) ? { active: !!proxyStatsVisible, label: t('ui.proxyStats.title') } : null,
+      proxyStats: (cliMode && viewMode === 'chat' && !isLocalLog && this._isProxyMode()) ? { active: !!proxyStatsVisible, label: t('ui.proxyStats.title') } : null,
       viewMode: { mode: viewMode, label: viewMode === 'raw' ? t('ui.chatMode') : t('ui.rawMode') },
       im,
       pins,
@@ -1848,12 +1860,12 @@ class AppHeader extends React.Component {
             {viewMode === 'raw' ? t('ui.chatMode') : t('ui.rawMode')}
           </Button>
           )}
-          {!isElectronTab && cliMode && viewMode === 'chat' && !isLocalLog && (
+          {!isElectronTab && cliMode && viewMode === 'chat' && !isLocalLog && this._isProxyMode() && (
             <Button
               className={styles.compactBtn}
               type={proxyStatsVisible ? 'primary' : 'default'}
               ghost={proxyStatsVisible}
-              icon={<ApiOutlined />}
+              icon={<LineChartOutlined />}
               onClick={onToggleProxyStats}
             >
               {t('ui.proxyStats.title')}

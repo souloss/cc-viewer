@@ -41,6 +41,7 @@ import { authRoutes } from './routes/auth.js';
 import { dingtalkRoutes } from './routes/dingtalk.js';
 import { imRoutes } from './routes/im.js';
 import { proxyStatsRoutes } from './routes/proxy-stats.js';
+import { setProxyStatsListener } from './lib/proxy-stats.js';
 import * as imCore from './lib/im-bridge-core.js';
 import * as imProcMgr from './lib/im-process-manager.js';
 import './lib/adapters/dingtalk-adapter.js'; // side-effect: registers the DingTalk adapter
@@ -455,6 +456,10 @@ export function notifyProxyStats(logFile) {
   }, PROXY_STATS_DEBOUNCE_MS);
   _proxyStatsFlushTimer.unref?.();
 }
+// Dependency inversion (review P2): server.js owns the statsWorker, so IT
+// registers the notify callback with the proxy-stats lib; proxy.js only emits
+// through the lib and never reaches back into this module.
+setProxyStatsListener(notifyProxyStats);
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
