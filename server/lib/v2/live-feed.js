@@ -160,7 +160,7 @@ export class V2LiveFeed {
    * @param {number} [opts.idleEvictMs] - 0 disables idle cursor eviction (tests)
    * @param {Function} [opts.now]
    * @param {Function} [opts.isConvertRunningFn] - injection seam (tests)
-   * @param {Function} [opts.isForeignOwnedFn] - injection seam (tests):
+   * @param {Function} [opts.isForeignLiveOwnedFn] - injection seam (tests):
    *   (dir) => boolean, defaults to session-owner's isForeignLiveOwned
    */
   constructor(opts = {}) {
@@ -174,7 +174,11 @@ export class V2LiveFeed {
     this._idleEvictMs = typeof opts.idleEvictMs === 'number' ? opts.idleEvictMs : IDLE_EVICT_MS;
     this._now = opts.now || Date.now;
     this._isConvertRunning = opts.isConvertRunningFn || isConvertRunning;
-    this._isForeignOwned = opts.isForeignOwnedFn || isForeignLiveOwned;
+    // Claim owners are compared against THIS process's pid: the feed must
+    // co-reside with its V2Writer in one process (worker_threads would still
+    // share the pid; moving the feed into a forked CHILD process would make
+    // every own dir look foreign and break single-window live-follow).
+    this._isForeignLiveOwned = opts.isForeignLiveOwnedFn || isForeignLiveOwned;
     // Wire v3 (V3.S2): when on, every emitted item ALSO broadcasts a metadata
     // row (v2_requests_delta). Explicit ctor param — this module has no access
     // to the server deps object.
@@ -344,7 +348,7 @@ export class V2LiveFeed {
     // persistent gate set — so a dead owner's claim stops mattering the
     // moment its pid dies. Own dirs (tick path) and unclaimed teammate/IM
     // dirs pass through untouched.
-    if (this._isForeignOwned(dir)) return null;
+    if (this._isForeignLiveOwned(dir)) return null;
     // Discardable sessions (quota-probe orphans — no main/teammate req, no
     // meta.leader) are never followed: single choke point, every attach path
     // (_initialScan / _maybeAttachNew / tick / _safetyTick / _rebuildCursor)
@@ -742,7 +746,7 @@ export class V2LiveFeed {
       // safety-poll period). _seenDirs keeps the current mtime so a later
       // ownership release (owner exits) plus new activity re-attaches through
       // the normal mtime-bump path below.
-      if (this._isForeignOwned(cur.dir)) {
+      if (this._isForeignLiveOwned(cur.dir)) {
         this._closeCursor(cur);
         this._sessions.delete(cur.dir);
         this._seenDirs.set(cur.dir, this._journalMtime(cur.dir));

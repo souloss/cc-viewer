@@ -267,8 +267,10 @@ export function latestMainSession(projectDir, { excludeDir = '', skipForeignLive
   for (const name of listSessionIds(projectDir)) {
     const dir = join(projectDir, 'sessions', name);
     if (excludeDir && dir === excludeDir) continue;
-    if (skipForeignLive && isForeignLiveOwned(dir)) continue;
     if (!existsSync(join(dir, 'journal.jsonl'))) continue;
+    // After the cheaper journal-existence reject: skips one owner.lock read
+    // per torn/non-session dir on large-history cold loads.
+    if (skipForeignLive && isForeignLiveOwned(dir)) continue;
     let meta = null;
     try { meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf-8')); } catch { continue; }
     if (!meta) continue;

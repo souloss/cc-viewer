@@ -30,6 +30,9 @@ import { reportSwallowed } from '../error-report.js';
 
 export const OWNER_LOCK_NAME = 'owner.lock';
 
+// Contention retries for the wx create-exclusive acquire (im-lock precedent).
+const MAX_CLAIM_ATTEMPTS = 3;
+
 export function ownerLockPath(dir) { return join(dir, OWNER_LOCK_NAME); }
 
 /** Read the claim; missing / half-written / non-object → null (tolerated,
@@ -56,15 +59,18 @@ export function readSessionClaim(dir) {
  *
  * @param {string} dir - absolute session dir
  * @param {{pid?: number, pidAlive?: (pid:number)=>boolean}} [opts] test seams
- * @returns {{ok:true}|{ok:false, holder?:object|null}} ok:false means a live
- *   foreign holder (or an unreadable lock, conservatively treated as held) —
+ * @returns {{ok:true}|{ok:false, holder?:object|null}} ok:false = cannot
+ *   claim, for any of: a live foreign holder, an unreadable/half-written lock
+ *   (conservatively treated as held), an unexpected write I/O failure
+ *   (reported via reportSwallowed), or contention exhausting the retries.
+ *   `holder` is set only when a live foreign pid was identified. Either way
  *   the caller must NOT write into this dir (adoption: mint a fresh one).
  */
 export function acquireSessionClaim(dir, opts = {}) {
   const pid = opts.pid ?? process.pid;
   const pidAlive = opts.pidAlive || isPidAlive;
   const p = ownerLockPath(dir);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < MAX_CLAIM_ATTEMPTS; attempt++) {
     try {
       writeFileSync(p, JSON.stringify({ pid, startedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
       return { ok: true };

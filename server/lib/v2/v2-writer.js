@@ -152,6 +152,9 @@ export class V2Writer {
     // onto the same dead-owned dir get exactly one adopter via the owner.lock
     // 'wx' arbiter; the loser falls through to a fresh dir, which is Claude
     // Code's own continue/fork semantics (fresh wire sid per continue).
+    // skipForeignLive is deliberately UNCONDITIONAL while the claim below is
+    // _claimsEnabled()-gated: a non-claiming writer must still never adopt a
+    // live window's dir — it just doesn't stamp ownership of its own.
     const prev = latestMainSession(projectDir, { skipForeignLive: true });
     if (!prev || !prev.sessionId) return null;
     if (this._claimsEnabled()) {

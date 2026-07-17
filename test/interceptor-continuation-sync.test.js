@@ -23,7 +23,8 @@
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -139,5 +140,57 @@ describe('getLiveLogSource falls back past the in-flight current session', () =>
     w.ingestCompletion(h3, { ...e3, response: { status: 200, headers: {}, body: { content: [], usage: { input_tokens: 1, output_tokens: 1 } } }, duration: 1 });
     await w.flush();
     assert.equal(interceptor.getLiveLogSource(), nDir, 'once N has a completed main turn it is served');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getLiveLogSource skipForeignLive wiring (multi-window isolation): the
+// fallback must SKIP a newest session claimed by another LIVE process and
+// serve it again the moment that owner is dead. The predicate itself is
+// unit-tested in v2-session-owner/v2-session-select; THIS pins the one-line
+// wiring at interceptor.js getLiveLogSource — deleting `skipForeignLive: true`
+// there must turn this red.
+// ---------------------------------------------------------------------------
+describe('getLiveLogSource skips a foreign-live claimed session (wiring)', () => {
+  const SID_F = 'abababab-89ab-4cde-8f01-23456789abcd';
+  const uid = (sid) => JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: sid });
+
+  it("another live window's session is skipped; a dead owner's is served again", async () => {
+    interceptor.initForWorkspace(join(tmpDir, 'ws', 'projForeign'));
+    const w = writer();
+
+    // Seed one COMPLETED session F through the real writer, then hand its
+    // claim to "another live window" (process.ppid — the test runner).
+    const e = {
+      timestamp: '2026-07-14T09:00:00.000Z',
+      url: 'https://api.anthropic.com/v1/messages', method: 'POST',
+      body: {
+        model: 'm', system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
+        tools: [{ name: 'Bash' }], metadata: { user_id: uid(SID_F) },
+        messages: [{ role: 'user', content: 'f' }],
+      },
+      response: null, duration: 0, isStream: false, isHeartbeat: false, isCountTokens: false,
+      mainAgent: true, requestId: 'rf1',
+    };
+    const h = w.ingestRequest(e, e.body.messages);
+    w.ingestCompletion(h, { ...e, response: { status: 200, headers: {}, body: { content: [], usage: { input_tokens: 1, output_tokens: 1 } } }, duration: 1 });
+    await w.flush();
+    const fDir = w.currentSessionDir();
+    assert.ok(fDir && fDir.includes(SID_F));
+    writeFileSync(join(fDir, 'owner.lock'), JSON.stringify({ pid: process.ppid, startedAt: 'x' }));
+
+    // Re-bind the workspace: this process now has NO current session, so the
+    // cold load rides the latestMainSessionDir fallback — which must NOT hand
+    // back the other window's live session.
+    interceptor.initForWorkspace(join(tmpDir, 'ws', 'projForeign'));
+    assert.ok(!w.currentSessionDir(), 'fresh binding: no current session');
+    assert.equal(interceptor.getLiveLogSource(), '',
+      'the only candidate is foreign-live — intentional empty cold load, never the other window\'s conversation');
+
+    // The owner "crashes": a reaped child pid makes the claim dead — the very
+    // next cold load serves the session again (no permanent lock).
+    const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+    writeFileSync(join(fDir, 'owner.lock'), JSON.stringify({ pid: deadPid, startedAt: 'x' }));
+    assert.equal(interceptor.getLiveLogSource(), fDir, 'dead claim = unowned — served again');
   });
 });
