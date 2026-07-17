@@ -319,7 +319,16 @@ function retryConfigGet(req, res, _parsedUrl, _isLocal, _deps) {
   }
 }
 
-function retryConfigPost(req, res, _parsedUrl, _isLocal, deps) {
+function retryConfigPost(req, res, _parsedUrl, isLocal, deps) {
+  // Local-only, mirroring ccswitchImportPost: retry config is written to a
+  // cross-process file every ccv instance hot-reloads, and race/stagger with
+  // high concurrency multiplies the HOST's paid upstream requests — a LAN
+  // client must not be able to amplify the host's API spend machine-wide.
+  if (!isLocal) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'retry config is local-only' }));
+    return;
+  }
   let body = '';
   req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
   req.on('end', () => {

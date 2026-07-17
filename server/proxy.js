@@ -240,15 +240,31 @@ async function handleLlmApiRequest(req, res, fullUrl, fetchOptions, body, proxyD
     retryFetchOptions.body = body;
   }
 
+  // Client-disconnect propagation: without this, a client that gave up leaves
+  // the retry loop hammering (and billing) the upstream for up to
+  // maxRetryDurationMs. res 'close' before the response is finished means the
+  // client is gone → abort every in-flight/queued attempt via the engine.
+  const clientAbort = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      try { clientAbort.abort(); } catch { /* best effort */ }
+    }
+  });
+
   // 执行带重试的请求
   const result = await executeRequest({
     url: fullUrl,
     fetchOptions: retryFetchOptions,
     retryConfig,
-    ctx: { dispatcher: proxyDispatcher, profile },
+    ctx: { dispatcher: proxyDispatcher, profile, signal: clientAbort.signal },
   });
 
   const { response, attempts, finalStatus } = result;
+
+  // Client already gone: nothing to write; the engine has aborted upstream work.
+  if (clientAbort.signal.aborted || res.writableEnded) {
+    return;
+  }
 
   // 注入 X-Forward-Attempts 头（告知客户端本次重试了几次，与 llm-retry-proxy 一致）
   const responseHeaders = {};
