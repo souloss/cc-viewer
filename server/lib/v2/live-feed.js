@@ -22,7 +22,7 @@
 // through log-watcher's processWatchedEntry pipeline — the same enrichment,
 // reconstruction and side-events the v1 tail produced.
 
-import { watch, existsSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { watch, existsSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { reportSwallowed } from '../error-report.js';
 import { createIncrementalReconstructor } from '../delta-reconstructor.js';
@@ -30,6 +30,7 @@ import { processWatchedEntry, sendEventToClients, sendEventRawToClients } from '
 import { SessionSynthesizer } from './adapter.js';
 import { isDiscardableSession } from './session-select.js';
 import { isForeignLiveOwned } from './session-owner.js';
+import { isConvertRunning } from './convert-manager.js';
 import { computeCacheLoss } from './meta-rows.js';
 import { classifyRequest } from '../../../src/utils/requestType.js';
 
@@ -39,6 +40,12 @@ const DEFER_MS = 3000;          // synthesizer park deadline (lagging lines)
 const ATTACH_RECENT_MS = 5 * 60 * 1000; // pre-existing dirs considered "live"
 const TICK_RETRY_MS = 250;      // in-process tick raced the first queue drain
 const TICK_RETRY_MAX = 8;
+// Idle cursor eviction: a followed dir whose journal hasn't moved for this
+// long is detached, freeing its synthesizer/reconstructor state (a migration
+// can promote hundreds of dirs at once — holding all of them pins ~the whole
+// project in heap). Re-attach self-heals via the safety poll's mtime-bump
+// scan or the leader's tick() (both suppress history on a seen dir).
+const IDLE_EVICT_MS = 10 * 60 * 1000;
 
 const READ_CHUNK_BYTES = 8 * 1024 * 1024;
 // Node's max string length (~512MiB) — a longer line can never be decoded.
@@ -150,7 +157,9 @@ export class V2LiveFeed {
    * @param {number} [opts.safetyPollMs] - 0 disables the timer (tests drive
    *   _safetyTick manually)
    * @param {number} [opts.deferMs]
+   * @param {number} [opts.idleEvictMs] - 0 disables idle cursor eviction (tests)
    * @param {Function} [opts.now]
+   * @param {Function} [opts.isConvertRunningFn] - injection seam (tests)
    * @param {Function} [opts.isForeignOwnedFn] - injection seam (tests):
    *   (dir) => boolean, defaults to session-owner's isForeignLiveOwned
    */
@@ -162,7 +171,9 @@ export class V2LiveFeed {
     this._watchImpl = opts.watchImpl || watch;
     this._safetyPollMs = typeof opts.safetyPollMs === 'number' ? opts.safetyPollMs : SAFETY_POLL_MS;
     this._deferMs = typeof opts.deferMs === 'number' ? opts.deferMs : DEFER_MS;
+    this._idleEvictMs = typeof opts.idleEvictMs === 'number' ? opts.idleEvictMs : IDLE_EVICT_MS;
     this._now = opts.now || Date.now;
+    this._isConvertRunning = opts.isConvertRunningFn || isConvertRunning;
     this._isForeignOwned = opts.isForeignOwnedFn || isForeignLiveOwned;
     // Wire v3 (V3.S2): when on, every emitted item ALSO broadcasts a metadata
     // row (v2_requests_delta). Explicit ctor param — this module has no access
@@ -211,7 +222,12 @@ export class V2LiveFeed {
     if (!this._active || !sessionDir) return;
     let cur = this._sessions.get(sessionDir);
     if (!cur) {
-      cur = this._attach(sessionDir, { suppressExisting: false });
+      // A dir we have ALREADY seen re-attaching through tick() is an idle
+      // eviction (or a watcher loss) resuming — its backlog is history and
+      // must be seeded suppressed, or the re-attach replays the whole session
+      // through the broadcast path (the exact OOM this module was fixed for).
+      // Only a genuinely never-seen dir emits from byte 0.
+      cur = this._attach(sessionDir, { suppressExisting: this._seenDirs.has(sessionDir) });
       if (!cur) {
         if (_retries < TICK_RETRY_MAX) {
           setTimeout(() => this.tick(sessionDir, _retries + 1), TICK_RETRY_MS);
@@ -346,6 +362,32 @@ export class V2LiveFeed {
     // not swallow it: cross-process producers (IM worker, second ccv) have no
     // cold-load fallback for a connected client.
     if (this._discardGated.delete(dir)) suppressExisting = false;
+    // Migration output is dead history: converted sessions (meta origin:
+    // 'convert') have no producer and never append again, yet a promote
+    // renames dozens of them into sessions/ at once with fresh birthtimes —
+    // full-history seeding synthesized + JSON-round-tripped every entry of
+    // every promoted session inside the safety-poll/debounce timers (the
+    // 4GB main-thread OOM). Seek their cursors to EOF instead: nothing is
+    // read, cloned, or broadcast; the cold-load channel owns their history.
+    let convertOrigin = false;
+    try {
+      const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf-8'));
+      convertOrigin = !!meta && meta.origin === 'convert';
+    } catch (err) {
+      // meta.json is written synchronously BEFORE the journal's first async
+      // drain (ensureSessionDirSync), so journal-present + meta-ABSENT is
+      // abnormal. Never fall through to a broadcast replay: mid-conversion
+      // (same-process check — the converter worker runs inside the server
+      // process) the dir is almost certainly a promote in flight — treat as
+      // convert output; a truly missing meta otherwise seeds suppressed (cold
+      // load covers the history). Any OTHER errno is a transient lock on an
+      // EXISTING meta (Windows AV/EBUSY) — keep the caller's suppress verdict:
+      // flipping a fresh live session to suppressed would silently drop its
+      // first turn (review finding).
+      reportSwallowed('v2-live.meta-read', err);
+      if (this._isConvertRunning()) convertOrigin = true;
+      else if (err && err.code === 'ENOENT') suppressExisting = true;
+    }
     const cur = {
       dir,
       synth: new SessionSynthesizer(dir, { deferMs: this._deferMs, now: this._now }),
@@ -362,22 +404,90 @@ export class V2LiveFeed {
       reading: false,
       dirty: false,
       suppress: !!suppressExisting,
+      convertOrigin,
+      // Journal req seqs with no done yet. The journal is only touched at
+      // request start and completion, so a single >10min request would look
+      // "idle" to the mtime-based eviction and get detached mid-flight — its
+      // completion would then re-attach suppressed and never resolve the
+      // already-broadcast placeholder (review finding). Eviction skips
+      // cursors with an open request. A crash orphan (req, no done ever)
+      // pins its one session un-evicted — acceptable: eviction is a memory
+      // optimization, a stuck live card is a correctness bug.
+      openReqs: new Set(),
     };
     this._sessions.set(dir, cur);
     this._seenDirs.set(dir, this._journalMtime(dir));
-    try {
-      cur.watcher = this._watchImpl(dir, () => this._scheduleRead(cur));
-      cur.watcher.on('error', (err) => {
+    if (!convertOrigin) {
+      try {
+        cur.watcher = this._watchImpl(dir, () => this._scheduleRead(cur));
+        cur.watcher.on('error', (err) => {
+          reportSwallowed('v2-live.session-watch', err);
+          try { cur.watcher.close(); } catch { /* already closed */ }
+          cur.watcher = null; // safety poll keeps the cursor alive
+        });
+      } catch (err) {
         reportSwallowed('v2-live.session-watch', err);
-        try { cur.watcher.close(); } catch { /* already closed */ }
-        cur.watcher = null; // safety poll keeps the cursor alive
-      });
-    } catch (err) {
-      reportSwallowed('v2-live.session-watch', err);
+      }
+      this._readCursor(cur); // seed (suppressed history or brand-new content)
+    } else {
+      // No per-dir watcher either: a promote can bring hundreds of dead dirs
+      // at once and each fs.watch costs an fd. The safety poll's unconditional
+      // _readCursor still picks up any (theoretical) append past the seeked
+      // offsets until idle eviction reclaims the cursor.
+      this._seekCursorsToEof(cur);
     }
-    this._readCursor(cur); // seed (suppressed history or brand-new content)
     cur.suppress = false;
     return cur;
+  }
+
+  /** Position every cursor of a session at the current end of its file —
+   *  attach without reading: nothing existing is synthesized or emitted, only
+   *  bytes appended AFTER this point would flow. Enumerates ALL conv epoch
+   *  files up front so pre-existing epochs can't be replayed from 0 later. */
+  _seekCursorsToEof(cur) {
+    const sizeOf = (p) => {
+      try { return statSync(p).size; } catch (err) {
+        if (err && err.code === 'ENOENT') return 0; // missing file: offset 0 IS its EOF
+        // Any other stat failure must never seed offset 0 — that re-arms the
+        // full replay this seek exists to prevent. Park the cursor past any
+        // real size; a later successful read sees size < offset and rebuilds.
+        reportSwallowed('v2-live.seek-stat', err);
+        return Number.MAX_SAFE_INTEGER;
+      }
+    };
+    cur.journal.offset = sizeOf(cur.journal.path);
+    cur.responses.offset = sizeOf(cur.responses.path);
+    for (const { key, path } of this._enumerateConvFiles(cur.dir)) {
+      cur.convFiles.set(path, { key, path, offset: sizeOf(path) });
+    }
+  }
+
+  /** Enumerate a session's conversation epoch files as [{key, path}], epochs
+   *  numerically ordered within each conv key — the single home of the
+   *  two-level conversations/<key>/e<N>.jsonl walk (shared by the EOF-seek
+   *  attach and the incremental reader; review dedup). NB: file order is NOT
+   *  guaranteed to be globally seq-ordered (a pre-fix writer restart appended
+   *  newer seqs into an older epoch file) — the synthesizer's ingestConvLine
+   *  keeps its event window seq-sorted on insert, so consumers only need a
+   *  stable feed order. */
+  _enumerateConvFiles(dir) {
+    const convRoot = join(dir, 'conversations');
+    const out = [];
+    let keys = [];
+    try {
+      keys = readdirSync(convRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch {
+      return out; // no conversations dir yet
+    }
+    for (const key of keys) {
+      let files = [];
+      try {
+        files = readdirSync(join(convRoot, key)).filter((f) => /^e\d+\.jsonl$/.test(f));
+      } catch { continue; }
+      files.sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+      for (const f of files) out.push({ key, path: join(convRoot, key, f) });
+    }
+    return out;
   }
 
   _closeCursor(cur) {
@@ -419,7 +529,11 @@ export class V2LiveFeed {
           try { line = JSON.parse(raw); } catch (err) {
             reportSwallowed('v2-live.journal-parse', new Error(`${cur.dir}: ${err.message}`));
           }
-          if (line) cur.synth.ingestJournalLine(line);
+          if (line) {
+            if (line.ph === 'req') cur.openReqs.add(line.seq);
+            else if (line.ph === 'done') cur.openReqs.delete(line.seq);
+            cur.synth.ingestJournalLine(line);
+          }
         }
         this._emitDrained(cur);
       } while (cur.dirty);
@@ -429,44 +543,22 @@ export class V2LiveFeed {
   }
 
   _feedConvFiles(cur) {
-    const convRoot = join(cur.dir, 'conversations');
-    if (!existsSync(convRoot)) return;
-    let keys = [];
-    try {
-      keys = readdirSync(convRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch {
-      return;
-    }
-    for (const key of keys) {
-      let files = [];
-      try {
-        files = readdirSync(join(convRoot, key)).filter((f) => /^e\d+\.jsonl$/.test(f));
-      } catch {
-        continue;
+    for (const { key, path } of this._enumerateConvFiles(cur.dir)) {
+      let fc = cur.convFiles.get(path);
+      if (!fc) {
+        fc = { key, path, offset: 0 };
+        cur.convFiles.set(path, fc);
       }
-      // Numeric epoch order. NB: file order is NOT guaranteed to be globally
-      // seq-ordered (a pre-fix writer restart appended newer seqs into an
-      // older epoch file) — the synthesizer's ingestConvLine keeps its event
-      // window seq-sorted on insert, so feed order only needs to be stable.
-      files.sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
-      for (const f of files) {
-        const p = join(convRoot, key, f);
-        let fc = cur.convFiles.get(p);
-        if (!fc) {
-          fc = { key, path: p, offset: 0 };
-          cur.convFiles.set(p, fc);
+      const lines = readNewLines(fc);
+      if (lines === null) { this._rebuildCursor(cur); return; }
+      for (const raw of lines) {
+        let ev = null;
+        try { ev = JSON.parse(raw); } catch (err) {
+          reportSwallowed('v2-live.conv-parse', new Error(`${cur.dir}/${key}: ${err.message}`));
         }
-        const lines = readNewLines(fc);
-        if (lines === null) { this._rebuildCursor(cur); return; }
-        for (const raw of lines) {
-          let ev = null;
-          try { ev = JSON.parse(raw); } catch (err) {
-            reportSwallowed('v2-live.conv-parse', new Error(`${cur.dir}/${key}: ${err.message}`));
-          }
-          if (ev) {
-            cur.synth.ingestConvLine(key, ev);
-            if (this._wireV3 && !cur.suppress) this._forwardNative(cur, 'conv', key, raw);
-          }
+        if (ev) {
+          cur.synth.ingestConvLine(key, ev);
+          if (this._wireV3 && !cur.suppress) this._forwardNative(cur, 'conv', key, raw);
         }
       }
     }
@@ -636,6 +728,11 @@ export class V2LiveFeed {
     if (!this._active) return;
     this._armRootWatcher(); // re-arm after errors / late directory creation
     // Attached sessions: unconditional slow re-read (fs.watch is lossy).
+    // Idle eviction first: a cursor whose journal has not moved for
+    // _idleEvictMs is detached, releasing its synthesizer/reconstructor/
+    // _v3PrevMain retained state (post-migration this is ~the whole project).
+    // _seenDirs keeps the mtime, so the existing mtime-bump scan below (or the
+    // leader's tick(), now suppress-on-seen) re-attaches on real new activity.
     for (const cur of [...this._sessions.values()]) {
       // Multi-window isolation: an ATTACHED dir can turn foreign-owned after
       // the fact — an unowned (dead-owner) dir followed since startup gets
@@ -650,6 +747,18 @@ export class V2LiveFeed {
         this._sessions.delete(cur.dir);
         this._seenDirs.set(cur.dir, this._journalMtime(cur.dir));
         continue;
+      }
+      // openReqs guard: never evict mid-flight — a long request keeps the
+      // journal mtime frozen between its req and done lines, and evicting
+      // then would strand its already-broadcast placeholder (see openReqs).
+      if (this._idleEvictMs > 0 && cur.openReqs.size === 0) {
+        const mtime = this._journalMtime(cur.dir);
+        if (mtime > 0 && this._now() - mtime > this._idleEvictMs) {
+          this._closeCursor(cur);
+          this._sessions.delete(cur.dir);
+          this._seenDirs.set(cur.dir, mtime);
+          continue;
+        }
       }
       this._readCursor(cur);
     }

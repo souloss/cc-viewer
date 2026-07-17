@@ -12,13 +12,15 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync as writeFileSyncFs, appendFileSync as appendFileSyncFs } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync as writeFileSyncFs, appendFileSync as appendFileSyncFs } from 'node:fs';
 import { spawnSync as spawnSyncCp } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { V2Writer } from '../server/lib/v2/v2-writer.js';
 import { V2LiveFeed } from '../server/lib/v2/live-feed.js';
+import { STAGING_DIR_NAME } from '../server/lib/v2/convert.js';
+import { sendToClients, sendEventToClients, sendEventRawToClients, sendChunkToClients } from '../server/lib/log-watcher.js';
 import { iterateV2RawEntries } from '../server/lib/v2/adapter.js';
 import { readV2RequestsMeta } from '../server/lib/v2/meta-rows.js';
 import { reconstructEntries } from '../server/lib/delta-reconstructor.js';
@@ -578,6 +580,191 @@ describe('discardable session attach gate', () => {
     assert.equal(rows[0].mainAgent, false, 'kind-derived: teammate is never mainAgent');
     assert.equal(rows[0].conv, 'main', 'teammate conversations ride the main channel');
     assert.equal(rows[0].teammate, 'tm1');
+  });
+});
+
+// ─── migration promote → live feed OOM guard (2026-07-17) ─────────────────────
+// convertProject's promote loop renames every staged session into sessions/;
+// each promoted dir used to attach as a "brand-new live session" and replay its
+// ENTIRE history through synthesis + JSON round-trips inside the safety-poll /
+// debounce timers — the 4GB main-thread OOM. Convert output is dead history:
+// it must attach seeked to EOF, reading and broadcasting nothing.
+describe('migration promote → live feed (OOM guard)', () => {
+  it('a promoted convert-origin session attaches seeked to EOF: zero read, zero broadcast', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf());
+
+    // Write into the staging tree exactly like the converter does.
+    const w = newWriter({ sessionsDirName: STAGING_DIR_NAME, metaExtra: { origin: 'convert', convertedAt: nextTs() } });
+    const t1 = [textMsg('user', 'turn 1')];
+    const t2 = [...t1, textMsg('assistant', 'r1'), textMsg('user', 'turn 2')];
+    for (const msgs of [t1, t2]) fire(w, mainEntry(msgs));
+    await w.close();
+
+    // Promote exactly like convert.js: renameSync staging → sessions/.
+    const stagedName = resolveSessionDirName(projectDirOf(), SID, STAGING_DIR_NAME);
+    mkdirSync(join(projectDirOf(), 'sessions'), { recursive: true });
+    const promoted = join(projectDirOf(), 'sessions', stagedName);
+    renameSync(join(projectDirOf(), STAGING_DIR_NAME, stagedName), promoted);
+
+    feed._safetyTick(); // discovery (root watcher is stubbed) — the production path
+    assert.equal(feed.isFollowing(promoted), true, 'promoted dir is followed (future appends admissible)');
+    assert.equal(client.writes.length, 0, 'zero SSE frames of any kind — no history replay');
+
+    const cur = feed._sessions.get(promoted);
+    assert.equal(cur.convertOrigin, true);
+    assert.equal(cur.journal.offset, statSync(cur.journal.path).size, 'journal seeked to EOF');
+    const e0 = join(promoted, 'conversations', 'main', 'e0.jsonl');
+    assert.ok(cur.convFiles.has(e0), 'pre-existing conv epoch enumerated up front');
+    assert.equal(cur.convFiles.get(e0).offset, statSync(e0).size, 'conv epoch seeked to EOF');
+
+    // Theoretical post-promote append (a writer restart onto the same dir):
+    // bytes past the seeked offsets still flow — nothing is permanently muted.
+    const wB = newWriter();
+    const t3 = [...t2, textMsg('assistant', 'r2'), textMsg('user', 'turn 3')];
+    fire(wB, mainEntry(t3));
+    await wB.flush();
+    feed._safetyTick();
+    const live = dataEntries(client);
+    assert.equal(live.length, 1, 'post-promote append is delivered');
+    assert.equal(live[0].body.messages.length, 5, 'restart snapshot materializes full messages');
+  });
+
+  it('unreadable meta.json never falls through to a full replay', async () => {
+    const w = newWriter();
+    fire(w, mainEntry([textMsg('user', 'turn 1')]));
+    await w.close();
+    unlinkSync(join(sessionDirOf(SID), 'meta.json'));
+
+    // Mid-conversion: treated as convert output (seek-to-EOF).
+    const clientA = fakeClient();
+    const feedA = newFeed([clientA], { isConvertRunningFn: () => true });
+    feedA.start(projectDirOf());
+    feedA.tick(sessionDirOf(SID));
+    assert.equal(feedA.isFollowing(sessionDirOf(SID)), true);
+    assert.equal(feedA._sessions.get(sessionDirOf(SID)).convertOrigin, true, 'convert-running fallback');
+    assert.equal(clientA.writes.length, 0);
+    feedA.stop();
+
+    // No conversion running: seeded suppressed (cold load owns the history).
+    const clientB = fakeClient();
+    const feedB = newFeed([clientB], { isConvertRunningFn: () => false });
+    feedB.start(projectDirOf()); // initial scan attaches (recent mtime), suppressed by fallback
+    feedB.tick(sessionDirOf(SID));
+    assert.equal(feedB.isFollowing(sessionDirOf(SID)), true);
+    assert.equal(dataEntries(clientB).length, 0, 'history suppressed, not replayed');
+    feedB.stop();
+  });
+
+  it('idle cursors are evicted; a tick() re-attach replays nothing and new appends still flow', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client]); // default idleEvictMs — no accidental eviction
+    feed.start(projectDirOf());
+    const w = newWriter();
+    const t1 = [textMsg('user', 'turn 1')];
+    fire(w, mainEntry(t1));
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+    assert.equal(dataEntries(client).length, 1);
+
+    // Let the journal mtime go stale relative to a 1ms threshold, then evict.
+    await new Promise((r) => setTimeout(r, 25));
+    feed._idleEvictMs = 1;
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sessionDirOf(SID)), false, 'idle cursor evicted');
+    feed._idleEvictMs = 10 * 60 * 1000; // restore so the tail of the test reads, not evicts
+
+    // Resume: the entry that lands during the eviction gap is history on
+    // re-attach (seen dir → suppressed seed) — no replay through the broadcast
+    // path (the OOM shape), the cold-load channel owns it.
+    const t2 = [...t1, textMsg('assistant', 'r1'), textMsg('user', 'turn 2')];
+    fire(w, mainEntry(t2));
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+    assert.equal(feed.isFollowing(sessionDirOf(SID)), true, 'tick() re-attached');
+    assert.equal(dataEntries(client).length, 1, 'no history replay on re-attach');
+
+    // Post-re-attach appends broadcast live again.
+    const t3 = [...t2, textMsg('assistant', 'r2'), textMsg('user', 'turn 3')];
+    fire(w, mainEntry(t3));
+    await w.flush();
+    feed._safetyTick();
+    const live = dataEntries(client);
+    assert.equal(live.length, 2, 'increment after re-attach is live');
+    assert.equal(live[1].body.messages.length, 5);
+  });
+
+  it('a cursor with an open (in-flight) request is never evicted mid-flight', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client]);
+    feed.start(projectDirOf());
+    const w = newWriter();
+    const entry = mainEntry([textMsg('user', 'long turn')]);
+    const h = fire(w, entry, { complete: false }); // req only — journal mtime now frozen
+    await w.flush();
+    feed.tick(sessionDirOf(SID));
+    const placeholders = dataEntries(client);
+    assert.equal(placeholders.length, 1);
+    assert.ok(placeholders[0].inProgress, 'placeholder broadcast at request start');
+
+    // The journal looks idle (req line was its last touch), but the request
+    // is open — eviction must skip it or the placeholder is stranded forever.
+    await new Promise((r) => setTimeout(r, 25));
+    feed._idleEvictMs = 1;
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sessionDirOf(SID)), true, 'open request pins the cursor');
+
+    // Completion lands → still attached → resolved live, not swallowed.
+    w.ingestCompletion(h, {
+      ...entry,
+      response: { status: 200, headers: {}, body: { content: [], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } } },
+      duration: 5,
+    });
+    await w.flush();
+    feed._safetyTick();
+    const completed = dataEntries(client).filter((e) => !e.inProgress);
+    assert.equal(completed.length, 1, 'completion broadcast live');
+
+    // With no request open the idle eviction reclaims the cursor as usual.
+    await new Promise((r) => setTimeout(r, 25));
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(sessionDirOf(SID)), false, 'evictable once idle AND no open request');
+  });
+
+  it('wire v3 mode: a promoted convert session emits no v3 frames either', async () => {
+    const client = fakeClient();
+    const feed = newFeed([client], { wireV3: true });
+    feed.start(projectDirOf());
+
+    const w = newWriter({ sessionsDirName: STAGING_DIR_NAME, metaExtra: { origin: 'convert', convertedAt: nextTs() } });
+    fire(w, mainEntry([textMsg('user', 'migrated turn')]));
+    await w.close();
+    const stagedName = resolveSessionDirName(projectDirOf(), SID, STAGING_DIR_NAME);
+    mkdirSync(join(projectDirOf(), 'sessions'), { recursive: true });
+    const promoted = join(projectDirOf(), 'sessions', stagedName);
+    renameSync(join(projectDirOf(), STAGING_DIR_NAME, stagedName), promoted);
+
+    feed._safetyTick();
+    assert.equal(feed.isFollowing(promoted), true);
+    assert.equal(client.writes.length, 0, 'no v3_conv/v3_resp/v2_requests_delta frames on convert attach');
+  });
+});
+
+// ─── SSE senders zero-client short-circuit (2026-07-17) ───────────────────────
+describe('SSE senders zero-client short-circuit', () => {
+  it('with no clients the payload is never built (no stringify of huge entries)', () => {
+    // A landmine object: any JSON.stringify attempt throws.
+    const landmine = { get boom() { throw new Error('stringified'); } };
+    // Sanity: with a client attached the payload IS built (and throws) —
+    // proving the zero-client path is what skips construction.
+    assert.throws(() => sendToClients([fakeClient()], landmine));
+    assert.throws(() => sendEventToClients([fakeClient()], 'x', landmine));
+    // Zero clients: all four senders return before touching the data.
+    sendToClients([], landmine);
+    sendEventToClients([], 'x', landmine);
+    sendEventRawToClients([], 'x', '{}');
+    sendChunkToClients([], '{}');
   });
 });
 

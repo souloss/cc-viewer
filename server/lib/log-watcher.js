@@ -92,7 +92,12 @@ function _safeSseWrite(clients, client, payload) {
   return true;
 }
 
+// Zero-client short-circuit (all four senders): the payload template is built
+// BEFORE the client loop, so with no SSE consumer connected every broadcast
+// still paid a full JSON.stringify — for reconstructed entries carrying
+// cumulative messages that is a giant allocation for nothing.
 export function sendToClients(clients, entry) {
+  if (clients.length === 0) return;
   const payload = `data: ${JSON.stringify(entry)}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
@@ -100,6 +105,7 @@ export function sendToClients(clients, entry) {
 }
 
 export function sendEventToClients(clients, eventName, data) {
+  if (clients.length === 0) return;
   const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
@@ -109,6 +115,7 @@ export function sendEventToClients(clients, eventName, data) {
 /** Like sendEventToClients but `json` is an ALREADY-serialized JSON string —
  *  wire v3 forwards raw stored lines verbatim without a parse/stringify trip. */
 export function sendEventRawToClients(clients, eventName, json) {
+  if (clients.length === 0) return;
   const payload = `event: ${eventName}\ndata: ${json}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
@@ -116,6 +123,7 @@ export function sendEventRawToClients(clients, eventName, json) {
 }
 
 export function sendChunkToClients(clients, dataJson) {
+  if (clients.length === 0) return;
   const payload = `event: load_chunk\ndata: ${dataJson}\n\n`;
   for (let i = clients.length - 1; i >= 0; i--) {
     _safeSseWrite(clients, clients[i], payload);
