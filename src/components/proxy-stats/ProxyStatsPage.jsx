@@ -3,6 +3,7 @@ import { Card, Statistic, Table, Tag, Button, Switch, Spin, Empty, Tooltip, Spac
 import { ReloadOutlined, ArrowLeftOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
+import { reportSwallowed } from '../../utils/errorReport';
 import styles from './ProxyStatsPage.module.css';
 
 const AUTO_REFRESH_MS = 15000;
@@ -31,9 +32,15 @@ export default function ProxyStatsPage({ onBack }) {
   const fetchData = useCallback(() => {
     setLoading(true);
     fetch(apiUrl('/api/proxy-stats'))
-      .then(res => res.ok ? res.json() : { proxyStats: null })
+      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
       .then(d => { setData(d.proxyStats); setLoading(false); })
-      .catch(() => { setData(null); setLoading(false); });
+      .catch((err) => {
+        // Review P1 fix: keep the last rendered data — a transient poll
+        // failure (network blip / 5xx) must not collapse the whole panel to
+        // the empty state mid-session.
+        reportSwallowed('proxyStats.fetch', err);
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {

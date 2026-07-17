@@ -30,10 +30,11 @@ export { INTER_SESSION_TYPES, isSystemText, extractUserTexts };
 //      invalidates pre-discard caches so their probe units can't be reused
 //      back into filesStats, which lets the discard check sit AFTER the
 //      cache-reuse branch (cache hits skip the journal head scan entirely)
-// v12: proxyStats/proxyStatsFiles fields (proxy retry detail aggregation from
-//      per-day proxy_YYYY-MM-DD.jsonl shards; the bump invalidates v10 caches
-//      written by the pre-rebase feat/proxy-stats branch and v11 caches that
-//      lack the proxy fields)
+// v12: proxyStats field (proxy retry detail aggregation from per-day
+//      proxy_YYYY-MM-DD.jsonl shards; the bump invalidates v10 caches written
+//      by the pre-rebase feat/proxy-stats branch and v11 caches that lack the
+//      proxy fields). The per-file records cache lives in worker memory only
+//      (_proxyCacheByDir) — never persisted into the stats JSON.
 const STATS_VERSION = 12;
 
 /**
@@ -272,8 +273,8 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
   // 代理重试明细聚合：扫描 proxy_YYYY-MM-DD.jsonl 文件，聚合成 proxyStats。
   // 与 token 统计同文件同 worker，避免新建独立 worker。明细文件按天分片，聚合逻辑在
   // proxy-stats.js:aggregateRecords（纯函数，可单测）。增量优化：仅对 size+mtime 变化的分片
-  // 重新解析，未变化分片复用 proxyStatsFiles 缓存（mergeProxyFileCache），避免每次全量重扫历史。
-  const { stats: proxyStats, cache: proxyStatsFiles } = aggregateProxyStats(projectDir, existing);
+  // 重新解析，未变化分片复用 worker 内存缓存（mergeProxyFileCache + _proxyCacheByDir）。
+  const proxyStats = aggregateProxyStats(projectDir);
 
   const stats = {
     _v: STATS_VERSION,
@@ -292,7 +293,6 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
       cache_creation_input_tokens: totalCacheCreation,
     },
     proxyStats,
-    proxyStatsFiles, // 文件级增量缓存（records+size+lastModified），仅 worker 读，前端不消费
   };
 
   try {
@@ -305,26 +305,32 @@ function generateProjectStats(projectDir, projectName, onlyFile) {
 /**
  * 扫描项目目录下所有 proxy_YYYY-MM-DD.jsonl 明细文件，聚合成 proxyStats 结构。
  * 增量优化：proxy 明细按天分片且仅追加——文件 size+mtime 未变即内容未变，复用上次解析的 records，
- * 仅对变化/新增文件重新 readFileSync+解析（仿会话 JSONL 的 files[f] 缓存）。返回 { stats, cache }，
- * cache 须回写 stats JSON 供下次运行读取，避免每次 notifyProxyStats 全量重扫历史分片。
+ * 仅对变化/新增文件重新 readFileSync+解析（仿会话 JSONL 的 files[f] 缓存）。
+ *
+ * Review P1 fix: the per-file records cache is WORKER-MEMORY ONLY
+ * (_proxyCacheByDir). It was previously persisted as `proxyStatsFiles` inside
+ * `<project>.json`, which duplicated every raw record on disk (unbounded
+ * growth) and made every stats update rewrite — and every /api/proxy-stats
+ * read re-parse — the full history. A worker restart just re-parses the
+ * shards once; the JSON now carries only the aggregated `proxyStats`.
  *
  * @param {string} projectDir
- * @param {object} existing 上次的完整 stats JSON（读 proxyStatsFiles 缓存）；可为 null
- * @returns {{stats:object, cache:object}} 聚合结果 + 新文件缓存
+ * @returns {object} aggregated proxyStats
  */
-function aggregateProxyStats(projectDir, existing) {
+const _proxyCacheByDir = new Map(); // projectDir → per-file cache {name:{records,size,lastModified}}
+
+function aggregateProxyStats(projectDir) {
   let proxyFiles = [];
   try {
     proxyFiles = readdirSync(projectDir)
       .filter(f => f.startsWith('proxy_') && f.endsWith('.jsonl'))
       .sort();
   } catch {
-    return { stats: aggregateRecords([]), cache: {} };
+    return aggregateRecords([]);
   }
-  if (proxyFiles.length === 0) return { stats: aggregateRecords([]), cache: {} };
+  if (proxyFiles.length === 0) return aggregateRecords([]);
 
-  // 上次缓存（仅当 schema 版本一致时复用，避免旧结构污染）
-  const cachedFiles = (existing?._v === STATS_VERSION && existing?.proxyStatsFiles) ? existing.proxyStatsFiles : {};
+  const cachedFiles = _proxyCacheByDir.get(projectDir) || {};
 
   const files = [];
   for (const f of proxyFiles) {
@@ -365,7 +371,8 @@ function aggregateProxyStats(projectDir, existing) {
   }
 
   const { records: allRecords, cache } = mergeProxyFileCache({ existingCache: cachedFiles, files });
-  return { stats: aggregateRecords(allRecords), cache };
+  _proxyCacheByDir.set(projectDir, cache);
+  return aggregateRecords(allRecords);
 }
 
 /**

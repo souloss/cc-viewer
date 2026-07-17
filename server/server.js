@@ -434,9 +434,26 @@ function notifyStatsWorker(logFile) {
 
 // 供 proxy.js 在写入代理重试明细后通知 stats-worker 重扫聚合。
 // 单独 export 避免循环依赖（proxy.js 不能直接 import server.js 的 deps）。
+// Review P1 fix: one worker message per proxied LLM request made the worker
+// re-aggregate the whole project on EVERY request (O(N²) over a busy day —
+// the session-log path has the log-watcher debounce, the proxy path had
+// none). Trailing coalesce: the first notify schedules a flush, further
+// notifies within the window only update the pending file. unref() so a
+// pending flush never holds the process open on shutdown.
+const PROXY_STATS_DEBOUNCE_MS = 2000;
+let _proxyStatsFlushTimer = null;
+let _proxyStatsPendingFile = null;
 export function notifyProxyStats(logFile) {
-  if (!statsWorker) startStatsWorker();
-  notifyStatsWorker(logFile);
+  _proxyStatsPendingFile = logFile;
+  if (_proxyStatsFlushTimer) return;
+  _proxyStatsFlushTimer = setTimeout(() => {
+    _proxyStatsFlushTimer = null;
+    const pending = _proxyStatsPendingFile;
+    _proxyStatsPendingFile = null;
+    if (!statsWorker) startStatsWorker();
+    notifyStatsWorker(pending);
+  }, PROXY_STATS_DEBOUNCE_MS);
+  _proxyStatsFlushTimer.unref?.();
 }
 
 const MIME_TYPES = {
