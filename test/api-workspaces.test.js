@@ -7,7 +7,9 @@
 // Isolation: CCV_LOG_DIR / CLAUDE_CONFIG_DIR point at a temp dir set BEFORE importing the routes
 // (workspace-registry persists workspaces.json under LOG_DIR). CCV_PROXY_PORT is kept UNSET so the
 // launch path skips the PTY spawn (real child process), and CCV_ELECTRON_MULTITAB toggles the two
-// launch branches. watchLogFile is started by launch, so after() calls unwatchAll() to stop timers.
+// launch branches. wire-v2 (1.7.0): launch drives the live channel via deps.startLogWatch/
+// stopLogWatch seams (no watchLogFile timers to unwatch), and the launch reload streams from
+// getLiveLogSource() — an EMPTY stream for a fresh workspace (v1 log files are never reused).
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,6 +25,9 @@ process.env.CCV_WORKSPACE_MODE = '1';
 process.env.CCV_CLI_MODE = '0';
 delete process.env.CCV_PROXY_PORT; // 不起 PTY
 delete process.env.CCV_ELECTRON_MULTITAB;
+// 宿主 shell 若是 `ccv -c` 启动的(cli 通道①会设 CCV_CLAUDE_CONTINUE=1),
+// isContinuedLaunch() 会在裸导入时即为真 → 本套件的 pristine 断言被环境耦合击穿。
+delete process.env.CCV_CLAUDE_CONTINUE;
 
 // 一个真实存在的目录，用作合法 workspace 路径
 const wsDir = join(tmpDir, 'my-project');
@@ -32,7 +37,6 @@ const aFile = join(tmpDir, 'a-file.txt');
 writeFileSync(aFile, 'x');
 
 const { workspacesRoutes } = await import('../server/routes/workspaces.js');
-const { unwatchAll } = await import('../server/lib/log-watcher.js');
 
 function routeFor(method, path) {
   const r = workspacesRoutes.find((x) => x.method === method && x.path === path);
@@ -65,6 +69,9 @@ function baseDeps(overrides = {}) {
       notifyStatsWorker: () => {},
       getLogFile: () => logFile,
     }),
+    // 1.7.0 S6b: the routes drive the live channel through these seams.
+    startLogWatch: () => {},
+    stopLogWatch: () => {},
     workspaceClaudeArgs: [],
     workspaceClaudePath: null,
     workspaceIsNpmVersion: false,
@@ -92,7 +99,6 @@ describe('workspacesRoutes shape', () => {
 });
 
 describe('GET /api/workspaces (list)', () => {
-  after(() => unwatchAll());
 
   function getList(deps) {
     return new Promise((resolve) => {
@@ -122,7 +128,6 @@ describe('GET /api/workspaces (list)', () => {
 });
 
 describe('POST /api/workspaces/add', () => {
-  after(() => unwatchAll());
 
   function postAdd(body, deps = baseDeps()) {
     return new Promise((resolve) => {
@@ -174,7 +179,6 @@ describe('POST /api/workspaces/add', () => {
 });
 
 describe('GET /api/workspaces reflects added entries', () => {
-  after(() => unwatchAll());
 
   it('lists the previously added workspace with logCount/totalSize enrichment', async () => {
     const handler = routeFor('GET', '/api/workspaces');
@@ -190,7 +194,6 @@ describe('GET /api/workspaces reflects added entries', () => {
 });
 
 describe('DELETE /api/workspaces/:id', () => {
-  after(() => unwatchAll());
 
   function del(id) {
     return new Promise((resolve) => {
@@ -234,7 +237,6 @@ describe('POST /api/workspaces/launch — Electron multi-tab branch', () => {
   after(() => {
     if (prevMultitab === undefined) delete process.env.CCV_ELECTRON_MULTITAB;
     else process.env.CCV_ELECTRON_MULTITAB = prevMultitab;
-    unwatchAll();
   });
 
   function launch(body, deps) {
@@ -289,7 +291,6 @@ describe('POST /api/workspaces/launch — web/CLI branch (no PTY)', () => {
   before(() => { prevMultitab = process.env.CCV_ELECTRON_MULTITAB; delete process.env.CCV_ELECTRON_MULTITAB; });
   after(() => {
     if (prevMultitab !== undefined) process.env.CCV_ELECTRON_MULTITAB = prevMultitab;
-    unwatchAll();
   });
 
   function launch(body, deps) {
@@ -334,8 +335,10 @@ describe('POST /api/workspaces/launch — web/CLI branch (no PTY)', () => {
     assert.match(joined, /event: load_end/);
   });
 
-  it('broadcasts load_chunk for a workspace that reuses an existing log file', async () => {
-    // 预置一个项目目录 + 最近日志，使 initForWorkspace 复用它，触发 streamRawEntriesAsync → load_chunk
+  it('never reuses a legacy v1 log file — the launch reload is an empty stream (wire-v2)', async () => {
+    // Seed a project dir + a recent v1 .jsonl: 1.7.0 launch streams from
+    // getLiveLogSource() (no v2 session yet for a fresh workspace), so the
+    // legacy file is IGNORED — load_start total 0, no load_chunk.
     const seededWs = join(tmpDir, 'seeded-proj');
     mkdirSync(seededWs, { recursive: true });
     const logSubdir = join(tmpDir, basename(seededWs));
@@ -348,9 +351,26 @@ describe('POST /api/workspaces/launch — web/CLI branch (no PTY)', () => {
     const { status } = await launch({ path: seededWs }, deps);
     assert.equal(status, 200);
     const joined = client._writes.join('');
-    assert.match(joined, /event: load_chunk/);
-    // load_chunk 的 data 是把原始 JSON 去掉换行后包在 [] 里
-    assert.match(joined, /event: load_chunk\ndata: \[/);
+    assert.match(joined, /event: workspace_started/);
+    assert.match(joined, /event: load_start\ndata: \{"total":0/);
+    assert.match(joined, /event: load_end/);
+    assert.doesNotMatch(joined, /event: load_chunk/, 'v1 log file must not be replayed');
+    // P2: pending v1 logs in the switched-into project → migrate_prompt broadcast
+    // to already-connected clients.
+    assert.match(joined, /event: migrate_prompt/);
+    assert.match(joined, /"files":1/);
+  });
+
+  it('scans launch args for -c/--continue and marks the launch as continued (P2 channel ②)', async () => {
+    const { isContinuedLaunch } = await import('../server/interceptor.js');
+    // NOTE: markContinuedLaunch is sticky for the process — this test must run
+    // AFTER any assertions that need isContinuedLaunch() === false.
+    assert.equal(isContinuedLaunch(), false, 'pristine before the -c launch');
+    const contWs = join(tmpDir, 'cont-proj');
+    mkdirSync(contWs, { recursive: true });
+    const { status } = await launch({ path: contWs, extraArgs: ['-c'] }, baseDeps());
+    assert.equal(status, 200);
+    assert.equal(isContinuedLaunch(), true, 'workspace-injected -c detected without a PTY');
   });
 
   it('does not call startStatsWorker again when one is already running', async () => {
@@ -371,7 +391,6 @@ describe('POST /api/workspaces/launch — web/CLI branch (no PTY)', () => {
 });
 
 describe('POST /api/workspaces/stop', () => {
-  after(() => unwatchAll());
 
   function stop(deps) {
     return new Promise((resolve) => {
@@ -404,6 +423,5 @@ describe('POST /api/workspaces/stop', () => {
 });
 
 after(() => {
-  unwatchAll();
   rmSync(tmpDir, { recursive: true, force: true });
 });

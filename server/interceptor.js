@@ -7,16 +7,18 @@ const _ccvSkipArgs = ['--version', '-v', '--v', '--help', '-h', 'doctor', 'insta
 const _ccvSkip = _ccvSkipArgs.includes(process.argv[2]);
 
 import './lib/proxy-env.js';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, existsSync, watchFile, openSync, readSync, closeSync } from 'node:fs';
-import { AsyncWriteQueue } from './lib/async-write-queue.js';
-import { renameSyncWithRetry } from './lib/file-api.js';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, watchFile } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { LOG_DIR } from '../findcc.js';
-import { assembleStreamMessage, createStreamAssembler, cleanupTempFiles, findRecentLog, claimUntaggedLog, logFilePrefix, isAnthropicApiPath, isMainAgentRequest, rotateLogFile, fingerprintMsg, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs, parseRotationContextHead } from './lib/interceptor-core.js';
+import { assembleStreamMessage, createStreamAssembler, isAnthropicApiPath, isMainAgentRequest, replaceTopLevelModel, injectOutputConfigEffort, resolveProfileModel, extractAgentSpawnPairs } from './lib/interceptor-core.js';
+import { V2Writer } from './lib/v2/v2-writer.js';
+import { reportSwallowed } from './lib/error-report.js';
+import { latestMainSessionDir, sessionHasCompletedMainTurn } from './lib/v2/session-select.js';
+import { sanitizePathComponent } from './lib/v2/layout.js';
 import { setRetryConfigPath, loadRetryConfig, DEFAULT_RETRY_CONFIG } from './lib/proxy-retry.js';
 
 
@@ -221,126 +223,27 @@ function _replaceProxyAuthHeaders(headers, apiKey) {
 
 export { _activeProfile, _defaultConfig, _loadProxyProfile, PROFILE_PATH, setActiveProfileForWorkspace, getActiveProfileId, RETRY_CONFIG_PATH, _retryConfigState, _loadRetryConfigState };
 
-// 生成新的日志文件路径
-function generateNewLogFilePath() {
-  const now = new Date();
-  const ts = now.getFullYear().toString()
-    + String(now.getMonth() + 1).padStart(2, '0')
-    + String(now.getDate()).padStart(2, '0')
-    + '_'
-    + String(now.getHours()).padStart(2, '0')
-    + String(now.getMinutes()).padStart(2, '0')
-    + String(now.getSeconds()).padStart(2, '0');
+// 1.7.0: the v1 single-file write path is retired — logs live in per-session
+// v2 dirs owned by V2Writer. Only the project binding (name + dir) remains
+// here; there is no log FILE to create, resume, rotate or delta-encode.
+function resolveProjectBinding() {
   let cwd;
   try { cwd = process.cwd(); } catch { cwd = homedir(); }
   const projectName = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   const dir = join(LOG_DIR, projectName);
   try { mkdirSync(dir, { recursive: true }); } catch { }
-  // `--pid`(CCV_INSTANCE_ID) 实例：文件名前缀 `<pid>__`，让每个实例只读/续自己的日志血脉（多进程隔离）。
-  // 内部读 env（与上面内部读 cwd 同理）→ 轮转/workspace 等所有 caller 自动带前缀，无需逐处传参。
-  // 前缀走单一来源 logFilePrefix（与 matcher 共用，防漂移）。
-  const instanceId = process.env.CCV_INSTANCE_ID || '';
-  return { filePath: join(dir, `${logFilePrefix(projectName, instanceId)}${ts}.jsonl`), dir, projectName };
+  return { dir, projectName };
 }
 
-// Resume 状态（供 server.js 使用）
-let _resumeState = null;
-let _resolveChoice = null;
-const _choicePromise = new Promise(resolve => { _resolveChoice = resolve; });
-
-function resolveResumeChoice(choice) {
-  if (!_resumeState) return;
-  const { recentFile, tempFile } = _resumeState;
-  try {
-    if (choice === 'continue') {
-      // 将临时文件内容追加到旧日志
-      if (existsSync(tempFile)) {
-        const tempContent = readFileSync(tempFile, 'utf-8');
-        if (tempContent.trim()) {
-          appendFileSync(recentFile, tempContent);
-        }
-        unlinkSync(tempFile);
-      }
-      LOG_FILE = recentFile;
-      seedSpawnRegistryFromLogHead(LOG_FILE);
-    } else {
-      // new: 将临时文件 rename 为正式新日志文件名（空文件直接删除）
-      const newPath = tempFile.replace('_temp.jsonl', '.jsonl');
-      if (existsSync(tempFile)) {
-        const sz = statSync(tempFile).size;
-        if (sz > 0) {
-          renameSyncWithRetry(tempFile, newPath);
-        } else {
-          try { unlinkSync(tempFile); } catch { }
-        }
-      }
-      LOG_FILE = newPath;
-    }
-  } catch (err) {
-    console.error('[CC Viewer] resolveResumeChoice error:', err);
-  }
-  const result = { logFile: LOG_FILE };
-  _resumeState = null;
-  _resolveChoice(result);
-  return result;
-}
-
-// Delta storage: 增量存储开关和状态（默认开启，设置 CCV_DISABLE_DELTA=1 关闭）
-// 注意：delta 计算原本依赖 mainAgent 请求串行假设。实证发现 teammate 终止 / 多 SSE 通道
-// 注入等情况会让两条 mainAgent 请求 30ms 内连续到达（前一条流式响应未完成时后一条已发起），
-// 导致仅在 completed 时更新 _lastMessagesCount/_lastTailFp 出现状态滞后 → Plan C 漏检。
-const _deltaStorageEnabled = process.env.CCV_DISABLE_DELTA !== '1';
-// In-place last-msg replace 检测开关（默认开启，设置 CCV_DISABLE_TAIL_FP_CHECKPOINT=1 关闭）。
-// 关闭后回退到旧行为（仅按长度算 delta，遇到末位原地替换会丢失"末位换内容"信息）。
-const _tailFpCheckEnabled = process.env.CCV_DISABLE_TAIL_FP_CHECKPOINT !== '1';
-// 这两个变量代表"截至本次请求开始前的最新已知态"。请求开始处理时即同步更新（eager），
-// 不再等到 _commitDeltaState（completed 时执行）。Plan C 检测使用进入函数前的快照。
-// 异常分支（请求失败 / 服务端不发送）不会回滚——下一个成功请求覆盖即可，状态不会永久错位。
-// 命名说明：变量名保留 `_last` 前缀（历史命名），但语义已由"上次 commit 后"变为"上次见到的最新态"。
-// 三路并发场景下，连续 3 个请求若 length 非单调（如 257→259→258），_lastMessagesCount 会跟随
-// 最新一次 startRequest，可能让早到的更大值被覆盖；这种情况 Plan C 走 length 不等支路最终
-// 命中 needsCheckpoint 写完整快照，client 拿到正确数据，不破坏正确性。
-let _lastMessagesCount = 0;     // 截至最近一次 startRequest 的完整 messages 数量（eager-updated）
-let _lastTailFp = '';           // 截至最近一次 startRequest 的末位 message 指纹（eager-updated）
-let _mainAgentDeltaCount = 0;   // mainAgent 请求计数器（用于触发定期 checkpoint）
-const CHECKPOINT_INTERVAL = 10; // 每 N 条 mainAgent 请求写一个 checkpoint
-
-// 完成序倒置守卫（KEEP IN SYNC: server/lib/delta-reconstructor.js + docs/WIRE_FORMAT.md §3.7）：
-// entry 形态在请求发起时冻结，但 completed entry 按响应完成顺序落盘（AsyncWriteQueue FIFO）。
-// burst 下慢请求的条目会落在快请求之后，文件序 ≠ 请求序，重建器按文件序拼接会翻倍。
-// `_seq` 记录请求发起序（语义序），`_seqEpoch` 标识写进程（重启 / 多进程混写时 seq 不可比，
-// 重建器据 epoch 切换基线而不是误判乱序）。teammate 子进程不参与（其条目不进 mainAgent 重建）。
-let _seqCounter = 0;
-// 时间戳 + 6 位随机尾：随机尾用于区分同毫秒启动的第二写进程（IM worker 场景）
-const _seqEpoch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-
-/**
- * Delta storage: completed 写入成功后更新状态。
- *
- * 幂等守卫（`originalLength > _lastMessagesCount`）：eager-update 已在请求开始时把
- * _lastMessagesCount/_lastTailFp 推到本次值；本函数对同 originalLength 的 commit no-op，
- * 且必须严格大于才更新——防止两条 mainAgent 请求乱序完成时，先到的较短 commit 把
- * 已被 eager 推高的状态倒推回去（A 流式数秒、B 短先 commit、A 后 commit 时 _lastMessagesCount
- * 与 _lastTailFp 都会被 A.length/fp 覆盖，下条 C 拿陈旧 prev → Plan C 漏/误检 → doubled-history
- * 残余）。等长情况下也不动 fp：等长 in-place replace 的 _lastTailFp 已被 eager 推到 latest 值，
- * commit 倒推会让下条请求的 Plan C 误判 in-place。
- *
- * 作用域纠正（不是真的兜底）：本函数与 eager 块共享 "可写入" 前置条件——caller 传
- * `_deltaOriginalMessagesLength`，该值只有在 `_deltaStorageEnabled && mainAgent &&
- * Array.isArray(messages) && messages.length>0` 时才非 0；其它分支传 0 进来这里就
- * short-circuit。即 `_deltaStorageEnabled=false / messages 非数组` 等 eager 跳过的分支
- * 本函数同样跳过，不能视作异常路径的兜底。保留本函数是为了首次启动 / 定期 checkpoint
- * 后的快路径回写（与 eager 等价但解耦 commit 时序），让未来 eager 块若重构调用顺序时
- * commit 仍能把状态推上去。请求失败 / 服务端不发送时永远不调本函数；状态由 eager 残留，
- * 下个成功请求覆盖即可，不会永久错位。
- */
-function _commitDeltaState(originalLength, originalTailFp) {
-  if (_deltaStorageEnabled && originalLength > 0 && originalLength > _lastMessagesCount) {
-    _lastMessagesCount = originalLength;
-    if (typeof originalTailFp === 'string') {
-      _lastTailFp = originalTailFp;
-    }
-  }
+// The single completion-write helper shared by all five completion/error
+// paths (streaming happy/assemble-fail, stream-setup catch, non-streaming
+// happy, read-error). V2Writer catches + reportSwallowed internally; the outer
+// catch is belt-and-braces so a broken guard can never crash the fetch hook —
+// but a throw that ESCAPED the writer's own guards is a dropped log entry,
+// which must never be silent (CLAUDE.md swallowed-catch rule).
+function _writeCompletedEntry(requestEntry, v2Handle) {
+  try { _v2Writer.ingestCompletion(v2Handle, requestEntry); }
+  catch (err) { reportSwallowed('interceptor.ingest-completion', err); }
 }
 
 // Teammate 子进程检测：--parent-session-id（旧模式）或 --agent-name（原生 team 模式）
@@ -348,164 +251,253 @@ const _isTeammate = process.argv.includes('--parent-session-id') || process.argv
 // 提取 teammate 元数据（--agent-name worker-1 --team-name fix-ts-errors）
 let _teammateName = null;
 let _teamName = null;
+let _parentSessionId = null;
 {
   const args = process.argv;
   const nameIdx = args.indexOf('--agent-name');
   if (nameIdx !== -1 && nameIdx + 1 < args.length) _teammateName = args[nameIdx + 1];
   const teamIdx = args.indexOf('--team-name');
   if (teamIdx !== -1 && teamIdx + 1 < args.length) _teamName = args[teamIdx + 1];
+  const parentIdx = args.indexOf('--parent-session-id');
+  if (parentIdx !== -1 && parentIdx + 1 < args.length) _parentSessionId = args[parentIdx + 1];
 }
 
-// `--pid` 实例 id（cli.js 在 import server 前已设 env，时序安全）。null = 默认模式（不分实例）。
-// 只用于日志文件名的分实例隔离（findRecentLog/cleanupTempFiles/claim）；不影响 claude 自己的 -c。
-const INSTANCE_ID = process.env.CCV_INSTANCE_ID || null;
-
-// 初始化日志文件路径（异步，支持用户交互）
-// 工作区模式下延迟到选择工作区后再初始化
-let _newLogFile, _logDir, _projectName;
+// 项目绑定初始化。工作区模式下延迟到选择工作区后再初始化。
+let _logDir, _projectName;
 if (process.env.CCV_WORKSPACE_MODE === '1') {
-  _newLogFile = '';
   _logDir = '';
   _projectName = '';
-} else if (_isTeammate) {
-  // Teammate 子进程：只需 projectName 和 logDir 来查找 leader 日志，不生成新文件路径
-  let cwd;
-  try { cwd = process.cwd(); } catch { cwd = homedir(); }
-  _projectName = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-  _logDir = join(LOG_DIR, _projectName);
-  // teammate 子进程继承同一 env（含 CCV_INSTANCE_ID）→ 命中 leader 的 pid 日志；无 env 时为 null = 现状。
-  const _leaderLog = findRecentLog(_logDir, _projectName, INSTANCE_ID);
-  _newLogFile = _leaderLog || ''; // 没有 leader 日志时不写入
 } else {
-  ({ filePath: _newLogFile, dir: _logDir, projectName: _projectName } = generateNewLogFilePath());
-  // 启动时清理残留临时文件（按本实例收窄，避免多进程下 rename 掉别的实例正在写的 _temp）
-  cleanupTempFiles(_logDir, _projectName, INSTANCE_ID);
+  ({ dir: _logDir, projectName: _projectName } = resolveProjectBinding());
 }
-let LOG_FILE = _newLogFile;
+// Deprecated (1.7.0): the v1 log file no longer exists. The always-empty
+// export keeps legacy read fallbacks ("no file → empty stream") type-stable
+// until the last consumers are deleted with the continuity machinery (P3).
+const LOG_FILE = '';
 
-// 异步写入队列 — 替代 appendFileSync，避免阻塞事件循环（Windows NTFS 尤为严重）
-const _writeQueue = new AsyncWriteQueue(() => LOG_FILE);
+// The v2 writer (docs/refactor/WIRE_FORMAT_V2.md §13) — the ONLY log store
+// since 1.7.0. Every method is internally caught + reportSwallowed; project
+// resolves through a getter because workspace mode rebinds _projectName at
+// runtime. The disk-space guard inside is the single remaining write inhibitor.
+const _v2Writer = new V2Writer({
+  logDir: LOG_DIR,
+  project: () => _projectName,
+  ...(_isTeammate && {
+    leader: {
+      ...(_teammateName && { agentName: _teammateName }),
+      ...(_teamName && { teamName: _teamName }),
+      ...(_parentSessionId && { parentSessionId: _parentSessionId }),
+    },
+  }),
+});
+export { _v2Writer };
+
+// S6b: the live read source — the current v2 session dir once the writer has
+// resolved a session; '' before the first request (readers treat a missing
+// path as an empty stream, same as v1's not-yet-created file did).
+//
+// Task B (2026-07-15): the [对话] panel must not cold-load empty. Two cases
+// produce an empty current session: (a) before the first request, currentSid is
+// null; (b) a session's sid resolved but it has NO main turn yet (`-c` startup
+// or a background sub/count_tokens request set _currentSid before the user sent
+// anything) — cold-loading THAT renders blank (the refresh bug: fresh load
+// shows data, a refresh once the empty current session exists shows nothing,
+// filling only after the user sends a request). So we serve the current session
+// ONLY when it has a main turn ("activated"); otherwise we fall back to the
+// newest MAIN session that does. Selection is idempotent across refreshes.
+//
+// The live feed still follows the ACTUAL written dir (it never reads this
+// function), so once the current session gets its first main turn, its entries
+// form a newer session the frontend auto-switches to. Selection rides the same
+// bounded cold-load window (DEFAULT_EVENTS_LIMIT) as any session — never
+// limit=0 — so it stays memory-safe (S10). All three cold-load consumers
+// (/events, /api/requests, workspace reload) route through here.
+export function getLiveLogSource() {
+  const dir = _v2Writer.currentSessionDir();
+  // "Activated" requires a COMPLETED main turn, not merely a written main
+  // request line: a session with only an in-flight first request has nothing a
+  // cold load can render yet, so keep falling back to the previous conversation
+  // (which CAN render) until the current one has a done. Removes the blank flash
+  // between "first `-c`/fresh main request written" and "its response emitted".
+  if (dir && sessionHasCompletedMainTurn(dir)) return dir; // activated current session
+  if (!_projectName) return ''; // no project bound yet (mirrors v2-writer's guard)
+  try {
+    // excludeDir: the current session just failed the completed-turn gate, but
+    // the picker's weaker has-a-main-req gate would re-select it (it is the
+    // newest dir once its first main req is written) — handing back exactly the
+    // blank in-flight session the strict gate rejected. Excluding it makes the
+    // fallback actually land on the previous, renderable conversation.
+    // skipForeignLive: a parallel ccv window's in-flight session must never be
+    // served as THIS window's cold load (multi-window isolation); a crashed
+    // window's claim expires with its pid, so its session stays selectable.
+    const fallback = latestMainSessionDir(join(LOG_DIR, sanitizePathComponent(_projectName)), { excludeDir: dir, skipForeignLive: true });
+    // A current-but-empty session with nothing else on disk: '' (still empty,
+    // but the live feed fills it in place — no worse than before the fix).
+    return fallback || dir || '';
+  } catch (err) {
+    reportSwallowed('cold-load.fallback-select', err);
+    return dir || '';
+  }
+}
+
+// SessionStart hook notify (session-start-bridge.js → /api/session-start-notify
+// → server.js deps). The only source acted on is 'resume': an in-terminal
+// /resume switches the running claude to a PAST conversation while the wire
+// session_id may stay the same, so without this signal the writer keeps
+// routing the resumed conversation into the OLD session dir (and the panel —
+// keyed on `_seqEpoch = v2:<dir identity>` — never switches). The transcript
+// basename is the resumed conversation's stable identity; the hook session_id
+// is a fresh uuid usable as the new dir identity when nothing was recorded.
+// 'startup'/'clear'/'compact' are deliberately ignored (startup needs nothing;
+// /clear already has epoch machinery; teammate processes inherit
+// CCVIEWER_PORT and fire startup events at this endpoint — the source gate
+// drops them).
+export function markSessionStart(payload) {
+  try {
+    const { source, sessionId, transcriptPath, cwd } = payload || {};
+    if (source !== 'resume') return;
+    if (!transcriptPath || typeof transcriptPath !== 'string') {
+      console.warn('[ccv session-start] resume signal without transcript_path — ignored');
+      return;
+    }
+    // Soft cross-project guard: a foreign project's claude that somehow
+    // carries our CCVIEWER_PORT must not re-bind THIS project's writer. Only
+    // enforced when both sides are known (workspace mode may leave
+    // _projectName empty until bound).
+    if (cwd && typeof cwd === 'string' && _projectName) {
+      const cwdProject = basename(cwd).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      if (cwdProject !== _projectName) {
+        console.warn(`[ccv session-start] resume signal from project "${cwdProject}" ignored (bound to "${_projectName}")`);
+        return;
+      }
+    }
+    const transcriptUuid = basename(transcriptPath, '.jsonl');
+    _v2Writer.beginResumeSwitch({
+      transcriptUuid,
+      hookSid: (typeof sessionId === 'string' && sessionId) ? sessionId : null,
+    });
+  } catch (err) {
+    reportSwallowed('session-start.mark', err);
+  }
+}
+
+// P2 (-c migration guidance): three detection channels, any one marks this
+// launch as "continuing an older conversation" — the migrate prompt then
+// re-prompts even a dismissed user, because the conversation's first half
+// lives in un-migrated v1 logs and only migration makes it viewable.
+//   ① cli.js scans claude argv and sets CCV_CLAUDE_CONTINUE before importing
+//     the server (its own -c pass-through);
+//   ② the workspace launcher injects -c server-side (WorkspaceList heuristic)
+//     and calls markContinuedLaunch();
+//   ③ wire-level fallback in V2Writer: a brand-new session whose FIRST main
+//     snapshot already contains assistant turns can only be a continuation.
+let _continuedLaunchMarked = false;
+let _forkLaunchMarked = false;
+export function markContinuedLaunch() { _continuedLaunchMarked = true; _syncContinuationMode(); }
+export function isContinuedLaunch() {
+  return process.env.CCV_CLAUDE_CONTINUE === '1'
+    || _continuedLaunchMarked
+    || _v2Writer.sawContinuedSession();
+}
+// `--fork-session` (resume/continue but mint a NEW session id) — the user
+// explicitly wants a fresh session, so `-c` folder adoption must NOT fire.
+// Detected two ways, mirroring the continuation channels: ① cli.js sets
+// CCV_CLAUDE_FORK_SESSION from the claude argv; ② the workspace launcher calls
+// markForkSession().
+export function markForkSession() { _forkLaunchMarked = true; _syncContinuationMode(); }
+export function isForkSession() {
+  return process.env.CCV_CLAUDE_FORK_SESSION === '1' || _forkLaunchMarked;
+}
+// Explicit `-r`/`--resume` — the user targets a session of THEIR choosing (an
+// id or the interactive picker), while adoption always targets the LATEST main
+// session; if Claude mints a fresh wire sid for the resume, adoption would
+// misroute the resumed conversation into whatever session happens to be newest.
+// So an explicit resume keeps the pre-adoption behavior (its own folder);
+// adoption serves `-c`/`--continue` only. Same two channels as fork: ① cli.js
+// sets CCV_CLAUDE_RESUME from the claude argv; ② the workspace launcher calls
+// markResumeSession(). The launch still counts as "continued" for the migrate
+// prompt (isContinuedLaunch is unchanged).
+let _resumeLaunchMarked = false;
+export function markResumeSession() { _resumeLaunchMarked = true; _syncContinuationMode(); }
+export function isResumeSession() {
+  return process.env.CCV_CLAUDE_RESUME === '1' || _resumeLaunchMarked;
+}
+// Push the launch's continuation/fork/resume intent into the writer so `-c`
+// folder adoption can decide before the first request. Uses ONLY the
+// pre-request continuation signals (env / workspace marker) — never the
+// wire-level sawContinuedSession, which is known too late to avoid minting the
+// folder.
+function _syncContinuationMode() {
+  _v2Writer.setContinuationMode({
+    continued: process.env.CCV_CLAUDE_CONTINUE === '1' || _continuedLaunchMarked,
+    fork: isForkSession(),
+    resume: isResumeSession(),
+  });
+}
+_syncContinuationMode(); // seed from the CLI env at module load (`ccv -c`)
 
 // 现在 _projectName/_logDir 已初始化，可以安全加载 proxy profile（含 workspace override）
 // 并挂载 watchFile 同步列表变化。
 _loadProxyProfile();
 try { watchFile(PROFILE_PATH, { interval: 1500 }, _loadProxyProfile); } catch { }
 
-// 代理重试配置：首次加载 + watchFile 跨进程同步（UI 改 retry-config.json 后 1.5s 内热刷新）。
+// Retry config: initial load + watchFile cross-process sync (UI writes
+// retry-config.json → hot-reloaded within 1.5s, mirroring PROFILE_PATH above).
 _loadRetryConfigState();
 try { watchFile(RETRY_CONFIG_PATH, { interval: 1500 }, _loadRetryConfigState); } catch { }
 
-const _initPromise = (async () => {
-  if (!_logDir || !_projectName) return; // 工作区模式下跳过
-  if (_isTeammate) return; // Teammate 已在上方同步初始化，跳过 async resume 流程
-  try {
-    let recentLog = findRecentLog(_logDir, _projectName, INSTANCE_ID);
-    // 首启接管（仅 --pid 实例）：本 pid 还没有自己的日志时，可接管项目里最近的【无标签】日志
-    // （原子 rename 成 `<pid>__…`），从此并入该 pid 血脉。claim 必须在 build _resumeState 之前，
-    // 这样 _resumeState.recentFile 指向 rename 后的新路径（否则会指向已被移走的旧名）。
-    if (!recentLog && INSTANCE_ID) {
-      const claimed = claimUntaggedLog(_logDir, _projectName, INSTANCE_ID);
-      if (claimed) recentLog = claimed;
-    }
-    if (recentLog) {
-      // IM worker：无人值守、无 UI 可应答 resume 交互。直接 continue 最近会话日志（保留记忆、
-      // 让记录弹窗读到同一份持续增长的文件），不进入 resume 交互状态（否则会一直写 *_temp.jsonl，
-      // 仅在干净退出时才 rename，SIGKILL 下丢失）。
-      if (process.env.CCV_IM_PLATFORM) {
-        LOG_FILE = recentLog;
-        seedSpawnRegistryFromLogHead(LOG_FILE);
-        return;
-      }
-      // Leader / 普通进程：走 resume 交互流程
-      const tempFile = _newLogFile.replace('.jsonl', '_temp.jsonl');
-      LOG_FILE = tempFile;
-      _resumeState = {
-        recentFile: recentLog,
-        recentFileName: basename(recentLog),
-        tempFile,
-      };
-    }
-  } catch { }
-})();
+// Kept as an awaited boot barrier for callers; nothing asynchronous remains
+// since the v1 resume flow retired (v2 sessions key off wire session_ids).
+const _initPromise = Promise.resolve();
 
-export { LOG_FILE, _initPromise, _resumeState, _choicePromise, resolveResumeChoice, _projectName, _logDir };
+export { LOG_FILE, _initPromise, _projectName, _logDir };
 
-// 工作区模式：动态初始化指定路径的日志文件
-// 如果有 1 小时内的最近日志，自动复用（与单目录模式行为一致）
-export function initForWorkspace(projectPath, { forceNew = false } = {}) {
+// 工作区模式：绑定指定路径的项目（v2 会话目录由 V2Writer 按需创建）。
+// forceNew 仅存于签名兼容（Electron multi-tab 传入）：v2 下每个 claude 进程
+// 天然是新 session，无旧文件可复用。
+export function initForWorkspace(projectPath, { forceNew = false } = {}) { // eslint-disable-line no-unused-vars
   const projectName = basename(projectPath).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   const dir = join(LOG_DIR, projectName);
   try { mkdirSync(dir, { recursive: true }); } catch {}
 
-  cleanupTempFiles(dir, projectName, INSTANCE_ID);
-
-  // 检查是否有最近的日志文件可以复用（始终复用最新日志）
-  // forceNew: Electron multi-tab 模式下强制创建新文件，避免与已有 ccv 实例共享日志
-  let recentLog = !forceNew && findRecentLog(dir, projectName, INSTANCE_ID);
-  // 首启接管（与单项目模式 _initPromise 一致）：本 pid 在该 workspace 还没有自己的日志时，
-  // 接管最近的无标签日志，避免 workspace 模式下 --pid 首启不接管的不一致。forceNew 时显式不接管。
-  if (!recentLog && INSTANCE_ID && !forceNew) {
-    const claimed = claimUntaggedLog(dir, projectName, INSTANCE_ID);
-    if (claimed) recentLog = claimed;
-  }
-  if (recentLog) {
-    _projectName = projectName;
-    _logDir = dir;
-    LOG_FILE = recentLog;
-    // Same lifecycle as the single-project boot paths: start this workspace's
-    // registry fresh, then re-seed from the resumed segment's head sentinel so
-    // the next rotation's carry-forward stays complete after a restart/switch.
-    _agentSpawnRegistry.clear();
-    seedSpawnRegistryFromLogHead(LOG_FILE);
-    // workspace 切换后，重读该 workspace 的 active-profile.json（可能和上一个 workspace 不同）
-    _loadProxyProfile();
-    return { filePath: recentLog, dir, projectName, resumed: true };
-  }
-
-  // 没有最近日志，创建新文件
-  const now = new Date();
-  const ts = now.getFullYear().toString()
-    + String(now.getMonth() + 1).padStart(2, '0')
-    + String(now.getDate()).padStart(2, '0')
-    + '_'
-    + String(now.getHours()).padStart(2, '0')
-    + String(now.getMinutes()).padStart(2, '0')
-    + String(now.getSeconds()).padStart(2, '0');
-
-  // 与 generateNewLogFilePath 同款命名（共用 logFilePrefix）：`--pid` 实例带 `<pid>__` 前缀。
-  const filePath = join(dir, `${logFilePrefix(projectName, INSTANCE_ID)}${ts}.jsonl`);
-
   _projectName = projectName;
   _logDir = dir;
-  LOG_FILE = filePath;
-  // Fresh file for a fresh workspace context — no carried names apply.
+  // Fresh workspace context — no carried names apply; future requests must
+  // create session dirs under the NEW project.
   _agentSpawnRegistry.clear();
-  _loadProxyProfile(); // 同上
+  _v2Writer.resetSessions(); // also clears the per-process `-c` adoption latch
+  // A `--fork-session` / `-r` launch marks fork/resume intent; neither must
+  // leak into a LATER workspace's `-c` (in a long-lived server that would
+  // permanently suppress adoption). Clear both marks per launch and re-sync —
+  // the workspace launcher re-marks right after if THIS launch is itself a
+  // fork/resume. (`_continuedLaunchMarked` stays sticky on purpose: the migrate
+  // prompt relies on it, and a stale continued flag is harmless — adoption also
+  // requires the wire to actually replay assistant history.)
+  _forkLaunchMarked = false;
+  _resumeLaunchMarked = false;
+  _syncContinuationMode();
+  _loadProxyProfile(); // 重读该 workspace 的 active-profile.json
 
-  return { filePath, dir, projectName, resumed: false };
+  return { filePath: '', dir, projectName, resumed: false };
 }
 
 // 工作区模式：重置日志状态（返回工作区列表时调用）
 export function resetWorkspace() {
   _projectName = '';
   _logDir = '';
-  LOG_FILE = '';
   // Workspace context gone: drop carried teammate names — the registry is
   // module-global, and without this a rotation in the NEXT workspace would
   // write a sentinel carrying THIS workspace's names (unbounded growth +
   // cross-workspace leakage into the route's teammateNames snapshot).
   _agentSpawnRegistry.clear();
+  _v2Writer.resetSessions(); // wire-v2: empty project → ingest no-ops until re-init
   _loadProxyProfile(); // workspace 上下文消失，回落到 profile.json.active
 }
 
-// Windows NTFS + Defender 下大文件 I/O 代价远高于 Mac/Linux，降低分割阈值减轻压力
-const MAX_LOG_SIZE = (process.platform === 'win32' ? 150 : 300) * 1024 * 1024;
-
 // Agent-spawn registry: prompt-prefix(60) → teammate name, accumulated from
-// mainAgent responses as they are written. Carried into the next segment via
-// the rotation-context sentinel so post-split viewers can still resolve
-// teammate names whose spawn turn lives in the previous file. The pure
-// extraction/parsing lives in interceptor-core.js (unit-tested there).
+// mainAgent responses. v2 identity keying (ConvResolver) is the surviving
+// consumer; the v1 rotation-sentinel carry retired with rotation itself. The
+// pure extraction/parsing lives in interceptor-core.js (unit-tested there).
 const _agentSpawnRegistry = new Map();
 
 function collectAgentSpawns(entry) {
@@ -515,66 +507,6 @@ function collectAgentSpawns(entry) {
       _agentSpawnRegistry.set(prefix, name);
     }
   } catch { }
-}
-
-// Boot re-seed: when resuming an existing log whose FIRST frame is a
-// rotation-context sentinel, load its carried names so a restarted leader
-// still writes a complete sentinel at the next rotation. Bounded read of the
-// file head only — never a whole-segment scan (segments reach 300MB).
-function seedSpawnRegistryFromLogHead(file) {
-  try {
-    if (!file || !existsSync(file)) return;
-    const fd = openSync(file, 'r');
-    let head;
-    try {
-      const buf = Buffer.alloc(64 * 1024);
-      const n = readSync(fd, buf, 0, buf.length, 0);
-      head = buf.toString('utf-8', 0, n);
-    } finally {
-      closeSync(fd);
-    }
-    const entry = parseRotationContextHead(head);
-    if (!entry || !Array.isArray(entry.teammateNames)) return;
-    for (const pair of entry.teammateNames) {
-      if (Array.isArray(pair) && pair[0] && pair[1]) _agentSpawnRegistry.set(pair[0], pair[1]);
-    }
-  } catch { }
-}
-
-async function checkAndRotateLogFile() {
-  // Teammate 不做日志轮转，由 leader 负责
-  if (_isTeammate) return;
-  try {
-    if (!existsSync(LOG_FILE) || statSync(LOG_FILE).size < MAX_LOG_SIZE) return;
-  } catch { return; }
-  await _writeQueue.flush();
-  const { filePath } = generateNewLogFilePath();
-  // Sentinel is baked into the new file's CREATION (rotateLogFile initial
-  // content): queueing it after the fact races the watcher's rotation-follow
-  // and can leave it undelivered. Synthetic url gives it a stable dedup key.
-  const sentinel = JSON.stringify({
-    ccvRotationContext: 1,
-    url: 'ccv://rotation-context',
-    from: basename(LOG_FILE),
-    teammateNames: [..._agentSpawnRegistry.entries()],
-    timestamp: new Date().toISOString(),
-  }) + '\n---\n';
-  const result = rotateLogFile(LOG_FILE, filePath, MAX_LOG_SIZE, sentinel);
-  if (result.rotated) {
-    LOG_FILE = result.newFile;
-    // 重置 delta 状态，强制下一条 mainAgent 请求写完整 checkpoint
-    if (_deltaStorageEnabled) {
-      _lastMessagesCount = 0;
-      _lastTailFp = '';
-      _mainAgentDeltaCount = 0;
-    }
-  }
-}
-
-// Exposed for the /api/prev-segment-teammates route (belt-and-braces seed
-// delivery when the in-band sentinel falls outside the client's load window).
-export function getAgentSpawnRegistrySnapshot() {
-  return [..._agentSpawnRegistry.entries()];
 }
 
 // 从环境变量 ANTHROPIC_BASE_URL 提取域名用于请求匹配
@@ -659,16 +591,25 @@ export function setupInterceptor() {
     }
   };
 
+  // The v2 queue drains on every exit path — close() falls back to synchronous
+  // drain, so a Ctrl-C cannot strand queued lines. The 2s race is insurance:
+  // a hung async appendFile (network FS, etc.) must never hold Ctrl-C hostage;
+  // the sync-drain fallback inside close() is blocking and cannot hang on the
+  // event loop.
+  const _closeQueuesBounded = () => Promise.race([
+    _v2Writer.close(),
+    new Promise(resolve => { const t = setTimeout(resolve, 2000); if (t.unref) t.unref(); }),
+  ]);
   process.on('SIGINT', () => {
-    _writeQueue.close().then(() => cleanupViewer()).finally(() => process.exit(0));
+    _closeQueuesBounded().then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('SIGTERM', () => {
-    _writeQueue.close().then(() => cleanupViewer()).finally(() => process.exit(0));
+    _closeQueuesBounded().then(() => cleanupViewer()).finally(() => process.exit(0));
   });
 
   process.on('beforeExit', () => {
-    _writeQueue.close().then(() => cleanupViewer());
+    _closeQueuesBounded().then(() => cleanupViewer());
   });
 
   const _originalFetch = globalThis.fetch;
@@ -778,9 +719,7 @@ export function setupInterceptor() {
       }
     } catch { }
 
-    // 用户新指令边界：检查日志文件大小，超过 250MB 则切换新文件
     if (requestEntry?.mainAgent) {
-      await checkAndRotateLogFile();
       // 仅 mainAgent 请求时缓存模型名，避免 SubAgent 覆盖
       if (requestEntry.body?.model && typeof requestEntry.body.model === 'string') {
         _cachedModel = requestEntry.body.model;
@@ -791,96 +730,10 @@ export function setupInterceptor() {
       }
     }
 
-    // Delta storage：仅 mainAgent 且开关启用时，将 body.messages 转为增量格式
-    let _deltaOriginalMessagesLength = 0; // 缓存本次请求的原始 messages 长度，用于 completed 后更新状态
-    let _deltaOriginalTailFp = '';        // 缓存本次请求末位 message 的指纹，用于 completed 后更新 _lastTailFp
-    if (_deltaStorageEnabled && requestEntry?.mainAgent && Array.isArray(requestEntry.body?.messages)) {
-      const messages = requestEntry.body.messages;
-      _deltaOriginalMessagesLength = messages.length;
-      // 立即把末位 fp 算成字符串保存（不存对象引用），避免后续 mutation 风险
-      _deltaOriginalTailFp = messages.length > 0 ? fingerprintMsg(messages[messages.length - 1]) : '';
-      _mainAgentDeltaCount++;
-
-      // 完成序倒置守卫：请求发起序号（必须与下方 Plan C eager 块同处一个同步段，中间不得插 await）
-      if (!_isTeammate) {
-        requestEntry._seq = ++_seqCounter;
-        requestEntry._seqEpoch = _seqEpoch;
-      }
-
-      // 并发竞态修复（详见模块顶部注释 + history.md Unreleased 段 fix(interceptor) 条目）：
-      // snapshot 上一请求处理时的 count/fp 给 Plan C 用，然后 eager 把模块级状态推到本次值
-      // （不等 _commitDeltaState）。BUG 来源：teammate 终止快速串行让 mainAgent 30ms 内连续
-      // firing，旧 commit 时序使 Plan C 拿陈旧 prev 漏检 → client doubled-history。
-      const _prevMessagesCount = _lastMessagesCount;
-      const _prevTailFp = _lastTailFp;
-      if (_deltaOriginalMessagesLength > 0) {
-        _lastMessagesCount = _deltaOriginalMessagesLength;
-        if (_deltaOriginalTailFp !== '') _lastTailFp = _deltaOriginalTailFp;
-      }
-
-      // In-place last-msg replace 检测：messages.length 不变但末位 fp 不同。
-      // 触发场景：CLI 在 mainAgent 末位"原地替换"user msg（SUGGESTION MODE → 用户真实输入；
-      // synthetic recap 通道注入；teammate 终止快速串行 → SUGGESTION MODE 多次替换；等），
-      // wire 上长度未变内容变了。旧逻辑 messages.slice(_lastMessagesCount) 算出 delta=[]，
-      // 丢失了"末位换内容"信息 → 客户端重建拿到错误的"前态末位"。
-      // 检测命中即强制写 checkpoint，让客户端拿到完整 wire 真实内容。
-      const _sameLenInPlaceReplace =
-        _tailFpCheckEnabled &&
-        messages.length === _prevMessagesCount &&
-        _prevMessagesCount > 0 &&
-        _prevTailFp !== '' &&
-        _deltaOriginalTailFp !== '' &&
-        _deltaOriginalTailFp !== _prevTailFp;
-
-      // 判断是否需要写 checkpoint
-      const needsCheckpoint =
-        _prevMessagesCount === 0 ||                           // 进程重启 / 首次请求
-        messages.length < _prevMessagesCount ||               // messages 缩短（/clear、context 压缩）
-        (_mainAgentDeltaCount % CHECKPOINT_INTERVAL === 0) || // 定期 checkpoint
-        _sameLenInPlaceReplace;                                // in-place last-msg replace 检测
-
-      if (needsCheckpoint) {
-        // checkpoint：保持完整 messages，标记 _isCheckpoint
-        requestEntry._deltaFormat = 1;
-        requestEntry._totalMessageCount = messages.length;
-        requestEntry._conversationId = 'mainAgent';
-        requestEntry._isCheckpoint = true;
-        if (_sameLenInPlaceReplace) {
-          // 诊断字段：标记此 checkpoint 是被 in-place replace 检测触发的（频率约 1-2%，
-          // 用于在生产 jsonl 里事后核对触发率，不影响重建逻辑）。
-          // 双方协议（KEEP IN SYNC: src/utils/sessionManager.js applyInPlaceLastMsgReplace）：
-          // 客户端 helper 看到此字段=true（与 _isCheckpoint:true 同时存在）时直接 in-place 替换
-          // lastSession.messages 末位，跳过 sessionMerge prefix-overlap 算法（避开 doubled-history）。
-          // 字段重命名 / 删除前需同步两端 + 重跑双向回归测试。
-          requestEntry._inPlaceReplaceDetected = true;
-        }
-      } else {
-        // delta：只保留新增的 messages（必须用 _prevMessagesCount，不是 eager 已更新的 _lastMessagesCount）
-        const delta = messages.slice(_prevMessagesCount);
-        requestEntry._deltaFormat = 1;
-        requestEntry._totalMessageCount = messages.length;
-        requestEntry._conversationId = 'mainAgent';
-        requestEntry._isCheckpoint = false;
-        requestEntry.body.messages = delta;
-      }
-    }
-
     // 生成唯一请求 ID，用于关联在途请求和完成请求
     const requestId = `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
-    if (requestEntry) {
-      requestEntry.requestId = requestId;
-      requestEntry.inProgress = true;  // 标记为在途请求
-    }
-
-    // 在发起请求前先写入一条未完成的条目，让前端可以检测在途请求
-    // 例外：live-streaming 场景下，placeholder 由 sendStreamChunk 通过 HTTP 即时投递，
-    // 跳过磁盘预写可避免 log-watcher 500ms 后用空 placeholder 覆盖已显示的流式内容
-    if (requestEntry) {
-      const willLiveStream = !!_livePort && requestEntry.mainAgent && !_isTeammate;
-      if (!willLiveStream) {
-        _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n');
-      }
-    }
+    let _v2Handle = null;
+    if (requestEntry) requestEntry.requestId = requestId;
 
     // 流式请求状态追踪（仅对 Claude API 流式请求）
     if (requestEntry?.isStream) {
@@ -979,6 +832,22 @@ export function setupInterceptor() {
       } catch { }
     }
 
+    if (requestEntry) {
+      // v2 req-phase ingest: journal seq is allocated inside, still in the
+      // fetch hook's synchronous segment (the proxy rewrite above is fully
+      // synchronous) — initiation order can never diverge from arrival order
+      // (§3.7 guard). Running AFTER the rewrite lets the journal req line
+      // capture proxyProfile/proxyUrl (they are assigned inside the rewrite;
+      // ingesting earlier silently dropped them — 1.8 review finding). The
+      // entry carries the pristine wire messages (the delta mutation retired
+      // with v1 write). Internally caught; the outer catch is belt-and-braces
+      // for a broken guard, same as _writeCompletedEntry — an escaping throw
+      // is a dropped entry and must be reported, never silent. The journal req
+      // line replaces the v1 in-flight placeholder pre-write.
+      try { _v2Handle = _v2Writer.ingestRequest(requestEntry, null); }
+      catch (err) { reportSwallowed('interceptor.ingest-request', err); }
+    }
+
     let response;
     try {
       response = await _originalFetch.call(this, _fetchUrl, _fetchOpts);
@@ -1041,7 +910,7 @@ export function setupInterceptor() {
               body: { model: requestEntry.body?.model },
             };
             sendStreamChunk(chunkEntry, ++liveChunkSeq, (ok) => {
-              // 413 → 禁用当次流式，后续全由最终 appendFileSync 交付
+              // 413 → 禁用当次流式，后续全由最终 v2 completion 交付
               if (!ok) liveStreamEnabled = false;
             });
             // 短延迟后清标志，允许下一次发送；若中途有新快照等待，立即再发
@@ -1113,11 +982,8 @@ export function setupInterceptor() {
                       collectAgentSpawns(requestEntry);
 
 
-                      // 移除在途请求标记，保持原始报文
-                      delete requestEntry.inProgress;
-                      delete requestEntry.requestId;
-                      { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-                        _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+                      // 移除在途请求标记，保持原始报文（seam 内先做 v2 completion ingest）
+                      _writeCompletedEntry(requestEntry, _v2Handle);
                       // Release memory: clear large objects after disk write
                       streamedChunks = [];
                       streamedContentLen = 0;
@@ -1125,10 +991,7 @@ export function setupInterceptor() {
                       resetStreamingState();
                     } catch (err) {
                       requestEntry.response.body = fullContent.slice(0, 1000);
-                      delete requestEntry.inProgress;
-                      delete requestEntry.requestId;
-                      { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-                        _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+                      _writeCompletedEntry(requestEntry, _v2Handle);
                       streamedChunks = [];
                       streamedContentLen = 0;
                       requestEntry.response = null;
@@ -1210,10 +1073,7 @@ export function setupInterceptor() {
             headers: Object.fromEntries(response.headers.entries()),
             body: '[Streaming Response - Capture failed]'
           };
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _v2Handle);
           resetStreamingState();
         }
       } else {
@@ -1238,16 +1098,9 @@ export function setupInterceptor() {
 
           collectAgentSpawns(requestEntry);
 
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _v2Handle);
         } catch (err) {
-          delete requestEntry.inProgress;
-          delete requestEntry.requestId;
-          { const _dl = _deltaOriginalMessagesLength, _tf = _deltaOriginalTailFp;
-            _writeQueue.append(JSON.stringify(requestEntry) + '\n---\n', () => _commitDeltaState(_dl, _tf)); }
+          _writeCompletedEntry(requestEntry, _v2Handle);
         }
       }
     }

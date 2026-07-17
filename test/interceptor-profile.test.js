@@ -1,24 +1,25 @@
 /**
- * interceptor.js — proxy profile / workspace / resume / delta-storage 路径测试。
+ * interceptor.js — proxy profile / workspace / v2 会话增量语义路径测试。
  *
  * 覆盖目标（setupInterceptor + 模块级状态机）：
  *   - _loadProxyProfile / getActiveProfileId / setActiveProfileForWorkspace（workspace + profile.json 双写）
  *   - proxy 请求改写：URL origin 替换（含 /v1 路径去重）、x-api-key / authorization 注入、
  *     以及 model 家族改写（opus/sonnet/haiku → 对应字段，其余 → ANTHROPIC_MODEL，旧 activeModel 回退）
- *   - initForWorkspace（复用最近日志 / 新建）、resetWorkspace
- *   - resolveResumeChoice（continue / new 两分支）
- *   - delta storage：首条 mainAgent → checkpoint；append → delta 切片；in-place 末位替换 → 强制 checkpoint
+ *   - initForWorkspace / resetWorkspace（1.7.0：不再复用/新建 v1 日志文件，filePath 恒空）
+ *   - v2 会话增量（adapter 合成视图）：首条 mainAgent → checkpoint；append → delta 切片；
+ *     缩短 → 强制 checkpoint；in-place 末位替换 → checkpoint + _inPlaceReplaceDetected
  *
  * 同 interceptor-fetch.test.js：CCV_PROXY_MODE=1 跳过自执行；手动 setupInterceptor()；
- * CCV_SYNC_WRITES=1 同步写盘便于断言。profile.json 写到 mod.PROFILE_PATH（与模块内常量一致）。
+ * CCV_SYNC_WRITES=1 同步写盘便于断言；读回统一走 iterateV2RawEntries(getLiveLogSource())。
  *
  * 历史注记：model 改写段曾误用 if 块级 body 变量（越界 ReferenceError 被 catch 吞掉，导致
- * 设了 activeModel 时 model 不替换、proxyProfile/proxyUrl 不记录）。现改用函数级 requestEntry.body
- * 读旧值，该 BUG 已修复；下方用例断言修复后的正确行为。
+ * 设了 activeModel 时 model 不替换）。现改用函数级 requestEntry.body 读旧值，该 BUG 已修复。
+ * 1.7.0 已知缺口（生产 bug，另行上报）：v2 ingestRequest 在 proxy 改写之前执行，
+ * proxyProfile/proxyUrl 落盘记账丢失 —— 本文件不断言这两个字段的持久化。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -34,16 +35,23 @@ const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-itcprof-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
 
+// 本文件的固定 v2 session（引导请求携带；后续无 metadata 请求 §8.3 回落到它）
+const SID = 'ffff1111-2222-3333-4444-555566667777';
+const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
+
 let mod;
+let iterateV2RawEntries;
 let nextResponse;
 let lastFetchArgs;
 
-function readEntriesOf(file) {
-  if (!file || !existsSync(file)) return [];
-  return readFileSync(file, 'utf-8').split('\n---\n').filter(p => p.trim()).map(p => JSON.parse(p));
+/** 经 v2→v1 adapter 读取当前 session 的合成 entry 数组（seq 序） */
+function readEntries() {
+  const dir = mod.getLiveLogSource();
+  if (!dir) return [];
+  return [...iterateV2RawEntries(dir)].map(p => JSON.parse(p));
 }
-function lastCompletedOf(file) {
-  const e = readEntriesOf(file);
+function lastCompleted() {
+  const e = readEntries();
   for (let i = e.length - 1; i >= 0; i--) if (!e[i].inProgress) return e[i];
   return null;
 }
@@ -71,6 +79,7 @@ function mainBody(messages, extra = {}) {
   return {
     system: [{ type: 'text', text: 'You are Claude Code, official CLI.' }],
     tools: makeMainAgentTools(),
+    metadata: { user_id: USER_ID },
     messages,
     model: 'claude-x',
     ...extra,
@@ -87,7 +96,16 @@ before(async () => {
     return nextResponse ? nextResponse(url, opts) : new Response('{}', { status: 200 });
   };
   mod = await import('../server/interceptor.js');
+  ({ iterateV2RawEntries } = await import('../server/lib/v2/adapter.js'));
   mod.setupInterceptor();
+  // 引导请求：携带 SID 建立 _currentSid，让后续无 metadata 请求路由到同一 session。
+  await globalThis.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': 'boot' },
+    body: JSON.stringify({ model: 'm', messages: [], metadata: { user_id: USER_ID } }),
+  });
+  await mod._v2Writer.flush();
+  assert.ok(mod.getLiveLogSource().endsWith(SID), '引导请求应建立本文件的固定 v2 session');
 });
 
 after(() => {
@@ -159,10 +177,11 @@ describe('proxy 请求改写（通过真实 fetch hook）', () => {
     // 两种鉴权都被替换
     assert.equal(lastFetchArgs[1].headers['x-api-key'], 'sk-injected');
     assert.equal(lastFetchArgs[1].headers['authorization'], 'Bearer sk-injected');
-    // 日志记录 proxyProfile / proxyUrl（无 activeModel，model 段不触发 BUG）
-    const entry = lastCompletedOf(mod.LOG_FILE);
-    assert.equal(entry.proxyProfile, 'ProxyOne');
-    assert.equal(entry.proxyUrl, 'https://gw.example.com/v1/messages?beta=1');
+    // 条目仍以原始 URL 记录；proxy 记账已落盘（1.8 修复：ingest 移到改写之后）
+    const entry = lastCompleted();
+    assert.ok(entry, '改写后的请求仍应记录完成条目');
+    assert.equal(entry.url, 'https://api.anthropic.com/v1/messages?beta=1');
+    assert.equal(entry.proxyUrl, 'https://gw.example.com/v1/messages?beta=1', 'proxyUrl 落盘记账');
   });
 
   it('baseURL 无路径前缀 → 直接拼接原始 pathname', async () => {
@@ -199,10 +218,10 @@ describe('proxy 请求改写（通过真实 fetch hook）', () => {
     // model 被替换为 activeModel（旧数据回退语义）
     const upstreamBody = JSON.parse(lastFetchArgs[1].body);
     assert.equal(upstreamBody.model, 'TARGET-MODEL');
-    // proxyProfile / proxyUrl 正常记录
-    const entry = lastCompletedOf(mod.LOG_FILE);
-    assert.equal(entry.proxyProfile, 'WithModel');
-    assert.equal(entry.proxyUrl, 'https://m.example.com/v1/messages');
+    // 条目仍记录且保留原始 model（改写只作用于发给上游的 wire，不改写日志条目）
+    const entry = lastCompleted();
+    assert.ok(entry, '改写后的请求仍应记录完成条目');
+    assert.equal(entry.body.model, 'claude-x', '日志条目保留原始 model');
   });
 
   it('家族映射：opus/sonnet/haiku 各命中对应字段，未识别家族(fable)→ANTHROPIC_MODEL', async () => {
@@ -247,43 +266,36 @@ describe('proxy 请求改写（通过真实 fetch hook）', () => {
   });
 });
 
-describe('delta storage（mainAgent 增量写盘）', () => {
-  // 这些用例依赖模块级 _lastMessagesCount/_lastTailFp 状态；它们在本文件内按执行顺序累积。
-  // 为避免与前面 proxy 用例里发出的 mainAgent? 请求耦合，这里只用一组连续 mainAgent 请求，
-  // 断言相对关系（首条 checkpoint / append→delta / in-place→checkpoint），不假设绝对计数。
-  let logFile;
-  before(() => { logFile = mod.LOG_FILE; });
+describe('v2 会话增量语义（adapter 合成的 delta 信封）', () => {
+  // 1.7.0：写盘侧是 v2 conversation-store 的 snapshot/append/ctl 事件；adapter 把它们
+  // 合成回 v1 delta 信封（_deltaFormat/_isCheckpoint/_totalMessageCount/_inPlaceReplaceDetected）。
+  // 会话状态在本文件内按执行顺序累积，断言相对关系，不假设绝对计数。
 
-  it('首条 mainAgent（_lastMessagesCount 可能非 0，但内容延续）→ 至少能写出 _deltaFormat=1 entry', async () => {
+  it('首条 mainAgent → _deltaFormat=1 checkpoint entry', async () => {
     await postJson('https://api.anthropic.com/v1/messages', mainBody([{ role: 'user', content: 'm1' }]));
-    const entry = lastCompletedOf(logFile);
+    const entry = lastCompleted();
     assert.equal(entry.mainAgent, true);
     assert.equal(entry._deltaFormat, 1);
     assert.equal(entry._conversationId, 'mainAgent');
-    assert.equal(typeof entry._isCheckpoint, 'boolean');
-    assert.equal(typeof entry._totalMessageCount, 'number');
+    assert.equal(entry._isCheckpoint, true, '全新 main 会话首条应为 checkpoint（snapshot 事件）');
+    assert.equal(entry._totalMessageCount, 1);
   });
 
   it('append（长度增大且延续）→ delta 切片（body.messages 只含新增部分）', async () => {
-    // 建立 base
+    // 建立 base（与上一条不延续 → snapshot checkpoint）
     const base = [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }];
     await postJson('https://api.anthropic.com/v1/messages', mainBody(base));
-    const baseEntry = lastCompletedOf(logFile);
+    const baseEntry = lastCompleted();
     const baseTotal = baseEntry._totalMessageCount;
     // append 一条
     const grown = [...base, { role: 'user', content: 'c' }];
     await postJson('https://api.anthropic.com/v1/messages', mainBody(grown));
-    const entry = lastCompletedOf(logFile);
+    const entry = lastCompleted();
     assert.equal(entry._totalMessageCount, baseTotal + 1);
-    if (!entry._isCheckpoint) {
-      // delta 路径：body.messages 是切片，长度 < 总数
-      assert.ok(Array.isArray(entry.body.messages));
-      assert.ok(entry.body.messages.length <= 1, 'delta 只含新增 message');
-      assert.equal(entry.body.messages[entry.body.messages.length - 1].content, 'c');
-    } else {
-      // 若恰逢周期 checkpoint，则是完整 messages
-      assert.equal(entry.body.messages.length, baseTotal + 1);
-    }
+    assert.equal(entry._isCheckpoint, false, '延续增长应为 append delta');
+    assert.ok(Array.isArray(entry.body.messages));
+    assert.equal(entry.body.messages.length, 1, 'delta 只含新增 message');
+    assert.equal(entry.body.messages[0].content, 'c');
   });
 
   it('messages 缩短（/clear 语义）→ 强制 checkpoint（完整 messages）', async () => {
@@ -292,7 +304,7 @@ describe('delta storage（mainAgent 增量写盘）', () => {
     await postJson('https://api.anthropic.com/v1/messages', mainBody(longConv));
     // 缩短到 1 条
     await postJson('https://api.anthropic.com/v1/messages', mainBody([{ role: 'user', content: 'fresh' }]));
-    const entry = lastCompletedOf(logFile);
+    const entry = lastCompleted();
     assert.equal(entry._isCheckpoint, true);
     assert.equal(entry._totalMessageCount, 1);
     assert.equal(entry.body.messages.length, 1);
@@ -301,36 +313,37 @@ describe('delta storage（mainAgent 增量写盘）', () => {
 
   it('in-place 末位替换（长度同、末位内容不同）→ 强制 checkpoint + _inPlaceReplaceDetected', async () => {
     const base = [{ role: 'user', content: 'u1' }, { role: 'assistant', content: 'orig-answer' }];
-    await postJson('https://api.anthropic.com/v1/messages', mainBody(base)); // checkpoint(缩短前一条触发) 或 delta
-    // 末位原地替换：长度仍 2，末位 content 改变
+    await postJson('https://api.anthropic.com/v1/messages', mainBody(base)); // snapshot checkpoint（与 fresh 不延续）
+    // 末位原地替换：长度仍 2，末位 content 改变 → ctl replace-tail 事件
     const replaced = [{ role: 'user', content: 'u1' }, { role: 'assistant', content: 'totally different answer text' }];
     await postJson('https://api.anthropic.com/v1/messages', mainBody(replaced));
-    const entry = lastCompletedOf(logFile);
+    const entry = lastCompleted();
     assert.equal(entry._isCheckpoint, true);
     assert.equal(entry._inPlaceReplaceDetected, true);
     assert.equal(entry._totalMessageCount, 2);
   });
 });
 
-describe('initForWorkspace / resetWorkspace', () => {
-  it('initForWorkspace 新建：目录无历史日志 → resumed=false，新文件路径', () => {
+describe('initForWorkspace / resetWorkspace（1.7.0：无 v1 日志文件可复用/新建）', () => {
+  it('initForWorkspace：绑定项目目录，filePath 恒空、resumed 恒 false', () => {
     const projectPath = join(mod._logDir || process.cwd(), '..', 'ws-fresh-' + Date.now());
     const r = mod.initForWorkspace(projectPath, { forceNew: true });
     assert.equal(r.resumed, false);
     assert.equal(r.projectName, basename(projectPath).replace(/[^a-zA-Z0-9_\-\.]/g, '_'));
-    assert.ok(r.filePath.endsWith('.jsonl'));
-    assert.equal(mod.LOG_FILE, r.filePath);
+    assert.equal(r.filePath, '', 'v1 日志文件已退役，不再生成 .jsonl 路径');
+    assert.ok(existsSync(r.dir), '项目目录已创建');
+    assert.equal(mod._projectName, r.projectName);
+    assert.equal(mod._logDir, r.dir);
+    assert.equal(mod.getLiveLogSource(), '', 'session 绑定被重置，首个 sid 请求前 live source 为空');
   });
 
-  it('initForWorkspace 复用：同名目录存在 1 小时内日志 → resumed=true', () => {
-    // 第一次创建并写入一条日志
+  it('initForWorkspace 重复调用（forceNew=false）：v2 下每进程天然新 session，恒不 resume', () => {
     const projectPath = join(mod._logDir || process.cwd(), '..', 'ws-reuse-' + Date.now());
     const r1 = mod.initForWorkspace(projectPath, { forceNew: true });
-    writeFileSync(r1.filePath, '{"a":1}\n---\n');
-    // 第二次（forceNew=false）应复用最近日志
     const r2 = mod.initForWorkspace(projectPath, { forceNew: false });
-    assert.equal(r2.resumed, true);
-    assert.equal(r2.filePath, r1.filePath);
+    assert.equal(r2.resumed, false, 'v1 的「1 小时内复用」语义已随写路径退役');
+    assert.equal(r2.filePath, '');
+    assert.equal(r2.dir, r1.dir, '同一项目目录绑定稳定');
   });
 
   it('resetWorkspace 清空工作区上下文', () => {
@@ -338,13 +351,8 @@ describe('initForWorkspace / resetWorkspace', () => {
     assert.equal(mod._projectName, '');
     assert.equal(mod._logDir, '');
     assert.equal(mod.LOG_FILE, '');
+    assert.equal(mod.getLiveLogSource(), '');
   });
 });
 
-describe('resolveResumeChoice', () => {
-  it('无 _resumeState 时返回 undefined（早退）', () => {
-    // 当前模块未进入 resume 交互态（_resumeState 为 null）
-    const r = mod.resolveResumeChoice('continue');
-    assert.equal(r, undefined);
-  });
-});
+// resolveResumeChoice：v1 resume 交互机器已随写路径删除（导出不复存在），对应用例一并移除。

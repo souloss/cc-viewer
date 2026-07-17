@@ -58,13 +58,25 @@ Dopo l'avvio in modalità programmazione, si aprirà automaticamente una pagina 
 
 cc-viewer è anche distribuito come applicazione desktop nativa: [Pagina di download](https://github.com/weiesky/cc-viewer/releases)
 
+### Aggiornamento a 1.7.0 (formato log v2)
+
+Dalla versione 1.7.0, i log vengono archiviati in un formato a directory per sessione (wire-format v2) anziché in singoli file `.jsonl` — con un'occupazione su disco inferiore di circa il 90%. I file `.jsonl` v1 esistenti non vengono mai modificati né eliminati; la finestra di dialogo dei log elenca per impostazione predefinita le sessioni v2 e una piccola voce “Mostra log legacy (v1)” (visibile finché esistono vecchi file) apre una vista v1 in cui possono essere visualizzati, migrati o eliminati. All'avvio, cc-viewer offre una migrazione con un clic quando vengono rilevati log legacy (fortemente consigliata quando si prosegue una vecchia conversazione con `claude -c`, la cui prima metà risiede nei vecchi file). Puoi anche migrare dal terminale:
+
+```bash
+ccv convert <project>   # migra un singolo progetto
+ccv convert --all       # migra tutti i progetti
+ccv verify <v1-file>    # confronta un file v1 con le sue sessioni convertite
+```
+
+Se una sessione non supera la verifica golden, viene trattenuta in `sessions-quarantine/` per l'ispezione anziché far fallire l'intera migrazione: le altre sessioni vengono comunque migrate.
+
 ### Modalità Logger
 
 Se preferisci ancora lo strumento nativo claude o l'estensione VS Code, usa questa modalità.
 
 In questa modalità, l'avvio di `claude`
 
-avvierà automaticamente un processo di registrazione che salva i log delle richieste in \~/.claude/cc-viewer/*yourproject*/date.jsonl
+avvierà automaticamente un processo di registrazione che salva i log delle richieste in directory per sessione sotto \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Abilitare la modalità logger:
 
@@ -140,7 +152,7 @@ La finestra modale **Modifica prompt di sistema** (menu hamburger → Modifica p
 
 * La scheda **Predefinito** mantiene il comportamento classico: scrive `CC_SYSTEM.md` (sovrascrivi) o `CC_APPEND_SYSTEM.md` (aggiungi) nell'area di lavoro corrente, iniettato come `--system-prompt-file` / `--append-system-prompt-file` al successivo avvio di ccv.
 * **Schede modello**: fai clic su **+ Aggiungi modello**, digita un nome come `opus` o `Gemini3` e scegli un ambito — **Globale** (`~/.claude/cc-viewer/system_prompt/`, si applica a ogni area di lavoro) o **Area di lavoro** (`<project>/system_prompt/`). Ogni scheda ha il proprio interruttore Aggiungi/Sovrascrivi e la propria anteprima Markdown.
-* Le voci sono memorizzate come file in maiuscolo: `OPUS_SYSTEM.md` (sovrascrivi) o `OPUS_APPEND_SYSTEM.md` (aggiungi). La corrispondenza è fuzzy — una sottostringa, senza distinzione tra maiuscole e minuscole, dell'ID del modello usato all'ultimo avvio, quindi `opus` corrisponde a `claude-opus-4-8[1m]` indipendentemente dalla versione. Una corrispondenza dell'area di lavoro prevale su una globale; all'interno di un ambito vince il nome più lungo; una voce corrispondente sostituisce completamente i file di Predefinito per quell'avvio.
+* Le voci sono memorizzate come file in maiuscolo: `OPUS_SYSTEM.md` (sovrascrivi) o `OPUS_APPEND_SYSTEM.md` (aggiungi). La corrispondenza è fuzzy — una sottostringa, senza distinzione tra maiuscole e minuscole, dell'ID del modello risolto dalla configurazione ATTIVA (mappatura modello del proxy profile di terze parti attivo > variabili d'ambiente `ANTHROPIC_MODEL`/`CLAUDE_MODEL` all'avvio > `model` di `settings.json`; senza segnale di configurazione nessuna voce viene iniettata), quindi `opus` corrisponde a `claude-opus-4-8[1m]` indipendentemente dalla versione. Una corrispondenza dell'area di lavoro prevale su una globale; all'interno di un ambito vince il nome più lungo; una voce corrispondente sostituisce completamente i file di Predefinito per quell'avvio. Limitazioni note: il cambio di proxy profile a metà sessione viene rivalutato solo dopo il riavvio della sessione claude; un flag `--model` passato tramite argomenti extra non viene considerato.
 * Salvare una scheda vuota elimina la voce. I cambi di modello effettuati a metà sessione si applicano al successivo riavvio. Imposta `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` per disabilitare ogni iniezione automatica. Puoi fare il commit di `<project>/system_prompt/` per condividere i prompt con il tuo team, oppure aggiungerlo a `.gitignore` per mantenerli privati.
 
 ### Modalità Logger (Visualizzare sessioni complete di Claude Code)

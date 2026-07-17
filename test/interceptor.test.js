@@ -5,15 +5,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   assembleStreamMessage,
-  cleanupTempFiles,
   findRecentLog,
-  claimUntaggedLog,
   getSystemText,
   isAnthropicApiPath,
   isMainAgentRequest,
   isPreflightEntry,
-  migrateConversationContext,
-  rotateLogFile,
 } from '../server/lib/interceptor-core.js';
 
 // ============================================================================
@@ -619,289 +615,23 @@ describe('interceptor', () => {
       // _temp.jsonl still ends with .jsonl so it would match - this is expected
       // The cleanup function handles temp files separately
     });
-  });
 
-  // --------------------------------------------------------------------------
-  // cleanupTempFiles
-  // --------------------------------------------------------------------------
-  describe('cleanupTempFiles', () => {
-    it('renames temp file to permanent when no permanent exists', () => {
-      const dir = join(tempDir, 'cleanup1');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'proj_20260301_120000_temp.jsonl'), '{"data":1}\n');
-
-      cleanupTempFiles(dir, 'proj');
-
-      // temp should be gone, permanent should exist
-      assert.ok(!existsSync(join(dir, 'proj_20260301_120000_temp.jsonl')));
-      assert.ok(existsSync(join(dir, 'proj_20260301_120000.jsonl')));
-    });
-
-    it('merges temp content into existing permanent file', () => {
-      const dir = join(tempDir, 'cleanup2');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'proj_20260301_120000.jsonl'), '{"old":1}\n');
-      writeFileSync(join(dir, 'proj_20260301_120000_temp.jsonl'), '{"new":2}\n');
-
-      cleanupTempFiles(dir, 'proj');
-
-      assert.ok(!existsSync(join(dir, 'proj_20260301_120000_temp.jsonl')));
-      const content = readFileSync(join(dir, 'proj_20260301_120000.jsonl'), 'utf-8');
-      assert.ok(content.includes('{"old":1}'));
-      assert.ok(content.includes('{"new":2}'));
-    });
-
-    it('deletes empty temp file when permanent exists', () => {
-      const dir = join(tempDir, 'cleanup3');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'proj_20260301_120000.jsonl'), '{"old":1}\n');
-      writeFileSync(join(dir, 'proj_20260301_120000_temp.jsonl'), '   \n');
-
-      cleanupTempFiles(dir, 'proj');
-
-      assert.ok(!existsSync(join(dir, 'proj_20260301_120000_temp.jsonl')));
-      const content = readFileSync(join(dir, 'proj_20260301_120000.jsonl'), 'utf-8');
-      assert.equal(content, '{"old":1}\n'); // unchanged
-    });
-
-    it('handles non-existent directory gracefully', () => {
-      // should not throw
-      cleanupTempFiles(join(tempDir, 'nonexistent'), 'proj');
-    });
-  });
-
-  // --------------------------------------------------------------------------
-  // per-instance (--pid) log isolation: <pid>__<project>_<ts>.jsonl
-  // --------------------------------------------------------------------------
-  describe('findRecentLog — instanceId scoping', () => {
-    function seed() {
-      const dir = join(tempDir, 'pidproj');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'pidproj_20260101_120000.jsonl'), '{}');             // untagged
-      writeFileSync(join(dir, 'alpha__pidproj_20260301_080000.jsonl'), '{}');      // alpha
-      writeFileSync(join(dir, 'beta__pidproj_20260401_090000.jsonl'), '{}');       // beta (newest overall)
-      return dir;
-    }
-    it('pid instance selects only its own logs', () => {
-      const dir = seed();
-      assert.equal(findRecentLog(dir, 'pidproj', 'alpha'), join(dir, 'alpha__pidproj_20260301_080000.jsonl'));
-      assert.equal(findRecentLog(dir, 'pidproj', 'beta'), join(dir, 'beta__pidproj_20260401_090000.jsonl'));
-    });
-    it('no-pid (default) excludes pid-tagged logs, picks untagged only', () => {
-      const dir = seed();
-      // even though beta is newest, the default query must ignore pid files
-      assert.equal(findRecentLog(dir, 'pidproj', null), join(dir, 'pidproj_20260101_120000.jsonl'));
-    });
-    it('pid with no own log → null (does not borrow another pid/untagged)', () => {
-      const dir = seed();
-      assert.equal(findRecentLog(dir, 'pidproj', 'gamma'), null);
-    });
-    it('no-pid query excludes a pid file even when pid == projectName (prefix-collision guard)', () => {
+    it('excludes legacy instance-tagged files (even when the tag equals the project name)', () => {
       const dir = join(tempDir, 'collide');
       mkdirSync(dir);
-      writeFileSync(join(dir, 'collide_20260101_120000.jsonl'), '{}');             // untagged
-      writeFileSync(join(dir, 'collide__collide_20260301_120000.jsonl'), '{}');    // pid == projectName (newer)
-      // `collide__collide_…`.startsWith('collide_') is true, but it carries the `__collide_` pid mark → excluded.
-      assert.equal(findRecentLog(dir, 'collide', null), join(dir, 'collide_20260101_120000.jsonl'));
-      assert.equal(findRecentLog(dir, 'collide', 'collide'), join(dir, 'collide__collide_20260301_120000.jsonl'));
+      writeFileSync(join(dir, 'collide_20260101_120000.jsonl'), '{}');
+      // legacy multi-instance file; `collide__collide_…`.startsWith('collide_') is
+      // true, but it carries the `__collide_` mark → excluded by the matcher.
+      writeFileSync(join(dir, 'collide__collide_20260301_120000.jsonl'), '{}');
+      assert.equal(findRecentLog(dir, 'collide'), join(dir, 'collide_20260101_120000.jsonl'));
     });
-    it('no-pid query keeps untagged logs even when the project name contains "__"', () => {
+
+    it('keeps untagged logs when the project name itself contains "__"', () => {
       const dir = join(tempDir, 'dunder');
       mkdirSync(dir);
-      writeFileSync(join(dir, 'a__b_20260101_120000.jsonl'), '{}');                 // untagged, project = a__b
-      writeFileSync(join(dir, 'x__a__b_20260301_120000.jsonl'), '{}');              // pid = x
-      assert.equal(findRecentLog(dir, 'a__b', null), join(dir, 'a__b_20260101_120000.jsonl'));
-      assert.equal(findRecentLog(dir, 'a__b', 'x'), join(dir, 'x__a__b_20260301_120000.jsonl'));
-    });
-  });
-
-  describe('cleanupTempFiles — instanceId scoping (multi-process temp safety)', () => {
-    it('pid instance only finalizes its own temp, never another instance\'s', () => {
-      const dir = join(tempDir, 'pidtemp');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'alpha__pidtemp_20260301_120000_temp.jsonl'), '{"a":1}\n');
-      writeFileSync(join(dir, 'beta__pidtemp_20260301_120000_temp.jsonl'), '{"b":1}\n'); // beta is "live"
-      cleanupTempFiles(dir, 'pidtemp', 'alpha');
-      assert.ok(!existsSync(join(dir, 'alpha__pidtemp_20260301_120000_temp.jsonl')), 'alpha temp finalized');
-      assert.ok(existsSync(join(dir, 'alpha__pidtemp_20260301_120000.jsonl')), 'alpha permanent created');
-      assert.ok(existsSync(join(dir, 'beta__pidtemp_20260301_120000_temp.jsonl')), 'beta temp untouched');
-    });
-    it('no-pid cleanup does not touch pid-tagged temps', () => {
-      const dir = join(tempDir, 'pidtemp2');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'pidtemp2_20260301_120000_temp.jsonl'), '{"u":1}\n');
-      writeFileSync(join(dir, 'alpha__pidtemp2_20260301_120000_temp.jsonl'), '{"a":1}\n');
-      cleanupTempFiles(dir, 'pidtemp2', null);
-      assert.ok(!existsSync(join(dir, 'pidtemp2_20260301_120000_temp.jsonl')), 'untagged temp finalized');
-      assert.ok(existsSync(join(dir, 'alpha__pidtemp2_20260301_120000_temp.jsonl')), 'pid temp untouched');
-    });
-  });
-
-  describe('claimUntaggedLog — first-launch adoption (Q3)', () => {
-    // helper: write a file whose mtime is well in the past (i.e. not a live writer)
-    function writeOld(path, content) {
-      writeFileSync(path, content);
-      const past = new Date(Date.now() - 10 * 60 * 1000); // 10 min ago
-      utimesSync(path, past, past);
-    }
-    it('moves (renames) the recent untagged log into the pid lineage', () => {
-      const dir = join(tempDir, 'claim1');
-      mkdirSync(dir);
-      writeOld(join(dir, 'claim1_20260101_120000.jsonl'), '{"x":1}\n');
-      const claimed = claimUntaggedLog(dir, 'claim1', 'alpha'); // default freshness; mtime is old → claims
-      assert.equal(claimed, join(dir, 'alpha__claim1_20260101_120000.jsonl'));
-      assert.ok(existsSync(claimed), 'pid file exists');
-      assert.ok(!existsSync(join(dir, 'claim1_20260101_120000.jsonl')), 'original untagged moved (no double-count)');
-      assert.equal(readFileSync(claimed, 'utf-8'), '{"x":1}\n', 'content preserved');
-    });
-    it('does NOT claim a fresh (possibly live) untagged log', () => {
-      const dir = join(tempDir, 'claim2');
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'claim2_20260101_120000.jsonl'), '{}'); // just written → fresh
-      assert.equal(claimUntaggedLog(dir, 'claim2', 'alpha'), null); // default freshnessMs guards it
-      assert.ok(existsSync(join(dir, 'claim2_20260101_120000.jsonl')), 'fresh untagged untouched');
-    });
-    it('does NOT claim when an untagged *_temp.jsonl signals a live/parked no-pid instance', () => {
-      const dir = join(tempDir, 'claim4');
-      mkdirSync(dir);
-      writeOld(join(dir, 'claim4_20260101_120000.jsonl'), '{}');       // old (would pass freshness)
-      writeFileSync(join(dir, 'claim4_20260105_090000_temp.jsonl'), '{}'); // a no-pid instance is mid-resume
-      assert.equal(claimUntaggedLog(dir, 'claim4', 'alpha'), null);   // temp present → do not steal
-      assert.ok(existsSync(join(dir, 'claim4_20260101_120000.jsonl')), 'untagged left intact');
-    });
-    it('abandons (returns null) when the pid-claimed target already exists, leaving both files intact', () => {
-      const dir = join(tempDir, 'claim5');
-      mkdirSync(dir);
-      writeOld(join(dir, 'claim5_20260101_120000.jsonl'), '{"orig":1}\n');
-      writeFileSync(join(dir, 'alpha__claim5_20260101_120000.jsonl'), '{"pre":1}\n'); // target already present
-      assert.equal(claimUntaggedLog(dir, 'claim5', 'alpha'), null);   // existsSync(claimed) guard
-      assert.ok(existsSync(join(dir, 'claim5_20260101_120000.jsonl')), 'untagged not moved');
-      assert.equal(readFileSync(join(dir, 'alpha__claim5_20260101_120000.jsonl'), 'utf-8'), '{"pre":1}\n', 'pre-existing target untouched');
-    });
-    it('honors the freshnessMs option (huge → never claim; small → old file passes)', () => {
-      const dir = join(tempDir, 'claim6');
-      mkdirSync(dir);
-      writeOld(join(dir, 'claim6_20260101_120000.jsonl'), '{}'); // mtime ~10 min ago
-      assert.equal(claimUntaggedLog(dir, 'claim6', 'alpha', { freshnessMs: Number.MAX_SAFE_INTEGER }), null);
-      assert.ok(existsSync(join(dir, 'claim6_20260101_120000.jsonl')), 'not claimed under huge freshness');
-      assert.equal(claimUntaggedLog(dir, 'claim6', 'alpha', { freshnessMs: 1000 }), join(dir, 'alpha__claim6_20260101_120000.jsonl'));
-    });
-    it('returns null without an instanceId, and when nothing left to claim', () => {
-      const dir = join(tempDir, 'claim3');
-      mkdirSync(dir);
-      writeOld(join(dir, 'claim3_20260101_120000.jsonl'), '{}');
-      assert.equal(claimUntaggedLog(dir, 'claim3', null), null); // no pid
-      assert.equal(claimUntaggedLog(dir, 'claim3', 'alpha'), join(dir, 'alpha__claim3_20260101_120000.jsonl'));
-      // second claim: untagged already moved → null (loser/no-op path)
-      assert.equal(claimUntaggedLog(dir, 'claim3', 'beta'), null);
-    });
-  });
-
-  // --------------------------------------------------------------------------
-  // migrateConversationContext
-  // --------------------------------------------------------------------------
-  describe('migrateConversationContext', () => {
-    it('migrates from last mainAgent with messages.length===1', () => {
-      // Use pretty-print (null, 2) to match interceptor's actual log format
-      const entry0 = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'reply' }] } }, null, 2);
-      const entry1 = JSON.stringify({ mainAgent: false, body: {} }, null, 2);
-      const entry2 = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'new conv' }] } }, null, 2);
-      const entry3 = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }] } }, null, 2);
-
-      const oldFile = join(tempDir, 'old.jsonl');
-      const newFile = join(tempDir, 'new.jsonl');
-      writeFileSync(oldFile, [entry0, entry1, entry2, entry3].join('\n---\n') + '\n---\n');
-
-      migrateConversationContext(oldFile, newFile);
-
-      // entry2 is the origin (last mainAgent with messages.length===1)
-      // entry2 and entry3 should be migrated
-      const newContent = readFileSync(newFile, 'utf-8');
-      const newParts = newContent.split('\n---\n').filter(p => p.trim());
-      assert.equal(newParts.length, 2);
-      assert.ok(newParts[0].includes('new conv'));
-
-      const oldContent = readFileSync(oldFile, 'utf-8');
-      const oldParts = oldContent.split('\n---\n').filter(p => p.trim());
-      assert.equal(oldParts.length, 2); // entry0 and entry1
-    });
-
-    it('includes preflight entry before origin', () => {
-      const preflight = JSON.stringify({
-        body: { system: 'You are Claude Code', messages: [{ role: 'user', content: 'preflight' }] },
-      }, null, 2);
-      const origin = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'start' }] } }, null, 2);
-      const follow = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }] } }, null, 2);
-
-      const oldFile = join(tempDir, 'old2.jsonl');
-      const newFile = join(tempDir, 'new2.jsonl');
-      writeFileSync(oldFile, [preflight, origin, follow].join('\n---\n') + '\n---\n');
-
-      migrateConversationContext(oldFile, newFile);
-
-      const newParts = readFileSync(newFile, 'utf-8').split('\n---\n').filter(p => p.trim());
-      assert.equal(newParts.length, 3); // preflight + origin + follow
-
-      // 所有内容迁移后旧文件被清空（不删除，watcher 需要检��� truncation）
-      assert.ok(existsSync(oldFile));
-      assert.strictEqual(readFileSync(oldFile, 'utf-8'), '');
-    });
-
-    it('does nothing when no mainAgent with single message found', () => {
-      const entry = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }] } }, null, 2);
-      const oldFile = join(tempDir, 'old3.jsonl');
-      const newFile = join(tempDir, 'new3.jsonl');
-      writeFileSync(oldFile, entry + '\n---\n');
-
-      migrateConversationContext(oldFile, newFile);
-
-      assert.ok(!existsSync(newFile));
-      assert.equal(readFileSync(oldFile, 'utf-8'), entry + '\n---\n'); // unchanged
-    });
-
-    it('handles empty file', () => {
-      const oldFile = join(tempDir, 'old4.jsonl');
-      const newFile = join(tempDir, 'new4.jsonl');
-      writeFileSync(oldFile, '');
-
-      migrateConversationContext(oldFile, newFile);
-
-      assert.ok(!existsSync(newFile));
-    });
-
-    it('migrates single MainAgent entry correctly', () => {
-      const entry = JSON.stringify({
-        mainAgent: true,
-        body: { messages: [{ role: 'user', content: 'start' }] }
-      }, null, 2);
-      const oldFile = join(tempDir, 'single.jsonl');
-      const newFile = join(tempDir, 'single_new.jsonl');
-      writeFileSync(oldFile, entry + '\n---\n');
-
-      migrateConversationContext(oldFile, newFile);
-
-      const newContent = readFileSync(newFile, 'utf-8');
-      assert.ok(newContent.includes('start'));
-      // 所有内容迁移后旧文件被清空（不删除，watcher 需要检测 truncation）
-      assert.ok(existsSync(oldFile));
-      assert.strictEqual(readFileSync(oldFile, 'utf-8'), '');
-    });
-
-    it('handles corrupted JSON lines gracefully', () => {
-      const goodEntry = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'ok' }] } });
-      const badEntry = '{ "broken": json';
-      const oldFile = join(tempDir, 'corrupt.jsonl');
-      const newFile = join(tempDir, 'corrupt_new.jsonl');
-
-      writeFileSync(oldFile, [badEntry, goodEntry].join('\n---\n') + '\n---\n');
-
-      migrateConversationContext(oldFile, newFile);
-
-      const newContent = readFileSync(newFile, 'utf-8');
-      assert.ok(newContent.includes('ok'), 'new file should contain the valid entry');
-
-      const oldContent = readFileSync(oldFile, 'utf-8');
-      assert.ok(oldContent.includes('broken'), 'old file should retain the corrupted entry');
+      writeFileSync(join(dir, 'a__b_20260101_120000.jsonl'), '{}');      // untagged, project = a__b
+      writeFileSync(join(dir, 'x__a__b_20260301_120000.jsonl'), '{}');   // legacy instance-tagged
+      assert.equal(findRecentLog(dir, 'a__b'), join(dir, 'a__b_20260101_120000.jsonl'));
     });
   });
 
@@ -954,93 +684,10 @@ describe('interceptor', () => {
     });
   });
 
-  // --------------------------------------------------------------------------
-  // rotateLogFile
-  // --------------------------------------------------------------------------
-  describe('rotateLogFile', () => {
-    it('rotates when file exceeds maxSize', () => {
-      const oldFile = join(tempDir, 'big.jsonl');
-      const newFile = join(tempDir, 'new.jsonl');
-      // Write 1KB of data, set maxSize to 500 bytes
-      writeFileSync(oldFile, 'x'.repeat(1024));
-
-      const result = rotateLogFile(oldFile, newFile, 500);
-
-      assert.equal(result.rotated, true);
-      assert.equal(result.oldFile, oldFile);
-      assert.equal(result.newFile, newFile);
-    });
-
-    it('does not rotate when file is under maxSize', () => {
-      const oldFile = join(tempDir, 'small.jsonl');
-      const newFile = join(tempDir, 'new.jsonl');
-      writeFileSync(oldFile, 'x'.repeat(100));
-
-      const result = rotateLogFile(oldFile, newFile, 500);
-
-      assert.equal(result.rotated, false);
-      assert.equal(result.oldFile, undefined);
-    });
-
-    it('does not rotate when file does not exist', () => {
-      const result = rotateLogFile(join(tempDir, 'nonexistent.jsonl'), join(tempDir, 'new.jsonl'), 500);
-      assert.equal(result.rotated, false);
-    });
-
-    it('creates empty new file without migrating content', () => {
-      const oldFile = join(tempDir, 'old_data.jsonl');
-      const newFile = join(tempDir, 'fresh.jsonl');
-      const content = JSON.stringify({ mainAgent: true, body: { messages: [{ role: 'user', content: 'hello' }] } });
-      writeFileSync(oldFile, content + '\n---\n');
-
-      rotateLogFile(oldFile, newFile, 10); // maxSize=10 to trigger rotation
-
-      // New file should exist but be empty (no migration)
-      assert.ok(existsSync(newFile), 'new file should be created by rotateLogFile');
-      assert.equal(readFileSync(newFile, 'utf-8'), '', 'new file should be empty');
-    });
-
-    it('appends newline to old file to trigger watcher', () => {
-      const oldFile = join(tempDir, 'watcher_trigger.jsonl');
-      const newFile = join(tempDir, 'new_watcher.jsonl');
-      const originalContent = 'x'.repeat(1024);
-      writeFileSync(oldFile, originalContent);
-
-      rotateLogFile(oldFile, newFile, 500);
-
-      const afterContent = readFileSync(oldFile, 'utf-8');
-      assert.equal(afterContent, originalContent + '\n', 'old file should have \\n appended');
-    });
-
-    it('rotates repeatedly without skip (no cascade suppression)', () => {
-      // Simulate: first rotation, then file grows again, second rotation should also work
-      const file1 = join(tempDir, 'round1.jsonl');
-      const file2 = join(tempDir, 'round2.jsonl');
-      const file3 = join(tempDir, 'round3.jsonl');
-
-      writeFileSync(file1, 'x'.repeat(1024));
-      const r1 = rotateLogFile(file1, file2, 500);
-      assert.equal(r1.rotated, true);
-
-      // Simulate file2 also grows past limit
-      writeFileSync(file2, 'y'.repeat(1024));
-      const r2 = rotateLogFile(file2, file3, 500);
-      assert.equal(r2.rotated, true, 'second rotation should not be suppressed');
-    });
-
-    it('exact boundary: file size equals maxSize triggers rotation', () => {
-      const oldFile = join(tempDir, 'exact.jsonl');
-      const newFile = join(tempDir, 'exact_new.jsonl');
-      writeFileSync(oldFile, 'x'.repeat(500));
-
-      const result = rotateLogFile(oldFile, newFile, 500);
-      assert.equal(result.rotated, true);
-    });
-  });
 });
 
-// ─────────── rotation carry-forward: spawn-pair extraction + sentinel ───────────
-describe('rotation carry-forward (interceptor-core)', () => {
+// ─────────── spawn-pair extraction (agent spawn registry) ───────────
+describe('spawn-pair extraction (interceptor-core)', () => {
   it('extractAgentSpawnPairs pulls prefix→name pairs with client-parity normalization', async () => {
     const { extractAgentSpawnPairs, TEAMMATE_PROMPT_PREFIX_LEN } = await import('../server/lib/interceptor-core.js');
     // Leading whitespace must be trimmed BEFORE slicing (parity with
@@ -1067,31 +714,4 @@ describe('rotation carry-forward (interceptor-core)', () => {
     assert.deepEqual(extractAgentSpawnPairs({}), []);
   });
 
-  it('rotateLogFile bakes initialContent into the new file at creation', async () => {
-    const { rotateLogFile, parseRotationContextHead } = await import('../server/lib/interceptor-core.js');
-    const dir = mkdtempSync(join(tmpdir(), 'ccv-rot-'));
-    const oldFile = join(dir, 'proj_20260101_000000.jsonl');
-    const newFile = join(dir, 'proj_20260102_000000.jsonl');
-    writeFileSync(oldFile, 'x'.repeat(2048));
-    const sentinel = JSON.stringify({
-      ccvRotationContext: 1, url: 'ccv://rotation-context',
-      from: 'proj_20260101_000000.jsonl',
-      teammateNames: [['prefix-a', 'alice']],
-      timestamp: '2026-01-02T00:00:00.000Z',
-    }) + '\n---\n';
-    const result = rotateLogFile(oldFile, newFile, 1024, sentinel);
-    assert.equal(result.rotated, true);
-    const head = readFileSync(newFile, 'utf-8');
-    assert.ok(head.startsWith('{"ccvRotationContext":1'));
-    const parsed = parseRotationContextHead(head);
-    assert.ok(parsed);
-    assert.deepEqual(parsed.teammateNames, [['prefix-a', 'alice']]);
-  });
-
-  it('parseRotationContextHead ignores non-sentinel heads and garbage', async () => {
-    const { parseRotationContextHead } = await import('../server/lib/interceptor-core.js');
-    assert.equal(parseRotationContextHead('{"timestamp":"t","url":"/v1/messages"}\n---\n'), null);
-    assert.equal(parseRotationContextHead('not json\n---\n'), null);
-    assert.equal(parseRotationContextHead('no frame separator at all'), null);
-  });
 });

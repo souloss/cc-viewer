@@ -102,12 +102,12 @@ describe('system-prompt-files: buildSystemPromptFileArgs', () => {
     assert.deepEqual(r, { args: [], loaded: [], model: null });
   });
 
-  it('CCV_DISABLE_AUTO_SYSTEM_PROMPT=1 全跳过(即使两文件都在)', () => {
+  it('CCV_DISABLE_AUTO_SYSTEM_PROMPT=1 全跳过(即使两文件都在)，并携带 suppressed:env', () => {
     const dir = mkTmp();
     writeFileSync(join(dir, SYSTEM_PROMPT_FILE), 'sys');
     writeFileSync(join(dir, APPEND_SYSTEM_PROMPT_FILE), 'app');
     const r = buildSystemPromptFileArgs(dir, [], { [DISABLE_AUTO_SYSTEM_PROMPT_ENV]: '1' });
-    assert.deepEqual(r, { args: [], loaded: [], model: null });
+    assert.deepEqual(r, { args: [], loaded: [], model: null, suppressed: 'env' });
   });
 
   it('projectDir 为空 → 空', () => {
@@ -181,31 +181,32 @@ describe('system-prompt-files: buildSystemPromptFileArgs', () => {
     assert.deepEqual(r.args, ['--system-prompt-file', join(dir, 'system_prompt', 'OPUS_SYSTEM.md')]);
   });
 
-  it('模型命中 + 手动同义 flag → 什么都不注入(默认 sentinel 也不回看)', () => {
+  it('模型命中 + 手动同义 flag → 什么都不注入(默认 sentinel 也不回看)，标记 suppressed:manual-flag', () => {
     const dir = mkTmp();
     writeFileSync(join(dir, SYSTEM_PROMPT_FILE), 'default-sys');
     mkdirSync(join(dir, 'system_prompt'));
     writeFileSync(join(dir, 'system_prompt', 'OPUS_SYSTEM.md'), 'opus');
     const r = buildSystemPromptFileArgs(dir, ['--system-prompt', 'x'], {}, { modelId: 'claude-opus-4-8' });
-    assert.deepEqual(r, { args: [], loaded: [], model: null });
+    assert.deepEqual(r, { args: [], loaded: [], model: null, suppressed: 'manual-flag' });
   });
 
-  it('模型未命中 → 回落默认 sentinel 行为', () => {
+  it('模型未命中 → 回落默认 sentinel 行为，无 suppressed(真·无条目)', () => {
     const dir = mkTmp();
     writeFileSync(join(dir, SYSTEM_PROMPT_FILE), 'default-sys');
     mkdirSync(join(dir, 'system_prompt'));
     writeFileSync(join(dir, 'system_prompt', 'GEMINI3_SYSTEM.md'), 'gem');
     const r = buildSystemPromptFileArgs(dir, [], {}, { modelId: 'claude-opus-4-8' });
     assert.equal(r.model, null);
+    assert.equal(r.suppressed, undefined);
     assert.deepEqual(r.args, ['--system-prompt-file', join(dir, SYSTEM_PROMPT_FILE)]);
   });
 
-  it('kill-switch 压过模型命中', () => {
+  it('kill-switch 压过模型命中，标记 suppressed:env', () => {
     const dir = mkTmp();
     mkdirSync(join(dir, 'system_prompt'));
     writeFileSync(join(dir, 'system_prompt', 'OPUS_SYSTEM.md'), 'opus');
     const r = buildSystemPromptFileArgs(dir, [], { [DISABLE_AUTO_SYSTEM_PROMPT_ENV]: '1' }, { modelId: 'claude-opus-4-8' });
-    assert.deepEqual(r, { args: [], loaded: [], model: null });
+    assert.deepEqual(r, { args: [], loaded: [], model: null, suppressed: 'env' });
   });
 
   it('modelId 为 null/缺省 → 完全旧逻辑', () => {

@@ -1,6 +1,6 @@
 {
   "name": "cc-viewer",
-  "version": "1.6.347",
+  "version": "1.7.3",
   "description": "Claude Code logging, visualization, and management toolkit — launch a web viewer alongside Claude Code with full request/response tracing, proxy, and mobile support",
   "license": "MIT",
   "main": "server.js",
@@ -20,6 +20,7 @@
     "build:sourcemap": "CCV_SOURCEMAP=1 node build.js",
     "start": "node server.js",
     "lint:control-bytes": "node scripts/check-no-control-bytes.js",
+    "verify:wire-v2": "node cli.js verify",
     "pretest": "npm run lint:control-bytes",
     "pretest:cli": "npm run lint:control-bytes",
     "pretest:coverage": "npm run lint:control-bytes",
@@ -65,6 +66,7 @@
     "findcc.js",
     "interceptor.js",
     "server/",
+    "src/utils/",
     "plugins/",
     "concepts/",
     "ultraAgents/"

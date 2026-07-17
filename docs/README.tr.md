@@ -58,13 +58,25 @@ Programlama modunu başlattıktan sonra web sayfası otomatik olarak açılır.
 
 cc-viewer'ın istemci sürümü de mevcuttur: [İndirme bağlantısı](https://github.com/weiesky/cc-viewer/releases)
 
+### 1.7.0 sürümüne yükseltme (log formatı v2)
+
+1.7.0 sürümünden itibaren loglar, tek `.jsonl` dosyaları yerine oturum başına dizin biçiminde (wire-format v2) saklanır — diskte yaklaşık %90 daha az yer kaplar. Mevcut v1 `.jsonl` dosyaları asla değiştirilmez veya silinmez; log iletişim kutusu varsayılan olarak v2 oturumlarını listeler ve küçük bir “Eski (v1) logları görüntüle” girişi (eski dosyalar var olduğu sürece gösterilir) bunların görüntülenebileceği, taşınabileceği veya silinebileceği bir v1 görünümü açar. Başlangıçta, eski loglar bulunduğunda cc-viewer tek tıkla taşıma sunar (`claude -c` ile eski bir konuşmaya devam ederken şiddetle önerilir; bu konuşmanın ilk yarısı eski dosyalarda bulunur). Taşımayı terminalden de yapabilirsiniz:
+
+```bash
+ccv convert <project>   # tek bir projeyi taşı
+ccv convert --all       # tüm projeleri taşı
+ccv verify <v1-file>    # bir v1 dosyasını dönüştürülmüş oturumlarıyla karşılaştır
+```
+
+Bir oturum golden doğrulamasını geçemezse, tüm taşımayı başarısız kılmak yerine incelenmek üzere `sessions-quarantine/` içinde tutulur; diğer oturumlar yine de taşınır.
+
 ### Log modu
 
 Hâlâ claude'un native aracını veya VS Code eklentisini kullanmaya alışkınsanız bu modu kullanın.
 
 Bu modda `claude` çalıştırıldığında
 
-otomatik olarak bir log süreci başlatılır ve istek logları \~/.claude/cc-viewer/*yourproject*/date.jsonl içine kaydedilir
+otomatik olarak bir log süreci başlatılır ve istek logları \~/.claude/cc-viewer/*yourproject*/sessions/ altındaki oturum başına dizinlere kaydedilir (wire-format v2)
 
 Log modunu başlat:
 
@@ -140,7 +152,7 @@ Mobil programlamaya dair hayallerinizi gerçekleştirin. Ayrıca bir eklenti mek
 
 * **Varsayılan** sekmesi klasik davranışı korur: geçerli çalışma alanına `CC_SYSTEM.md` (üzerine yazma) veya `CC_APPEND_SYSTEM.md` (ekleme) dosyasını yazar; bu dosya bir sonraki ccv başlatılışında `--system-prompt-file` / `--append-system-prompt-file` olarak enjekte edilir.
 * **Model sekmeleri**: **+ Model ekle** düğmesine tıklayın, `opus` veya `Gemini3` gibi bir ad yazın ve bir kapsam seçin — **Genel** (`~/.claude/cc-viewer/system_prompt/`, tüm çalışma alanlarına uygulanır) veya **Çalışma alanı** (`<project>/system_prompt/`). Her sekmenin kendi Ekle/Üzerine yaz anahtarı ve Markdown önizlemesi vardır.
-* Girdiler büyük harfli dosyalar olarak saklanır: `OPUS_SYSTEM.md` (üzerine yazma) veya `OPUS_APPEND_SYSTEM.md` (ekleme). Eşleştirme bulanıktır — son başlatmada kullanılan model kimliğinin büyük/küçük harfe duyarsız bir alt dizesi aranır; bu yüzden `opus`, sürümden bağımsız olarak `claude-opus-4-8[1m]` ile eşleşir. Çalışma alanı eşleşmesi genel eşleşmeye üstün gelir; aynı kapsam içinde en uzun ad kazanır; eşleşen bir girdi, o başlatma için Varsayılan dosyaların yerini tamamen alır.
+* Girdiler büyük harfli dosyalar olarak saklanır: `OPUS_SYSTEM.md` (üzerine yazma) veya `OPUS_APPEND_SYSTEM.md` (ekleme). Eşleştirme bulanıktır — ETKİN yapılandırmadan çözümlenen model kimliğinin (etkin üçüncü taraf proxy profile'ın model eşlemesi > başlatma ortam değişkenleri `ANTHROPIC_MODEL`/`CLAUDE_MODEL` > `settings.json` içindeki `model`; yapılandırma sinyali yoksa hiçbir girdi enjekte edilmez) büyük/küçük harfe duyarsız bir alt dizesi aranır; bu yüzden `opus`, sürümden bağımsız olarak `claude-opus-4-8[1m]` ile eşleşir. Çalışma alanı eşleşmesi genel eşleşmeye üstün gelir; aynı kapsam içinde en uzun ad kazanır; eşleşen bir girdi, o başlatma için Varsayılan dosyaların yerini tamamen alır. Bilinen sınırlamalar: oturum ortasında proxy profile değiştirmek ancak claude oturumu yeniden başlatıldığında yeniden eşleştirilir; ek argümanlarla iletilen `--model` bayrağı dikkate alınmaz.
 * Bir sekmeyi boş kaydetmek girdiyi siler. Oturum ortasında yapılan model değişiklikleri bir sonraki yeniden başlatmada geçerli olur. Tüm otomatik enjeksiyonu devre dışı bırakmak için `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` ayarlayın. Promptları ekibinizle paylaşmak için `<project>/system_prompt/` dizinini commit edebilir veya gizli tutmak için `.gitignore` dosyasına ekleyebilirsiniz.
 
 ### Log modu (claude code'un eksiksiz oturumlarını görüntüleyin)

@@ -58,13 +58,25 @@ Po uruchomieniu trybu programowania automatycznie otwiera się strona internetow
 
 cc-viewer jest również dostarczany jako natywna aplikacja desktopowa: [Strona pobierania](https://github.com/weiesky/cc-viewer/releases)
 
+### Aktualizacja do 1.7.0 (format logów v2)
+
+Od wersji 1.7.0 logi są przechowywane w formacie katalogu na sesję (wire-format v2) zamiast pojedynczych plików `.jsonl` — zajmują około 90% mniej miejsca na dysku. Istniejące pliki `.jsonl` v1 nigdy nie są modyfikowane ani usuwane; okno dialogowe logów domyślnie wyświetla sesje v2, a mały wpis „Pokaż starsze logi (v1)” (widoczny, dopóki istnieją stare pliki) otwiera widok v1, w którym można je przeglądać, migrować lub usuwać. Przy uruchomieniu cc-viewer proponuje migrację jednym kliknięciem, gdy wykryje starsze logi (zdecydowanie zalecane przy kontynuowaniu starej rozmowy poleceniem `claude -c`, której pierwsza połowa znajduje się w starych plikach). Migrację można też przeprowadzić z terminala:
+
+```bash
+ccv convert <project>   # migruj jeden projekt
+ccv convert --all       # migruj wszystkie projekty
+ccv verify <v1-file>    # sprawdź plik v1 względem jego skonwertowanych sesji
+```
+
+Jeśli sesja nie przejdzie weryfikacji golden, zostaje wstrzymana w `sessions-quarantine/` do sprawdzenia, zamiast unieważniać całą migrację — pozostałe sesje są migrowane normalnie.
+
 ### Tryb loggera
 
 Jeśli nadal wolisz natywne narzędzie claude lub rozszerzenie VS Code, użyj tego trybu.
 
 W tym trybie `claude`
 
-automatycznie uruchamia proces logowania, który zapisuje logi żądań do \~/.claude/cc-viewer/*yourproject*/date.jsonl
+automatycznie uruchamia proces logowania, który zapisuje logi żądań do katalogów na sesję w \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Uruchom tryb loggera:
 
@@ -140,7 +152,7 @@ Okno modalne **Edytuj prompt systemowy** (menu hamburger → Edytuj prompt syste
 
 * Karta **Domyślny** zachowuje klasyczne działanie: zapisuje `CC_SYSTEM.md` (nadpisanie) lub `CC_APPEND_SYSTEM.md` (dołączenie) w bieżącym obszarze roboczym, wstrzykiwane jako `--system-prompt-file` / `--append-system-prompt-file` przy następnym uruchomieniu ccv.
 * **Karty modeli**: kliknij **+ Dodaj model**, wpisz nazwę taką jak `opus` lub `Gemini3` i wybierz zakres — **Globalny** (`~/.claude/cc-viewer/system_prompt/`, obowiązuje w każdym obszarze roboczym) lub **Obszar roboczy** (`<project>/system_prompt/`). Każda karta ma własny przełącznik Dołącz/Nadpisz i podgląd Markdown.
-* Wpisy są przechowywane jako pliki pisane wielkimi literami: `OPUS_SYSTEM.md` (nadpisanie) lub `OPUS_APPEND_SYSTEM.md` (dołączenie). Dopasowanie jest rozmyte — podciąg identyfikatora modelu użytego przy ostatnim uruchomieniu, bez rozróżniania wielkości liter, więc `opus` pasuje do `claude-opus-4-8[1m]` niezależnie od wersji. Dopasowanie z obszaru roboczego wygrywa z globalnym; w ramach jednego zakresu wygrywa najdłuższa nazwa; dopasowany wpis całkowicie zastępuje pliki karty Domyślny dla danego uruchomienia.
+* Wpisy są przechowywane jako pliki pisane wielkimi literami: `OPUS_SYSTEM.md` (nadpisanie) lub `OPUS_APPEND_SYSTEM.md` (dołączenie). Dopasowanie jest rozmyte — podciąg identyfikatora modelu wyznaczonego z AKTYWNEJ konfiguracji (mapowanie modelu aktywnego zewnętrznego proxy profile > zmienne środowiskowe `ANTHROPIC_MODEL`/`CLAUDE_MODEL` przy starcie > `model` z `settings.json`; bez sygnału konfiguracji żaden wpis nie jest wstrzykiwany), bez rozróżniania wielkości liter, więc `opus` pasuje do `claude-opus-4-8[1m]` niezależnie od wersji. Dopasowanie z obszaru roboczego wygrywa z globalnym; w ramach jednego zakresu wygrywa najdłuższa nazwa; dopasowany wpis całkowicie zastępuje pliki karty Domyślny dla danego uruchomienia. Znane ograniczenia: zmiana proxy profile w trakcie sesji jest ponownie dopasowywana dopiero po restarcie sesji claude; flaga `--model` przekazana w dodatkowych argumentach nie jest uwzględniana.
 * Zapisanie pustej karty usuwa wpis. Zmiany modelu dokonane w trakcie sesji zaczynają obowiązywać przy następnym ponownym uruchomieniu. Ustaw `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1`, aby wyłączyć całe automatyczne wstrzykiwanie. Możesz zacommitować `<project>/system_prompt/`, aby udostępnić prompty swojemu zespołowi, lub dodać go do `.gitignore`, aby pozostały prywatne.
 
 ### Tryb loggera (Wyświetlanie pełnych sesji Claude Code)

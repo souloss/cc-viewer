@@ -258,8 +258,30 @@ export function applyModelReplacement(body, profile) {
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * Abortable sleep: resolves early (never rejects) when the signal fires, so a
+ * client disconnect interrupts retry waits instead of parking the loop for the
+ * full interval (a large upstream Retry-After would otherwise pin an abandoned
+ * request for its whole duration).
+ */
+function sleep(ms, signal) {
+  return new Promise(resolve => {
+    if (signal?.aborted) return resolve();
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Never sleep past the total-duration deadline (0 = no deadline). */
+function clampWaitToDeadline(wait, deadline) {
+  if (deadline > 0) return Math.max(0, Math.min(wait, deadline - Date.now()));
+  return wait;
 }
 
 /**
@@ -297,29 +319,29 @@ async function singleFetch(url, fetchOptions, ctx) {
   opts.headers['x-cc-viewer-trace'] = 'true';
   if (fetchOptions.body) opts.body = fetchOptions.body;
   if (ctx.dispatcher) opts.dispatcher = ctx.dispatcher;
-  if (ctx.signal) opts.signal = ctx.signal;
 
-  // Connection timeout (AbortController merged with the external signal)
+  // Compose the fetch signal from the external signal (race/stagger loser
+  // cancellation + client disconnect) and the header-arrival timeout. The
+  // composition must stay live for the WHOLE response lifetime — the previous
+  // listener-bridge design detached the external signal the moment fetch
+  // resolved (headers in), which made a loser's already-streaming body
+  // un-cancellable: ctl.abort() no longer reached the signal fetch was holding.
+  // AbortSignal.any keeps the linkage for as long as the body exists; the
+  // finally below only clears the timeout timer, never the external linkage.
   let timeoutTimer = null;
   let timeoutCtl = null;
+  const signals = [];
+  if (ctx.signal) signals.push(ctx.signal);
   if (ctx.connectTimeoutMs > 0) {
     timeoutCtl = new AbortController();
     timeoutTimer = setTimeout(() => timeoutCtl.abort(), ctx.connectTimeoutMs);
+    signals.push(timeoutCtl.signal);
   }
-
-  // Merge external signal (used by race/stagger cancellation) and timeout signal
-  const onExternalAbort = () => timeoutCtl?.abort();
-  if (ctx.signal) {
-    if (ctx.signal.aborted) timeoutCtl?.abort();
-    else ctx.signal.addEventListener('abort', onExternalAbort, { once: true });
-  }
+  if (signals.length === 1) opts.signal = signals[0];
+  else if (signals.length > 1) opts.signal = AbortSignal.any(signals);
 
   try {
-    // Note: when connectTimeoutMs===0, timeoutCtl is null; must fall back to opts.signal (the external
-    // race/stagger AbortController), otherwise the cancel signal is dropped and in-flight requests cannot be
-    // aborted (connection leak). When timeoutCtl exists, its signal is already bridged to the external signal
-    // via onExternalAbort above, so the two are equivalent.
-    const response = await fetch(url, { ...opts, signal: timeoutCtl ? timeoutCtl.signal : opts.signal });
+    const response = await fetch(url, opts);
     return response;
   } catch (err) {
     // Network error/timeout/cancellation → return a pseudo response; status=0 indicates an error
@@ -337,8 +359,17 @@ async function singleFetch(url, fetchOptions, ctx) {
     };
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);
-    if (ctx.signal && onExternalAbort) ctx.signal.removeEventListener('abort', onExternalAbort);
   }
+}
+
+/**
+ * Best-effort release of a response body that will never be piped to the
+ * client (failed attempts, losers of a settled race, replaced lastFailed).
+ * Leaving these undrained keeps the upstream socket out of undici's pool and
+ * pins memory for the life of the stream.
+ */
+function discardBody(response) {
+  try { response?.body?.cancel?.()?.catch?.(() => {}); } catch { /* best effort */ }
 }
 
 // ── executeRequest ────────────────────────────────────────────────
@@ -357,6 +388,11 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
   const cfg = { ...DEFAULT_RETRY_CONFIG, ...(retryConfig || {}) };
   const dispatcher = ctx?.dispatcher || null;
   const profile = ctx?.profile || null;
+  // Client-disconnect signal from the proxy: when it fires, every in-flight
+  // attempt is aborted and no further attempts/waits are scheduled — a request
+  // whose client is gone must not keep billing the upstream for up to
+  // maxRetryDurationMs.
+  const clientSignal = ctx?.signal || null;
 
   // Model replacement (one-time, done before retries; all retries use the same body)
   let finalBody = fetchOptions.body;
@@ -374,7 +410,13 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
   // the latter was once hard-coded to 503)
   let upstreamStatus = 0;
 
-  const commonCtx = { dispatcher, connectTimeoutMs: cfg.connectTimeoutMs };
+  // Backward-compat guarantee for mode 'off': the legacy proxy path awaited
+  // fetch with NO timeout at all (undici's own default only). connectTimeoutMs
+  // actually bounds time-to-HEADERS, and non-streaming completions can hold
+  // headers well past 10s — so with retry disabled we must not introduce a new
+  // failure mode. The timeout applies only when a retry mode is active.
+  const effectiveConnectTimeoutMs = cfg.mode === 'off' ? 0 : cfg.connectTimeoutMs;
+  const commonCtx = { dispatcher, connectTimeoutMs: effectiveConnectTimeoutMs };
 
   if (cfg.mode === 'off' || cfg.mode === 'serial') {
     // off / serial: serial retry. off = no retry (break on any status); serial = controlled by maxRetries (0=infinite, capped by deadline)
@@ -383,9 +425,10 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
     while (true) {
       // Total duration fallback: when maxRetries=0 (infinite), prevent permanent hang under sustained upstream congestion
       if (deadline > 0 && Date.now() >= deadline) break;
+      if (clientSignal?.aborted) break;
 
       attempts++;
-      lastResponse = await singleFetch(url, finalFetchOptions, { ...commonCtx });
+      lastResponse = await singleFetch(url, finalFetchOptions, { ...commonCtx, signal: clientSignal });
       upstreamStatus = lastResponse.status;
 
       // Streaming request special handling: after getting the response, first check the status
@@ -412,24 +455,25 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
       // Reached the limit (effectiveMax=0 in serial mode = infinite, no break; off already broke above)
       if (effectiveMax > 0 && attempts > effectiveMax) break;
 
-      // Wait
-      const retryAfter = lastResponse.headers?.get?.('retry-after') || lastResponse.headers?.get?.('Retry-After');
-      const wait = computeWaitMs(status, retryAfter, cfg);
-      if (wait > 0) await sleep(wait);
+      // Release the failed response's body BEFORE waiting — holding an
+      // undrained body across the sleep pins the upstream socket for the
+      // whole interval.
+      discardBody(lastResponse);
 
-      // On network errors, also consume/discard the body (avoid socket hang)
-      if (lastResponse.body && lastResponse.body.cancel) {
-        try { await lastResponse.body.cancel(); } catch { /* best effort */ }
-      }
+      // Wait (abortable: a client disconnect ends it early; clamped so a huge
+      // Retry-After can never sleep past the total-duration deadline)
+      const retryAfter = lastResponse.headers?.get?.('retry-after') || lastResponse.headers?.get?.('Retry-After');
+      const wait = clampWaitToDeadline(computeWaitMs(status, retryAfter, cfg), deadline);
+      if (wait > 0) await sleep(wait, clientSignal);
     }
   } else if (cfg.mode === 'race') {
-    const result = await raceMode({ url, fetchOptions: finalFetchOptions, cfg, commonCtx, deadline });
+    const result = await raceMode({ url, fetchOptions: finalFetchOptions, cfg, commonCtx, deadline, clientSignal });
     attempts = result.attempts;
     retryCodes.push(...result.retryCodes);
     lastResponse = result.response;
     if (result.upstreamStatus !== undefined) upstreamStatus = result.upstreamStatus;
   } else if (cfg.mode === 'stagger') {
-    const result = await staggerMode({ url, fetchOptions: finalFetchOptions, cfg, commonCtx, deadline });
+    const result = await staggerMode({ url, fetchOptions: finalFetchOptions, cfg, commonCtx, deadline, clientSignal });
     attempts = result.attempts;
     retryCodes.push(...result.retryCodes);
     lastResponse = result.response;
@@ -463,7 +507,7 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
 
 // ── race mode: each round fans out N concurrent requests, first 200 wins ────
 
-async function raceMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
+async function raceMode({ url, fetchOptions, cfg, commonCtx, deadline, clientSignal }) {
   const retryCodes = [];
   let attempts = 0;
   let round = 0;
@@ -472,56 +516,68 @@ async function raceMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
   const maxRounds = cfg.maxRetries > 0 ? cfg.maxRetries : Infinity;
 
   while (round < maxRounds) {
-    // Total duration fallback
+    // Total duration fallback + client gone
     if (deadline > 0 && Date.now() >= deadline) break;
+    if (clientSignal?.aborted) break;
 
     round++;
+    // Hedged round: launch maxConcurrent attempts and resolve the round the
+    // moment ANY attempt succeeds — the winner must not wait for the slowest
+    // straggler (the old Promise.all design gated the round on the slowest
+    // header arrival and "aborted" losers only after they had already
+    // settled, i.e. never). Losers still pending are aborted immediately;
+    // late settlers after the win just have their bodies discarded.
     const controllers = [];
-    for (let i = 0; i < cfg.maxConcurrent; i++) {
-      controllers.push(new AbortController());
-    }
-
-    const promises = controllers.map((ctl, i) => {
-      // Each request counts independently (race mode attempts = total requests sent)
-      return singleFetch(url, fetchOptions, { ...commonCtx, signal: ctl.signal }).then(r => ({ r, ctl, i }));
+    const roundWinner = await new Promise((resolveRound) => {
+      let settled = 0;
+      let won = false;
+      for (let i = 0; i < cfg.maxConcurrent; i++) {
+        const ctl = new AbortController();
+        controllers.push(ctl);
+        const signal = clientSignal ? AbortSignal.any([clientSignal, ctl.signal]) : ctl.signal;
+        attempts++;
+        singleFetch(url, fetchOptions, { ...commonCtx, signal }).then((r) => {
+          settled++;
+          if (won) {
+            // A winner already streamed to the client — this attempt's body is unwanted.
+            discardBody(r);
+            return;
+          }
+          if (r.status > 0 && r.status < 400) {
+            won = true;
+            for (const c of controllers) {
+              if (c !== ctl) try { c.abort(); } catch { /* best effort */ }
+            }
+            resolveRound(r);
+            return;
+          }
+          // Failure: keep the latest REAL failed response for the final
+          // fallback (discarding the body of the one it replaces), count it.
+          if (r.status !== 0) {
+            retryCodes.push(r.status);
+            if (lastFailed) discardBody(lastFailed);
+            lastFailed = r;
+          } else {
+            retryCodes.push(0);
+          }
+          if (settled >= controllers.length) resolveRound(null);
+        });
+      }
     });
 
-    const results = await Promise.all(promises);
-    attempts += results.length;
-
-    // Find the first 200 (< 400)
-    let winner = null;
-    for (const { r, ctl } of results) {
-      if (r.status > 0 && r.status < 400) {
-        winner = r;
-        // Cancel the rest
-        for (const c of controllers) {
-          if (c !== ctl) try { c.abort(); } catch { /* best effort */ }
-        }
-        break;
-      }
+    if (roundWinner) {
+      if (lastFailed) discardBody(lastFailed); // fallback candidate no longer needed
+      return { response: roundWinner, attempts, retryCodes, upstreamStatus: roundWinner.status };
     }
+    if (clientSignal?.aborted) break;
 
-    if (winner) {
-      return { response: winner, attempts, retryCodes, upstreamStatus: winner.status };
-    }
-
-    // All failed: collect error codes + record the last real failed response
-    for (const { r } of results) {
-      if (r.status !== 0) {
-        retryCodes.push(r.status);
-        lastFailed = r;
-      } else {
-        retryCodes.push(0);
-      }
-    }
-
-    // Wait then next round
-    // race mode computes the wait based on the first error code (429 prefers Retry-After)
-    const firstErr = results[0].r;
-    const retryAfter = firstErr.headers?.get?.('retry-after') || firstErr.headers?.get?.('Retry-After');
-    const wait = computeWaitMs(firstErr.status, retryAfter, cfg);
-    if (wait > 0) await sleep(wait);
+    // All failed → wait then next round. Base the wait on the last real
+    // failure (a network-errored attempt has empty headers and status 0 and
+    // would silently drop an upstream Retry-After carried by a sibling 429).
+    const waitSrc = lastFailed;
+    const retryAfter = waitSrc?.headers?.get?.('retry-after') || waitSrc?.headers?.get?.('Retry-After');
+    const wait = clampWaitToDeadline(computeWaitMs(waitSrc ? waitSrc.status : 0, retryAfter, cfg), deadline);
+    if (wait > 0) await sleep(wait, clientSignal);
   }
 
   // Reached limit/timeout: return the last real failed response (preserving the real status code); fall back to 503 when there is no real failure
@@ -535,7 +591,7 @@ function lastFailedResponse() {
 
 // ── stagger mode: send interleaved, cancel in-flight on any 200 ────────
 
-async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
+async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline, clientSignal }) {
   const retryCodes = [];
   let attempts = 0;
   const inflight = []; // { ctl, promise }
@@ -545,8 +601,9 @@ async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
   const maxTotal = cfg.maxRetries > 0 ? cfg.maxRetries : Infinity;
   let consecutive429 = 0;
 
-  // Timeout/limit/resolved → stop dispatching
+  // Timeout/limit/resolved/client-gone → stop dispatching
   const canLaunch = () => !resolved
+    && !clientSignal?.aborted
     && inflight.length < cfg.maxConcurrent
     && totalAttempts < maxTotal
     && !(deadline > 0 && Date.now() >= deadline);
@@ -554,20 +611,31 @@ async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
   function launchOne() {
     if (!canLaunch()) return false;
     const ctl = new AbortController();
-    const p = singleFetch(url, fetchOptions, { ...commonCtx, signal: ctl.signal }).then(r => {
+    const signal = clientSignal ? AbortSignal.any([clientSignal, ctl.signal]) : ctl.signal;
+    const p = singleFetch(url, fetchOptions, { ...commonCtx, signal }).then(r => {
       // Remove self from inflight
       const idx = inflight.findIndex(x => x.ctl === ctl);
       if (idx >= 0) inflight.splice(idx, 1);
 
-      if (r.status > 0 && r.status < 400) {
-        // Success → cancel all in-flight, set resolved
-        for (const x of inflight) try { x.ctl.abort(); } catch { /* best effort */ }
-        resolved = { response: r, attempts: totalAttempts, retryCodes: [...retryCodes], upstreamStatus: r.status };
+      // Single-winner latch: two attempts can land a 200 in the same tick.
+      // Without this guard the second would overwrite `resolved` with a
+      // response whose body the first winner's cleanup just aborted — the
+      // client would receive a truncated 200.
+      if (resolved) {
+        discardBody(r);
         return;
       }
-      // Failure: record the real failed response
+      if (r.status > 0 && r.status < 400) {
+        // Success → set resolved FIRST (canLaunch relies on it), then cancel all in-flight
+        resolved = { response: r, attempts: totalAttempts, retryCodes: [...retryCodes], upstreamStatus: r.status };
+        for (const x of inflight) try { x.ctl.abort(); } catch { /* best effort */ }
+        return;
+      }
+      // Failure: record the real failed response (keep only the newest body
+      // for the final fallback; drain the one it replaces)
       if (r.status !== 0) {
         retryCodes.push(r.status);
+        if (lastFailed) discardBody(lastFailed);
         lastFailed = r;
       } else {
         retryCodes.push(0);
@@ -606,6 +674,7 @@ async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
   let staggerTimer = null;
   const launch = () => {
     if (resolved) return;
+    if (clientSignal?.aborted) return;
     if (deadline > 0 && Date.now() >= deadline) return;
     if (canLaunch()) launchOne();
     const interval = currentStaggerInterval();
@@ -619,14 +688,20 @@ async function staggerMode({ url, fetchOptions, cfg, commonCtx, deadline }) {
   // Dispatch the first immediately, starting the staggered loop
   launch();
 
-  // Wait for resolved, all complete, or total duration expiry
+  // Wait for resolved, all complete, client disconnect, or total duration expiry
   await new Promise((resolve) => {
     const check = () => {
       if (resolved) { resolve(); return; }
+      if (clientSignal?.aborted && inflight.length === 0) { resolve(); return; }
       if (deadline > 0 && Date.now() >= deadline) { resolve(); return; }
       if (inflight.length === 0 && (totalAttempts >= maxTotal || !canLaunch())) { resolve(); return; }
       setTimeout(check, 50);
     };
+    // A client disconnect aborts every in-flight attempt right away (their
+    // settle handlers then drain via the aborted pseudo-responses).
+    clientSignal?.addEventListener('abort', () => {
+      for (const x of inflight) try { x.ctl.abort(); } catch { /* best effort */ }
+    }, { once: true });
     check();
   });
 

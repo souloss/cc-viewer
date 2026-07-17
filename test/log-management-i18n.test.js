@@ -24,8 +24,9 @@ function localeBlockOf(key) {
 }
 
 const KEYS = [
-  'ui.showAllInstanceLogs', // 日志管理顶部「显示全部实例」开关
-  'ui.logInstanceId',       // LogTable 实例(pid)列头
+  'ui.unmigratedV1Hint', // v1 视图未迁移提示行
+  'ui.viewV1Logs',       // v2 视图顶部的 v1 入口链接
+  'ui.backToV2Logs',     // v1 视图顶部的返回链接
 ];
 
 describe('log management i18n — all 18 locales', () => {

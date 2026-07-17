@@ -19,9 +19,6 @@ function getDB() {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
-      if (!db.objectStoreNames.contains('sessions')) {
-        db.createObjectStore('sessions');
-      }
     };
     req.onsuccess = () => {
       _dbInstance = req.result;
@@ -76,6 +73,12 @@ export function getCacheMeta() {
   }
 }
 
+// Wire v3 (V3.S3a): persisted-record protocol gate. NOT a DB_VERSION bump —
+// a version bump wipes every user's cache at upgrade time regardless of the
+// CCV_WIRE_V3 flag (breaking the dark launch); tagging records instead means
+// only a genuine flag-state skew between save and load invalidates.
+const PROTOCOL_VERSION = 1;
+
 export async function saveEntries(projectName, entries) {
   if (!projectName || !Array.isArray(entries) || entries.length === 0) return;
   const myId = ++_writeId;
@@ -86,7 +89,7 @@ export async function saveEntries(projectName, entries) {
     saveMeta(projectName, entries);
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).put({ projectName, entries, ts: Date.now() }, CACHE_KEY);
+      tx.objectStore(STORE_NAME).put({ projectName, entries, ts: Date.now(), protocolVersion: PROTOCOL_VERSION }, CACHE_KEY);
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
     });
@@ -104,6 +107,10 @@ export async function loadEntries(projectName) {
       req.onsuccess = () => {
         const data = req.result;
         if (!data || data.projectName !== projectName || !Array.isArray(data.entries) || data.entries.length === 0) {
+          resolve(null);
+        } else if ((data.protocolVersion || 0) > PROTOCOL_VERSION) {
+          // Written by a newer client shape than this build understands.
+          clearEntries();
           resolve(null);
         } else if (data.ts && Date.now() - data.ts > MAX_AGE) {
           // 缓存超过 7 天，清除并返回 null
@@ -132,48 +139,6 @@ export async function clearEntries() {
     });
   } catch {
     // 静默
-  }
-}
-
-// --- Per-session 存储 (P1 hot/cold) ---
-
-export async function saveSessionEntries(projectName, sessionId, entries) {
-  if (!projectName || entries == null) return;
-  try {
-    const db = await getDB();
-    const key = `${projectName}:${sessionId}`;
-    return new Promise((resolve) => {
-      const tx = db.transaction('sessions', 'readwrite');
-      tx.objectStore('sessions').put({ entries, ts: Date.now() }, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
-    });
-  } catch {
-    // 静默
-  }
-}
-
-export async function loadSessionEntries(projectName, sessionId) {
-  try {
-    const db = await getDB();
-    const key = `${projectName}:${sessionId}`;
-    return new Promise((resolve) => {
-      const tx = db.transaction('sessions', 'readonly');
-      const req = tx.objectStore('sessions').get(key);
-      req.onsuccess = () => {
-        const data = req.result;
-        if (!data || !Array.isArray(data.entries) || data.entries.length === 0) {
-          resolve(null);
-        } else if (data.ts && Date.now() - data.ts > MAX_AGE) {
-          resolve(null);
-        } else {
-          resolve(data.entries);
-        }
-      };
-      req.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
   }
 }
 

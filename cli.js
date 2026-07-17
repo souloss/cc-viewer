@@ -5,7 +5,7 @@ if (process.platform === 'win32' && !process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '16';
 }
 
-import { readFileSync, writeFileSync, existsSync, realpathSync, unlinkSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, unlinkSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -15,6 +15,7 @@ import { INJECT_IMPORT, LEGACY_INJECT_IMPORTS, resolveCliPath, resolveNativePath
 import { ensureHooks, removeAllManagedHooks } from './server/lib/ensure-hooks.js';
 import { injectCliJsAt, removeCliJsInjectionAt, INJECT_START as _INJECT_START, INJECT_END as _INJECT_END, buildInjectBlock as _buildInjectBlock } from './server/lib/cli-inject.js';
 import { normalizeBasePath } from './server/lib/base-path.js';
+import { mergeSettingsIntoArgs } from './server/lib/settings-merge.js';
 import { createHardenedCleanup, installWinKeypressFallback } from './server/lib/term-signals.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -59,6 +60,14 @@ function reportClaudeNotFound(cliPathHint) {
   }
 }
 
+// Tombstone written by --uninstall; blocks the shell hook's background self-heal
+// (`ccv -logger --self-heal`) from silently re-installing the integration.
+// Anchored to the config dir (not LOG_DIR, which honors --log-dir/CCV_LOG_DIR
+// overrides) so --uninstall and the hook always resolve the same path.
+function getUninstallFlagPath() {
+  return resolve(getClaudeConfigDir(), 'cc-viewer', 'uninstalled.flag');
+}
+
 function getShellConfigPath() {
   const shell = process.env.SHELL || '';
   if (shell.includes('zsh')) return resolve(homedir(), '.zshrc');
@@ -93,6 +102,12 @@ function buildShellHook(isNative) {
     '--help', '-h',
   ];
 
+  // Guard shared by both variants: if ccv was uninstalled, the wrapper removes
+  // itself from the live shell and falls back to the real claude binary.
+  // `hash -r` first — otherwise a stale command-hash entry in a long-lived
+  // shell lets `command -v ccv` false-pass once after the binary is deleted.
+  const ccvGoneGuard = `hash -r 2>/dev/null; command -v ccv >/dev/null 2>&1 || { unset -f claude; command claude "$@"; return; }`;
+
   if (isNative) {
     return `${SHELL_HOOK_START}
 claude() {
@@ -102,6 +117,8 @@ claude() {
     command claude "$@"
     return
   fi
+  # If ccv is gone (uninstalled), drop this stale wrapper and use claude directly
+  ${ccvGoneGuard}
   # Pass through certain commands directly without ccv interception
   case "$1" in
     ${passthroughCommands.join('|')})
@@ -127,6 +144,8 @@ claude() {
     command claude "$@"
     return
   fi
+  # If ccv is gone (uninstalled), drop this stale wrapper and use claude directly
+  ${ccvGoneGuard}
   # Pass through certain commands directly without ccv interception
   case "$1" in
     ${passthroughCommands.join('|')})
@@ -148,12 +167,12 @@ claude() {
   if [ -z "$cli_js" ]; then
     # cli.js 消失 → Claude Code 已升级到 2.1.114+（native-only 分发）。
     # 后台重写 hook（下次 shell 就是 native hook），当前调用直接走 native proxy 路径。
-    ( ccv -logger >/dev/null 2>&1 & )
+    ( ccv -logger --self-heal >/dev/null 2>&1 & )
     ccv run -- claude --ccv-internal "$@"
     return $?
   fi
   if ! grep -q "CC Viewer" "$cli_js" 2>/dev/null; then
-    ccv -logger 2>/dev/null
+    ccv -logger --self-heal 2>/dev/null
   fi
   command claude "$@"
 }
@@ -195,7 +214,8 @@ function removeShellHook() {
   for (const f of ['.zshrc', '.zprofile', '.bashrc', '.bash_profile', '.profile']) {
     allPaths.add(resolve(home, f));
   }
-  let lastResult = { path: configPath, status: 'clean' };
+  // Per-file results; empty array = no file contained the hook marker
+  const results = [];
   for (const p of allPaths) {
     try {
       if (!existsSync(p)) continue;
@@ -203,13 +223,19 @@ function removeShellHook() {
       if (!content.includes(SHELL_HOOK_START)) continue;
       const regex = new RegExp(`\\n?${SHELL_HOOK_START}[\\s\\S]*?${SHELL_HOOK_END}\\n?`, 'g');
       const newContent = content.replace(regex, '\n');
+      if (newContent === content) {
+        // START marker present but the block is malformed (e.g. END marker damaged):
+        // leave the file untouched instead of reporting a removal that didn't happen
+        results.push({ file: p, status: 'corrupt' });
+        continue;
+      }
       writeFileSync(p, newContent);
-      lastResult = { path: p, status: 'removed' };
+      results.push({ file: p, status: 'removed' });
     } catch (err) {
-      lastResult = { path: p, status: 'error', error: err.message };
+      results.push({ file: p, status: 'error', error: err.message });
     }
   }
-  return lastResult;
+  return results;
 }
 
 function injectCliJs() {
@@ -222,6 +248,9 @@ function removeCliJsInjection() {
 
 async function runProxyCommand(args) {
   try {
+    // P2 detection channel ①（shell-hook 形态）：`claude -c` 经 hook 变成
+    // `ccv run -- claude --ccv-internal -c …`，在 proxy/server 模块加载前打标。
+    markContinueEnv(args);
     // Dynamic import to avoid side effects when just installing
     const { startProxy } = await import('./server/proxy.js');
     const proxyPort = await startProxy();
@@ -269,17 +298,34 @@ async function runProxyCommand(args) {
     // 剥离 cc-viewer 的内部短路开关，避免泄漏给 claude 子进程
     delete env.CCV_SKIP_THINKING_DISPLAY;
 
-    const settingsJson = JSON.stringify({
+    const settingsObj = {
       env: {
         ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL
       }
-    });
+    };
+    let settingsJson = JSON.stringify(settingsObj);
+
+    const isClaudeCmd = cmd === 'claude' || /[\\/]claude(\.exe)?$/.test(cmd);
+
+    // Fold a user-supplied --settings into the injected settings and emit a single flag
+    // (claude is last-wins for duplicate --settings; two parallel flags let the user's
+    // silently clobber the injected ANTHROPIC_BASE_URL and break capture). claude only:
+    // another tool's --settings belongs to that tool and must not be touched.
+    // Runs on the RAW cmdArgs BEFORE the --thinking-display append below: otherwise a
+    // trailing valueless user --settings would consume our appended token as its value.
+    if (isClaudeCmd) {
+      const settingsMerge = mergeSettingsIntoArgs(cmdArgs, settingsObj, { cwd: process.cwd() });
+      if (settingsMerge.warningDetail) {
+        console.warn(t('cli.settingsMergeFailed', settingsMerge.warningDetail));
+      }
+      settingsJson = settingsMerge.settingsJson;
+      cmdArgs = settingsMerge.args;
+    }
 
     // 注入默认 --thinking-display summarized，仅对 claude 二进制（其他命令如 `ccv run -- sometool` 跳过）。
     // 若 claude 不识别该 flag（老版本/fork）会 unknown option 崩溃——由 pty-manager.js::spawnClaude 的
     // onExit reactive retry 兜底；cli.js 这条路径是一次性子进程，没有 respawn 机会，用户需手动重试。
     // 可通过环境变量 CCV_SKIP_THINKING_DISPLAY=1 强制跳过。
-    const isClaudeCmd = cmd === 'claude' || /[\\/]claude(\.exe)?$/.test(cmd);
     if (isClaudeCmd && process.env.CCV_SKIP_THINKING_DISPLAY !== '1') {
       const { withDefaultThinkingDisplay } = await import('./server/pty-manager.js');
       cmdArgs = withDefaultThinkingDisplay(cmdArgs);
@@ -306,16 +352,41 @@ async function runProxyCommand(args) {
 
 // ensureHooks() extracted to server/lib/ensure-hooks.js (shared with electron/tab-worker.js)
 
-// Print the `--pid` instance id + this project's previously-used ids in the startup banner,
-// so the user can recall which id to reuse (with `-c`) next time. No-op without `--pid`.
-function printInstanceBanner(serverMod) {
+// P2 (-c migration guidance, detection channel ①): the interceptor resolves
+// CCV_CLAUDE_CONTINUE at prompt time, so setting it before the server module
+// loads is sufficient — claude's own -c semantics are untouched.
+function markContinueEnv(claudeArgs) {
+  if (!Array.isArray(claudeArgs)) return;
+  if (claudeArgs.some((a) => a === '-c' || a === '--continue' || a === '-r' || a === '--resume')) {
+    process.env.CCV_CLAUDE_CONTINUE = '1';
+  }
+  // Explicit `-r`/`--resume` targets a session of the user's choosing, while
+  // folder adoption always targets the LATEST main session — so a resume must
+  // keep its pre-adoption behavior (own folder). The CONTINUE env above still
+  // marks the launch for the migrate prompt.
+  if (claudeArgs.some((a) => a === '-r' || a === '--resume')) {
+    process.env.CCV_CLAUDE_RESUME = '1';
+  }
+  // `--fork-session` continues/resumes but mints a NEW session id on purpose —
+  // the interceptor reads this before the server module loads so `-c` folder
+  // adoption is suppressed (claude's own semantics are untouched).
+  if (claudeArgs.includes('--fork-session')) {
+    process.env.CCV_CLAUDE_FORK_SESSION = '1';
+  }
+}
+
+// 1.7.0: legacy v1 logs still present → one localized banner line pointing at
+// `ccv convert` (headless users never see the web migrate prompt).
+async function printMigrationBanner() {
   try {
-    const id = serverMod.getInstanceId && serverMod.getInstanceId();
-    if (!id) return;
-    console.log(`  ${t('cli.instanceId', { id })}`);
-    const known = (serverMod.getKnownInstances && serverMod.getKnownInstances()) || [];
-    const others = known.filter((x) => x !== id);
-    if (others.length) console.log(`  ${t('cli.instanceHistory', { ids: others.join(', ') })}`);
+    const { LOG_DIR } = await import('./findcc.js');
+    const { listConvertibleProjects } = await import('./server/lib/v2/convert.js');
+    const { migrationStatus } = await import('./server/lib/v2/migrate-prompt.js');
+    const pending = listConvertibleProjects(LOG_DIR)
+      .filter((p) => migrationStatus(LOG_DIR, p).pending);
+    if (pending.length > 0) {
+      console.log(`  ${t('cli.v1LogsFound', { count: pending.length })}`);
+    }
   } catch { /* banner is best-effort */ }
 }
 
@@ -446,7 +517,7 @@ async function runCliMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
-  printInstanceBanner(serverMod);
+  await printMigrationBanner();
 
   // 5. 注册退出处理（hardened：watchdog 5s 强退 + 连按 Ctrl+C 立退，
   //    防 Windows 上 ConPTY kill / IM teardown 挂住导致"Ctrl+C 完全无反应"）
@@ -635,7 +706,7 @@ async function runSdkMode(extraClaudeArgs = [], cwd, noOpen = false) {
     if (_auth.password === '') console.error(`  ${t('server.passwordEmptyWarn')}`);
     else console.log(`  ${t('server.passwordActive', { password: _auth.password })}`);
   }
-  printInstanceBanner(serverMod);
+  await printMigrationBanner();
 
   // 注册退出处理（hardened，与 PTY 模式同款三层防御）
   const cleanup = createHardenedCleanup({
@@ -661,9 +732,9 @@ const logDirIdx = args.indexOf('--log-dir');
 if (logDirIdx !== -1) {
   const logDirVal = args[logDirIdx + 1];
   if (logDirVal && !logDirVal.startsWith('-')) {
-    const prevDir = LOG_DIR;
-    setLogDir(logDirVal);
-    if (LOG_DIR === prevDir) {
+    // setLogDir returns false only on a rejected path; comparing LOG_DIR
+    // before/after mis-rejected a --log-dir equal to the current default.
+    if (!setLogDir(logDirVal)) {
       console.error(`Error: --log-dir path rejected (must be under home directory or /tmp/): ${logDirVal}`);
       process.exit(1);
     }
@@ -733,29 +804,6 @@ if (usePwdIdx !== -1) {
   args.splice(usePwdIdx, 1);
 }
 
-// Extract --pid[=<name>] / --pid <name> — instance id for per-instance session-pin isolation.
-// NB: "pid" here is an instance *id* LABEL (user-chosen, e.g. alpha/beta), NOT an OS process id —
-// it only keys the session-pin file `.session-pin.<id>.json`; unrelated to process.pid.
-// ccv-owned (NEVER forwarded to claude — an unknown --pid would otherwise crash claude): sets
-// CCV_INSTANCE_ID and splices out. Sanitized to a filesystem-safe token (it becomes part of a
-// `.session-pin.<id>.json` filename → guard against path traversal / invalid names).
-const pidIdx = args.findIndex((a) => a === '--pid' || a.startsWith('--pid='));
-if (pidIdx !== -1) {
-  const arg = args[pidIdx];
-  let rawVal;
-  if (arg.startsWith('--pid=')) {
-    rawVal = arg.slice('--pid='.length);
-    args.splice(pidIdx, 1);
-  } else {
-    rawVal = args[pidIdx + 1];
-    if (rawVal && !rawVal.startsWith('-')) args.splice(pidIdx, 2);
-    else { console.error(t('cli.pidInvalid')); process.exit(1); }
-  }
-  const sanitized = (rawVal || '').replace(/[^a-zA-Z0-9_\-.]/g, '_');
-  if (!sanitized) { console.error(t('cli.pidInvalid')); process.exit(1); }
-  process.env.CCV_INSTANCE_ID = sanitized;
-}
-
 // Extract --im <platformId> — 启动一个独立常驻 IM worker：工作目录 IM_<id>/、绑 127.0.0.1、
 // skip-permissions、全局唯一锁。必须在动态 import 之前提取（runImMode 会在 import server.js 前设 env）。
 let imPlatform = null;
@@ -794,7 +842,7 @@ if (isVersion) {
 
 if (isUninstall) {
   const cliResult = removeCliJsInjection();
-  const shellResult = removeShellHook();
+  const shellResults = removeShellHook();
 
   if (cliResult === 'removed' || cliResult === 'clean') {
     console.log(t('cli.uninstall.cliCleaned'));
@@ -804,12 +852,18 @@ if (isUninstall) {
     console.log(t('cli.uninstall.cliFail'));
   }
 
-  if (shellResult.status === 'removed') {
-    console.log(t('cli.uninstall.hookRemoved', { path: shellResult.path }));
-  } else if (shellResult.status === 'clean' || shellResult.status === 'not_found') {
-    console.log(t('cli.uninstall.hookClean', { path: shellResult.path }));
+  if (shellResults.length === 0) {
+    console.log(t('cli.uninstall.hookClean', { path: getShellConfigPath() }));
   } else {
-    console.log(t('cli.uninstall.hookFail', { error: shellResult.error }));
+    for (const r of shellResults) {
+      if (r.status === 'removed') {
+        console.log(t('cli.uninstall.hookRemoved', { path: r.file }));
+      } else if (r.status === 'corrupt') {
+        console.log(t('cli.uninstall.corruptBlock', { file: r.file }));
+      } else {
+        console.log(t('cli.uninstall.hookFail', { file: r.file, error: r.error }));
+      }
+    }
   }
 
   // 清理 settings.json 里的 cc-viewer-managed hooks + 历史 statusLine 残留
@@ -852,12 +906,40 @@ if (isUninstall) {
     }
   } catch { }
 
+  // Tombstone: stale hooks in still-open shells background `ccv -logger --self-heal`,
+  // which would otherwise re-install everything right after this uninstall.
+  try {
+    mkdirSync(resolve(getClaudeConfigDir(), 'cc-viewer'), { recursive: true });
+    writeFileSync(getUninstallFlagPath(), new Date().toISOString() + '\n');
+  } catch { }
+
   console.log(t('cli.uninstall.reloadShell'));
   console.log(t('cli.uninstall.done'));
   process.exit(0);
 }
 
 if (isLogger) {
+  // Tombstone check must run before mode detection: a backgrounded self-heal with
+  // claude fully uninstalled must exit 0 silently, not emit reportClaudeNotFound noise.
+  try {
+    const flagPath = getUninstallFlagPath();
+    if (existsSync(flagPath)) {
+      if (args.includes('--self-heal')) {
+        // Explicitly uninstalled — never let a stale hook resurrect the integration
+        process.exit(0);
+      }
+      const ageMs = Date.now() - statSync(flagPath).mtimeMs;
+      const GRACE_MS = 10 * 60 * 1000;
+      if (ageMs < GRACE_MS && !args.includes('--force')) {
+        // Old deployed hooks self-heal via plain `ccv -logger`; a grace period keeps
+        // them from wiping a fresh tombstone during the uninstall race window.
+        console.log(t('cli.logger.justUninstalled'));
+        process.exit(0);
+      }
+      unlinkSync(flagPath);
+    }
+  } catch { }
+
   // 模式选择：有 cli.js 就走 npm 注入模式（pre-2.1.113），没有就走 native proxy
   // 模式（2.1.114+）。单一判据，不再靠 realpath 的启发式。
   const nativePath = resolveNativePath();
@@ -929,12 +1011,85 @@ if (imPlatform) {
     console.error('IM mode error:', err);
     process.exit(1);
   });
+} else if (args[0] === 'verify') {
+  // wire-v2 S4: dual-write consistency check (docs/refactor/WIRE_FORMAT_V2_PLAN.md S4)
+  // Usage: ccv verify <v1-log.jsonl> [more.jsonl ...] — compares each v1 file
+  // against its project's v2 session dirs; exit 0 = zero diffs.
+  (async () => {
+    const files = args.slice(1).filter(a => a.endsWith('.jsonl'));
+    if (files.length === 0) {
+      console.error('usage: ccv verify <v1-log.jsonl> [more.jsonl ...]');
+      process.exit(2);
+    }
+    const { verifyV1File, renderReport } = await import('./server/lib/v2/verify.js');
+    let allOk = true;
+    for (const f of files) {
+      const report = await verifyV1File(resolve(f));
+      console.log(renderReport(report));
+      if (!report.ok) allOk = false;
+    }
+    process.exit(allOk ? 0 : 1);
+  })().catch(err => {
+    console.error('verify error:', err);
+    process.exit(1);
+  });
+} else if (args[0] === 'convert') {
+  // wire-v2 S8: offline v1→v2 migration (docs/refactor/WIRE_FORMAT_V2_PLAN.md S8)
+  // Usage: ccv convert <project> [more-projects ...] | ccv convert --all
+  //        [--log-dir <dir>] — chronological per project, file-level resume,
+  // staging + golden verify + promote. Strictly additive: v1 files untouched.
+  (async () => {
+    const { convertProject, listConvertibleProjects, QUARANTINE_DIR_NAME } = await import('./server/lib/v2/convert.js');
+    const rest = args.slice(1);
+    const dirIdx = rest.indexOf('--log-dir');
+    let logDir = LOG_DIR;
+    if (dirIdx !== -1) {
+      logDir = resolve(rest[dirIdx + 1] || '');
+      rest.splice(dirIdx, 2);
+    }
+    const all = rest.includes('--all');
+    const projects = all ? listConvertibleProjects(logDir) : rest.filter(a => !a.startsWith('-'));
+    if (projects.length === 0) {
+      console.error('usage: ccv convert <project> [more-projects ...] | ccv convert --all  [--log-dir <dir>]');
+      process.exit(2);
+    }
+    let allOk = true;
+    for (const project of projects) {
+      console.error(`converting ${project} (${logDir}) ...`);
+      try {
+        const state = await convertProject(logDir, project, {
+          onProgress: (p) => {
+            if (p.phase === 'done') return;
+            console.error(`  [${p.phase}] ${p.file} (${p.fileIndex}/${p.filesTotal}) entries=${p.entries} sessions=${p.sessionsConverted} skipped=${p.sessionsSkipped}`);
+          },
+        });
+        const quarantined = state.sessionsQuarantined || 0;
+        console.error(`  ${project}: ${state.status} — ${state.sessionsConverted} sessions converted, ${state.sessionsSkipped} skipped${quarantined ? `, ${quarantined} quarantined` : ''}, ${state.entries} entries`);
+        if (quarantined > 0) {
+          // Non-blocking: the good sessions promoted; only the flagged ones are held.
+          console.error(`  WARNING: ${quarantined} session(s) failed golden verify and were held in ${QUARANTINE_DIR_NAME}/ (not promoted). Suspect sessions:`);
+          for (const q of state.quarantined || []) {
+            console.error(`    - ${q.sessionId}${q.reasons && q.reasons.length ? ` (${q.reasons.slice(0, 5).join(', ')})` : ''}`);
+          }
+        }
+        if (state.status !== 'done') allOk = false;
+      } catch (err) {
+        console.error(`  ${project}: FAILED — ${err.message}`);
+        allOk = false;
+      }
+    }
+    process.exit(allOk ? 0 : 1);
+  })().catch(err => {
+    console.error('convert error:', err);
+    process.exit(1);
+  });
 } else if (args[0] === 'run') {
   runProxyCommand(args);
 } else if (args.includes('-SDK') || args.includes('--sdk')) {
   // SDK 模式（显式 -SDK 切换）
   const claudeArgs = args.filter(a => a !== '-SDK' && a !== '--sdk')
     .map(a => a === '--d' ? '--dangerously-skip-permissions' : a === '--ad' ? '--allow-dangerously-skip-permissions' : a);
+  markContinueEnv(claudeArgs);
   runSdkMode(claudeArgs, process.cwd(), noOpen).catch(err => {
     console.error('SDK mode error:', err);
     process.exit(1);
@@ -942,6 +1097,7 @@ if (imPlatform) {
 } else {
   // PTY 模式（默认）
   const claudeArgs = args.map(a => a === '--d' ? '--dangerously-skip-permissions' : a === '--ad' ? '--allow-dangerously-skip-permissions' : a);
+  markContinueEnv(claudeArgs);
   runCliMode(claudeArgs, process.cwd(), noOpen).catch(err => {
     console.error('CLI mode error:', err);
     process.exit(1);

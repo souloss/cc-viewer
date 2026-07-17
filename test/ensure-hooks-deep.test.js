@@ -227,7 +227,7 @@ describe('ensure-hooks-deep: 导出的纯函数 helper', () => {
     assert.equal(mod._hookObjEqual({ type: 'command', command: 'c', timeout: 999 }, mod._buildHookObj('c')), false);
   });
 
-  it('removeAllManagedHooks：清所有带 marker 的 entry（Pre+Stop），第三方保留', () => {
+  it('removeAllManagedHooks：清所有带 marker 的 entry（Pre+Stop+SessionStart），第三方保留', () => {
     const settings = {
       hooks: {
         PreToolUse: [
@@ -237,13 +237,34 @@ describe('ensure-hooks-deep: 导出的纯函数 helper', () => {
         Stop: [
           { hooks: [{ type: 'command', command: 'node "/t.js" # cc-viewer-managed' }] },
         ],
+        SessionStart: [
+          { hooks: [{ type: 'command', command: 'node "/s.js" # cc-viewer-managed' }] },
+          { matcher: 'startup', hooks: [{ type: 'command', command: 'node "/user-own.js"' }] },
+        ],
       },
     };
     const removed = mod.removeAllManagedHooks(settings);
-    assert.equal(removed, 2);
+    assert.equal(removed, 3);
     assert.equal(settings.hooks.PreToolUse.length, 1);
     assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read');
     assert.equal(settings.hooks.Stop.length, 0);
+    assert.equal(settings.hooks.SessionStart.length, 1, '第三方 SessionStart 条目保留');
+    assert.equal(settings.hooks.SessionStart[0].matcher, 'startup');
+  });
+
+  it('stale session-start-bridge 路径被 purge 后由主流程重建', () => {
+    writeSettings({
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: 'command', command: '[ -n "$CCVIEWER_PORT" ] && node "/abs/old/lib/session-start-bridge.js" || true # cc-viewer-managed', timeout: 3600 }] },
+        ],
+      },
+    });
+    mod.ensureHooks();
+    const s = loadSettings();
+    const entries = s.hooks.SessionStart.filter(h => (h.hooks?.[0]?.command || '').includes('session-start-bridge.js'));
+    assert.equal(entries.length, 1, 'stale 条目被 purge，重建唯一一条');
+    assert.match(entries[0].hooks[0].command, /server\/lib\/session-start-bridge\.js|server\\lib\\session-start-bridge\.js/);
   });
 
   it('removeAllManagedHooks：无 hooks key / 非数组 section → 返回 0，不崩', () => {

@@ -58,13 +58,25 @@ Efter at programmeringstilstanden er startet, åbnes en webside automatisk.
 
 cc-viewer findes også som native desktop-app: [Downloadside](https://github.com/weiesky/cc-viewer/releases)
 
+### Opgradering til 1.7.0 (logformat v2)
+
+Fra 1.7.0 gemmes logs i et format med én mappe pr. session (wire-format v2) i stedet for enkelte `.jsonl`-filer — cirka 90 % mindre diskplads. Eksisterende v1-`.jsonl`-filer bliver aldrig ændret eller slettet; logdialogen viser som standard v2-sessioner, og en lille post “Vis ældre (v1) logs” (vises, så længe der findes gamle filer) åbner en v1-visning, hvor de kan ses, migreres eller slettes. Ved opstart tilbyder cc-viewer migrering med ét klik, når der findes ældre logs (stærkt anbefalet, når du fortsætter en gammel samtale med `claude -c`, hvis første halvdel ligger i de gamle filer). Du kan også migrere fra terminalen:
+
+```bash
+ccv convert <project>   # migrér ét projekt
+ccv convert --all       # migrér alle projekter
+ccv verify <v1-file>    # kontrollér en v1-fil mod dens konverterede sessioner
+```
+
+Hvis en session ikke består golden-verifikationen, holdes den tilbage i `sessions-quarantine/` til inspektion i stedet for at få hele migreringen til at mislykkes – de øvrige sessioner migreres stadig.
+
 ### Logger-tilstand
 
 Hvis du stadig foretrækker det native claude-værktøj eller VS Code-udvidelsen, skal du bruge denne tilstand.
 
 I denne tilstand starter `claude`
 
-automatisk en logningsproces, der registrerer anmodningslogs til \~/.claude/cc-viewer/*yourproject*/date.jsonl
+automatisk en logningsproces, der registrerer anmodningslogs til mapper pr. session under \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Start logger-tilstand:
 
@@ -140,7 +152,7 @@ Modalen **Rediger systemprompt** (hamburgermenu → Rediger systemprompt) er opd
 
 * Fanen **Standard** bevarer den klassiske adfærd: den skriver `CC_SYSTEM.md` (overskriv) eller `CC_APPEND_SYSTEM.md` (tilføj) i det aktuelle arbejdsområde, injiceret som `--system-prompt-file` / `--append-system-prompt-file` ved næste ccv-start.
 * **Modelfaner**: klik på **+ Tilføj model**, indtast et navn som `opus` eller `Gemini3`, og vælg et omfang — **Global** (`~/.claude/cc-viewer/system_prompt/`, gælder for alle arbejdsområder) eller **Arbejdsområde** (`<project>/system_prompt/`). Hver fane har sin egen Tilføj/Overskriv-kontakt og Markdown-forhåndsvisning.
-* Posterne gemmes som filer med store bogstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (tilføj). Matchningen er fuzzy — en delstreng, uden forskel på store og små bogstaver, af det model-ID der blev brugt ved seneste start, så `opus` matcher `claude-opus-4-8[1m]` uanset version. Et match i arbejdsområdet slår et globalt; inden for et omfang vinder det længste navn; en matchet post erstatter fuldstændigt Standard-filerne for den pågældende start.
+* Posterne gemmes som filer med store bogstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (tilføj). Matchningen er fuzzy — en delstreng, uden forskel på store og små bogstaver, af det model-ID der udledes af den AKTIVE konfiguration (den aktive tredjeparts proxy-profils modeltilknytning > miljøvariablerne `ANTHROPIC_MODEL`/`CLAUDE_MODEL` ved start > `model` i `settings.json`; uden konfigurationssignal injiceres ingen post), så `opus` matcher `claude-opus-4-8[1m]` uanset version. Et match i arbejdsområdet slår et globalt; inden for et omfang vinder det længste navn; en matchet post erstatter fuldstændigt Standard-filerne for den pågældende start. Kendte begrænsninger: skift af proxy-profil midt i en session matches først igen efter genstart af claude-sessionen; et `--model`-flag sendt via ekstra argumenter tages ikke i betragtning.
 * Gemmes en fane tom, slettes posten. Modelskift foretaget midt i en session træder i kraft ved næste genstart. Sæt `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` for at deaktivere al automatisk injektion. Du kan committe `<project>/system_prompt/` for at dele prompter med dit team, eller tilføje den til `.gitignore` for at holde dem private.
 
 ### Logger-tilstand (Se komplette Claude Code-sessioner)

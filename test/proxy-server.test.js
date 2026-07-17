@@ -19,10 +19,20 @@ process.env.CCV_DEBUG = '1';
 
 // A controllable upstream. Each request reads `mode` off the global to pick a behavior.
 let upstream, upstreamPort, mode;
+let overloadedRemaining = 0; // for mode '529-then-200'
 function startUpstream() {
   return new Promise((resolve) => {
     upstream = createServer((req, res) => {
-      if (mode === 'ok-stream') {
+      if (mode === '529-then-200') {
+        if (overloadedRemaining > 0) {
+          overloadedRemaining--;
+          res.writeHead(529, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'overloaded' } }));
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: 'recovered' }));
+        }
+      } else if (mode === 'ok-stream') {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: hello\n\n');
         res.end('data: done\n\n');
@@ -148,6 +158,29 @@ describe('startProxy live forwarding', () => {
     const res = await proxyReq('/v1/x', { method: 'GET' });
     assert.equal(res.status, 204);
     assert.equal(res.body, '');
+  });
+});
+
+describe('retry engine end-to-end (live proxy, serial 529 → 200)', () => {
+  it('retries an overloaded upstream and returns the eventual 200 with X-Forward-Attempts', async () => {
+    // Drive the REAL handleLlmApiRequest → executeRequest path: write
+    // retry-config.json into the isolated LOG_DIR and refresh the live
+    // binding directly (the 1.5s watchFile poll is too slow for a test).
+    const { RETRY_CONFIG_PATH, _loadRetryConfigState } = await import('../server/interceptor.js');
+    writeFileSync(RETRY_CONFIG_PATH, JSON.stringify({ mode: 'serial', maxRetries: 5, retryIntervalMs: 10, connectTimeoutMs: 0 }));
+    _loadRetryConfigState();
+    try {
+      mode = '529-then-200';
+      overloadedRemaining = 2;
+      const res = await proxyReq('/v1/messages', { body: JSON.stringify({ model: 'claude-3' }) });
+      assert.equal(res.status, 200, 'the retried request must surface the eventual success');
+      assert.match(res.body, /recovered/);
+      assert.equal(res.headers['x-forward-attempts'], '3', 'two 529s + the winning attempt');
+      assert.equal(overloadedRemaining, 0, 'upstream actually served the failing attempts');
+    } finally {
+      rmSync(RETRY_CONFIG_PATH, { force: true });
+      _loadRetryConfigState(); // back to env defaults (mode off) for the other cases
+    }
   });
 });
 

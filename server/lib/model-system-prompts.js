@@ -4,18 +4,22 @@ import { isNonEmptyFile } from './system-prompt-files.js';
 
 // 「按模型定制 system prompt」的文件夹与文件名语法。
 // 全局目录 <LOG_DIR>/system_prompt/ 与工作区目录 <workspace>/system_prompt/ 各放一套；
-// 启动时用「上次启动所用模型 id」做不区分大小写的子串匹配(条目名 "OPUS" 命中
-// "claude-opus-4-8[1m]")，命中的文件整体取代工作区默认的 CC_SYSTEM.md / CC_APPEND_SYSTEM.md。
+// 启动时用「当前生效配置解析出的模型 id」(spawn-model-resolver.js：激活的三方 proxy profile
+// 模型映射 > env > settings.json；无配置信号则不注入)做不区分大小写的子串匹配(条目名
+// "OPUS" 命中 "claude-opus-4-8[1m]")，命中的文件整体取代工作区默认的 CC_SYSTEM.md /
+// CC_APPEND_SYSTEM.md。
 //
 // Model-specific system prompt files. Two scopes share the same folder name
 // (MODEL_PROMPT_DIR): global <LOG_DIR>/system_prompt/ and per-workspace
-// <workspace>/system_prompt/. At spawn the model id from the last launch is
+// <workspace>/system_prompt/. At spawn the model id resolved from the ACTIVE
+// configuration (spawn-model-resolver.js — never from past usage records) is
 // matched case-insensitively as a substring against entry names; a match fully
 // replaces the workspace Default sentinels for that launch.
 //
-// Known limitations (v1, by design):
-// - readClaudeProjectModel filters /haiku/i, so an entry named "haiku" never
-//   matches at spawn (haiku is the auxiliary model; see context-watcher.js).
+// Known limitations (by design):
+// - An entry named "haiku" only matches when haiku is explicitly configured as
+//   the main model (rare but legal); the old last-usage criterion filtered
+//   /haiku/i and could never match it.
 // - Opening ~/.claude/cc-viewer itself as the workspace makes both scopes the
 //   same directory; harmless — the workspace scope short-circuits first.
 export const MODEL_PROMPT_DIR = 'system_prompt';

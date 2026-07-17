@@ -8,7 +8,11 @@ import { buildShellCandidates, getGlobalNodeModulesDir, findPackagedBinary, find
 
 // Test resolveLogDir by spawning a subprocess with different CCV_LOG_DIR values.
 // This avoids module cache busting which dilutes coverage.
-function getLogDirWithEnv(envVal) {
+// production:true 剥掉 NODE_TEST_CONTEXT——L1c 铁闸在测试上下文里会拒绝非 tmp 的显式目录
+// (2026-07-12 数据丢失修复)，断言生产解析语义的用例必须模拟生产环境。
+function getLogDirWithEnv(envVal, { production = false } = {}) {
+  const env = { ...process.env, CCV_LOG_DIR: envVal };
+  if (production) delete env.NODE_TEST_CONTEXT;
   const result = execFileSync(process.execPath, [
     '--input-type=module',
     '-e',
@@ -16,7 +20,7 @@ function getLogDirWithEnv(envVal) {
   ], {
     cwd: join(import.meta.dirname, '..'),
     encoding: 'utf-8',
-    env: { ...process.env, CCV_LOG_DIR: envVal },
+    env,
     timeout: 5000,
   });
   return result;
@@ -35,9 +39,15 @@ describe('findcc: resolveLogDir', () => {
     assert.ok(logDir.includes('cc-viewer-test'));
   });
 
-  it('expands ~/ prefix to homedir', () => {
-    const logDir = getLogDirWithEnv('~/my-logs');
+  it('expands ~/ prefix to homedir (production semantics — L1c rejects non-tmp dirs in tests)', () => {
+    const logDir = getLogDirWithEnv('~/my-logs', { production: true });
     assert.equal(logDir, join(homedir(), 'my-logs'));
+  });
+
+  it('L1c: the same non-tmp explicit dir is forced to the guard dir under NODE_TEST_CONTEXT', () => {
+    const logDir = getLogDirWithEnv('~/my-logs'); // NODE_TEST_CONTEXT inherited from the runner
+    assert.notEqual(logDir, join(homedir(), 'my-logs'));
+    assert.ok(logDir.startsWith(join(tmpdir(), 'cc-viewer-test')), logDir);
   });
 
   it('resolves absolute path as-is', () => {

@@ -4,6 +4,7 @@ import { EditOutlined, DeleteOutlined, PlusOutlined, ImportOutlined } from '@ant
 import { t } from '../../i18n';
 import { isMobile } from '../../env';
 import { apiUrl, appendToken } from '../../utils/apiUrl';
+import { reportSwallowed } from '../../utils/errorReport';
 import { BLUR_MASK_STYLE } from '../../utils/modalMask';
 import ConceptHelp from '../common/ConceptHelp';
 import styles from './ProxyModal.module.css';
@@ -59,9 +60,12 @@ export default function ProxyModal({
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState(null);
   const [importing, setImporting] = useState(false);
 
-  // 从 cc-switch 导入：POST /api/ccswitch-import（local-only），merge 进 profile.json。
-  // 成功后主动重新 GET /api/proxy-profiles 刷新列表（不依赖 SSE——SSE proxy_profile
-  // 事件在 profile:null 时不触发重新 GET，本地有时序问题，直接 fetch 最可靠）。
+  // Import from cc-switch: POST /api/ccswitch-import (local-only) merges into
+  // profile.json. Success is decided STRICTLY on resp.ok + data.ok — the 403
+  // (remote client) and 400 (server exception) shapes carry no imported/updated
+  // counters, so any counter-based heuristic misreads them as success.
+  // After success the list is refetched directly for immediate UI update (the
+  // server also broadcasts SSE proxy_profile {profile:'refresh'} as a fallback).
   const handleImportFromCcSwitch = async () => {
     setImporting(true);
     try {
@@ -70,21 +74,26 @@ export default function ProxyModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ setActive: false }),
       });
-      const data = await resp.json();
-      if (data.error && data.imported === 0 && data.updated === 0) {
-        message.error(t('ui.proxy.ccswitchImportFail') + (data.error ? ': ' + data.error : ''));
-      } else {
+      let data = null;
+      try { data = await resp.json(); } catch (e) { reportSwallowed('fetch.ccswitch-import-json', e); }
+      if (resp.ok && data && data.ok === true) {
         message.success(t('ui.proxy.ccswitchImported', { imported: data.imported || 0, updated: data.updated || 0 }));
-        // 主动重新拉取 profile 列表刷新 UI（导入是列表变化，SSE profile:null 不触发重 GET）
         try {
           const pr = await fetch(appendToken(apiUrl('/api/proxy-profiles')));
           const pd = await pr.json();
           if (pd.profiles && onProxyProfileChange) {
             onProxyProfileChange({ active: pd.active, profiles: pd.profiles });
           }
-        } catch { /* 刷新失败不阻塞，SSE 兜底 */ }
+        } catch (e) { reportSwallowed('fetch.ccswitch-refresh', e); /* SSE refresh is the fallback */ }
+      } else if (data && typeof data.error === 'string' && data.error.startsWith('node:sqlite unavailable')) {
+        // Runtime lacks node:sqlite (Node < 22.5, or 22.x without --experimental-sqlite):
+        // an actionable message beats the generic "cc-switch not detected".
+        message.error(t('ui.proxy.ccswitchNodeUnsupported'));
+      } else {
+        message.error(t('ui.proxy.ccswitchImportFail') + (data && data.error ? ': ' + data.error : ''));
       }
     } catch (err) {
+      reportSwallowed('fetch.ccswitch-import', err);
       message.error(t('ui.proxy.ccswitchImportFail'));
     } finally {
       setImporting(false);
@@ -233,13 +242,14 @@ export default function ProxyModal({
           ))}
         </div>
 
-        <Button block type="dashed" icon={<PlusOutlined />} style={{ marginTop: 12 }} onClick={handleStartNew}>
-          {t('ui.proxy.addProxy')}
-        </Button>
-        <Button block type="dashed" icon={<ImportOutlined />} style={{ marginTop: 8 }} loading={importing} onClick={handleImportFromCcSwitch}>
-          {t('ui.proxy.ccswitchImport')}
-        </Button>
-        <div className={styles.proxyEditHint}>{t('ui.proxy.ccswitchImportHint')}</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <Button type="dashed" icon={<ImportOutlined />} style={{ flex: 1 }} loading={importing} onClick={handleImportFromCcSwitch}>
+            {t('ui.proxy.ccswitchImport')}
+          </Button>
+          <Button type="dashed" icon={<PlusOutlined />} style={{ flex: 1 }} onClick={handleStartNew}>
+            {t('ui.proxy.addProxy')}
+          </Button>
+        </div>
       </div>
   );
 

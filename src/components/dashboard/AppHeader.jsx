@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Space, Tag, Button, Dropdown, Popover, Modal, Collapse, Drawer, Switch, Radio, Tabs, Spin, Input, Select, Segmented, Tooltip, message } from 'antd';
+import { Space, Tag, Button, Dropdown, Popover, Modal, Collapse, Drawer, Switch, Tabs, Spin, Input, Select, Segmented, Tooltip, message } from 'antd';
 import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
 import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
@@ -69,12 +69,11 @@ function makeAuthState(over = {}) {
 // Bridges the useProjectAlias hook into AppHeader (class component). Renders
 // `${liveMonitoringPrefix}${projectName}${alias ? ` (${alias})` : ''}` followed
 // by the inline pencil editor (hidden when isLocalLog / no projectName).
-function HeaderProjectLabel({ projectName, isLocalLog, instanceId }) {
+function HeaderProjectLabel({ projectName, isLocalLog }) {
   const alias = useProjectAlias(projectName);
   return (
     <span className={styles.headerProjectName}>
       {t('ui.liveMonitoring')}{projectName ? `:${projectName}` : ''}
-      {instanceId ? `(${instanceId})` : ''}
       {alias ? ` (${alias})` : ''}
       <ProjectAliasEditor projectName={projectName} isLocalLog={isLocalLog} />
     </span>
@@ -227,7 +226,7 @@ class AppHeader extends React.Component {
   _imStatus = {};
   _onImStatus = (id, info) => {
     const prev = this._imStatus[id];
-    if (prev && prev.enabled === info.enabled && prev.connected === info.connected) return;
+    if (prev && prev.enabled === info.enabled && prev.connected === info.connected && prev.state === info.state) return;
     this._imStatus[id] = info;
     this._pushHeaderModel();
   };
@@ -244,7 +243,12 @@ class AppHeader extends React.Component {
       .filter(p => this._imStatus[p.id] && this._imStatus[p.id].enabled)
       .map(p => {
         const nm = t(p.labelKey);
-        return { id: p.id, connected: !!this._imStatus[p.id].connected, name: (nm && nm !== p.labelKey) ? nm : (p.fallback || p.id) };
+        return {
+          id: p.id,
+          connected: !!this._imStatus[p.id].connected,
+          state: this._imStatus[p.id].state || null, // tri-state for tab-bar consumers; older tab bars ignore it
+          name: (nm && nm !== p.labelKey) ? nm : (p.fallback || p.id),
+        };
       });
     // 钉住的快捷方式：原生 tab bar 渲染所需。基于当前(已按 viewMode 过滤的)描述符过滤，
     // 顺序=用户钉住先后(稳定)，避免 _lastHeaderModelJson 抖动。name=菜单标签(已本地化)，作 title/aria。
@@ -701,7 +705,6 @@ class AppHeader extends React.Component {
       nextProps.isLocalLog !== this.props.isLocalLog ||
       nextProps.localLogFile !== this.props.localLogFile ||
       nextProps.projectName !== this.props.projectName ||
-      nextProps.instanceId !== this.props.instanceId ||
       nextProps.filterIrrelevant !== this.props.filterIrrelevant ||
       nextProps.logDir !== this.props.logDir ||
       nextProps.cliMode !== this.props.cliMode ||
@@ -714,7 +717,6 @@ class AppHeader extends React.Component {
       nextProps.contextBarLocked !== this.props.contextBarLocked ||
       nextProps.contextBarSlot !== this.props.contextBarSlot ||
       nextProps.serverCachedContent !== this.props.serverCachedContent ||
-      nextProps.resumeAutoChoice !== this.props.resumeAutoChoice ||
       nextProps.themeColor !== this.props.themeColor ||
       nextProps.displayScale !== this.props.displayScale ||
       nextProps.autoApproveSeconds !== this.props.autoApproveSeconds ||
@@ -1564,7 +1566,7 @@ class AppHeader extends React.Component {
   }
 
   render() {
-    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, proxyStatsVisible, onToggleProxyStats, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, resumeAutoChoice, onResumeAutoChoiceToggle, onResumeAutoChoiceChange, themeColor, onThemeColorChange, displayScale, onDisplayScaleChange, autoApproveSeconds, onAutoApproveChange } = this.props;
+    const { requestCount, requests = [], viewMode, cacheType, onToggleViewMode, onImportLocalLogs, onLangChange, isLocalLog, localLogFile, projectName, filterIrrelevant, onFilterIrrelevantChange, logDir, onLogDirChange, cliMode, terminalVisible, onToggleTerminal, proxyStatsVisible, onToggleProxyStats, onReturnToWorkspaces, contextWindow, contextBarOptimistic, serverCachedContent, themeColor, onThemeColorChange, displayScale, onDisplayScaleChange, autoApproveSeconds, onAutoApproveChange } = this.props;
     const { countdownText } = this.state;
     // 这 4 个偏好的唯一真相源是 SettingsContext（P0③）。AppHeader 已绑 SettingsContext，
     // 直接派生消费 + 调 updatePreferences，不再经 App 的 prop drilling。默认值与 AppBase._prefValues() 一致。
@@ -1573,7 +1575,6 @@ class AppHeader extends React.Component {
     const expandThinking = !!_prefs.expandThinking;
     const expandDiff = !!_prefs.expandDiff;
     const showFullToolContent = !!_prefs.showFullToolContent;
-    const onlyCurrentSession = !!_prefs.onlyCurrentSession;
 
     const menuItems = this.getMenuItems();
     const isElectronTab = this._isElectronTab();
@@ -1708,7 +1709,7 @@ class AppHeader extends React.Component {
               </Tag>
             ) : null;
           })()}
-          <HeaderProjectLabel projectName={projectName} isLocalLog={isLocalLog} instanceId={this.props.instanceId} />
+          <HeaderProjectLabel projectName={projectName} isLocalLog={isLocalLog} />
           {this.renderContextBarPortal()}
         </Space>
 
@@ -2036,43 +2037,6 @@ class AppHeader extends React.Component {
                   checked={!!collapseToolResults}
                   onChange={(checked) => this.context.updatePreferences({ collapseToolResults: checked })}
                 />
-              </div>
-            )}
-            {/* logfile 只读模式强制全量展示所有 session，隐藏该开关 */}
-            {!this.props.isLocalLog && (
-              <div className={styles.settingsItem}>
-                <span className={styles.settingsLabel}>
-                  {t('ui.onlyCurrentSession')}
-                  <Tooltip title={t('ui.onlyCurrentSession.help')}>
-                    <QuestionCircleOutlined className={styles.settingsHelpIcon} />
-                  </Tooltip>
-                </span>
-                <Switch
-                  checked={!!onlyCurrentSession}
-                  onChange={(checked) => this.context.updatePreferences({ onlyCurrentSession: checked })}
-                />
-              </div>
-            )}
-          </div>
-          <div className={styles.settingsGroupBox}>
-            <div className={styles.settingsGroupTitle}>{t('ui.logSettings')}</div>
-            <div className={styles.settingsItem}>
-              <span className={styles.settingsLabel}>{t('ui.resumeAutoChoice')}</span>
-              <Switch
-                checked={!!resumeAutoChoice}
-                onChange={(checked) => onResumeAutoChoiceToggle && onResumeAutoChoiceToggle(checked)}
-              />
-            </div>
-            {resumeAutoChoice && (
-              <div className={styles.settingsItem}>
-                <Radio.Group
-                  value={resumeAutoChoice}
-                  onChange={(e) => onResumeAutoChoiceChange && onResumeAutoChoiceChange(e.target.value)}
-                  size="small"
-                >
-                  <Radio value="continue">{t('ui.resumeAutoChoice.continue')}</Radio>
-                  <Radio value="new">{t('ui.resumeAutoChoice.new')}</Radio>
-                </Radio.Group>
               </div>
             )}
           </div>

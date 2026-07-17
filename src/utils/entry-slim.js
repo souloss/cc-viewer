@@ -276,6 +276,7 @@ export function createEntrySlimmer(isMainAgentFn) {
   let prevMainIdx = -1;
   let prevMsgCount = 0;
   let prevUserId = null;
+  let prevEpoch = null; // task B: v2 _seqEpoch — a change is a definitive session boundary (never slim across it)
 
   return {
     /**
@@ -293,6 +294,9 @@ export function createEntrySlimmer(isMainAgentFn) {
 
       const count = entry.body.messages.length;
       const userId = entry.body.metadata?.user_id || null;
+      const epoch = entry._seqEpoch || null;
+      // Three-part guard (never two-part): only when BOTH sides carry an epoch.
+      const epochChanged = !!(epoch && prevEpoch && epoch !== prevEpoch);
 
       // Preserve the /compact-continuation signal BEFORE this entry can be slimmed
       // by a later one: once body.messages is emptied, isCompactContinuation() can
@@ -310,18 +314,20 @@ export function createEntrySlimmer(isMainAgentFn) {
       // would permanently fail to restore it.
       const isNewSession = prevMsgCount > 0 && (
         (count < prevMsgCount * 0.5 && (prevMsgCount - count) > 4) ||
-        (prevUserId && userId && userId !== prevUserId)
+        (prevUserId && userId && userId !== prevUserId) ||
+        epochChanged
       );
 
       // 瞬态请求过滤（阈值与 App.jsx _flushPendingEntries 保持一致：>4）
-      if (isNewSession && count <= 4 && prevMsgCount > 4) {
+      // epoch 变化=确定性新会话，即便短也不可当瞬态丢弃（task B，与 sessionManager 一致）。
+      if (isNewSession && !epochChanged && count <= 4 && prevMsgCount > 4) {
         return entry;
       }
 
       if (isNewSession) {
         prevMainIdx = currentIdx;
         prevMsgCount = count;
-        prevUserId = userId;
+        prevUserId = userId; prevEpoch = epoch;
         return entry;
       }
 
@@ -347,7 +353,7 @@ export function createEntrySlimmer(isMainAgentFn) {
       entry._prevMsgCount = prevMsgCount;
       prevMainIdx = currentIdx;
       prevMsgCount = count;
-      prevUserId = userId;
+      prevUserId = userId; prevEpoch = epoch;
       return entry;
     },
 
@@ -458,6 +464,7 @@ export function createIncrementalSlimmer(isMainAgentFn) {
   let prevMainIdx = -1;
   let prevMsgCount = 0;
   let prevUserId = null;
+  let prevEpoch = null; // task B: v2 _seqEpoch — a change is a definitive session boundary (never slim across it)
   const sessionSlimmedIndices = new Set();
 
   return {
@@ -476,6 +483,9 @@ export function createIncrementalSlimmer(isMainAgentFn) {
 
       const count = entry.body.messages.length;
       const userId = entry.body.metadata?.user_id || null;
+      const epoch = entry._seqEpoch || null;
+      // Three-part guard (never two-part): only when BOTH sides carry an epoch.
+      const epochChanged = !!(epoch && prevEpoch && epoch !== prevEpoch);
 
       // Preserve the /compact-continuation signal before slimming — same rationale
       // as createEntrySlimmer.process(): incrementally-slimmed entries can be
@@ -488,11 +498,13 @@ export function createIncrementalSlimmer(isMainAgentFn) {
       // (clearCheckpoint.js) — see the comment on createEntrySlimmer.process().
       const isNewSession = prevMsgCount > 0 && (
         (count < prevMsgCount * 0.5 && (prevMsgCount - count) > 4) ||
-        (prevUserId && userId && userId !== prevUserId)
+        (prevUserId && userId && userId !== prevUserId) ||
+        epochChanged
       );
 
       // 瞬态请求过滤（阈值与 App.jsx _flushPendingEntries 保持一致：>4）
-      if (isNewSession && count <= 4 && prevMsgCount > 4) {
+      // epoch 变化=确定性新会话，即便短也不可当瞬态丢弃（task B，与 sessionManager 一致）。
+      if (isNewSession && !epochChanged && count <= 4 && prevMsgCount > 4) {
         return entry;
       }
 
@@ -500,7 +512,7 @@ export function createIncrementalSlimmer(isMainAgentFn) {
         sessionSlimmedIndices.clear();
         prevMainIdx = currentIdx;
         prevMsgCount = count;
-        prevUserId = userId;
+        prevUserId = userId; prevEpoch = epoch;
         return entry;
       }
 
@@ -534,7 +546,7 @@ export function createIncrementalSlimmer(isMainAgentFn) {
       entry._prevMsgCount = prevMsgCount;
       prevMainIdx = currentIdx;
       prevMsgCount = count;
-      prevUserId = userId;
+      prevUserId = userId; prevEpoch = epoch;
       return entry;
     },
 

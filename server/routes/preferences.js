@@ -7,6 +7,7 @@ import { PROFILE_PATH, _defaultConfig, getActiveProfileId, setActiveProfileForWo
 import { migrateProxyProfileList } from '../lib/interceptor-core.js';
 import { DEFAULT_RETRY_CONFIG, validateRetryConfig, resolveRetryConfig } from '../lib/proxy-retry.js';
 import { discoverCcSwitchProviders, mergeImportedProfiles } from '../lib/ccswitch-import.js';
+import { reportSwallowed } from '../lib/error-report.js';
 import { setLang } from '../i18n.js';
 import { reconcileVoicePackPrefs as vpReconcile } from '../lib/voice-pack-manager.js';
 import { readClaudeProjectModel } from '../lib/context-watcher.js';
@@ -60,7 +61,6 @@ function preferencesGet(req, res, parsedUrl, isLocal, deps) {
   prefs.logDir = LOG_DIR; // 始终返回当前运行时的日志目录
   // 日志设置出厂默认"继承"：键缺失（从未设置过）才注入；显式关闭持久化的是 null（键存在），不覆盖。
   // 虚拟默认 —— 仅注入回包不落盘（GET 不写文件），直接读 preferences.json 的代码看不到该默认。
-  if (!('resumeAutoChoice' in prefs)) prefs.resumeAutoChoice = 'continue';
   // home-friendly 展示形态：设了 CLAUDE_CONFIG_DIR 的用户看到真实路径，默认用户看到 "~/.claude"
   // join() 而非字符串拼接，避免 Windows 分隔符不匹配导致比较失败
   const _cDir = getClaudeConfigDir();
@@ -170,8 +170,6 @@ function preferencesPost(req, res, parsedUrl, isLocal, deps) {
       delete prefs.prefsByProject; // fork blob 绝不回显（与 GET 一致）
       stripImConfigs(prefs);
       prefs.logDir = LOG_DIR;
-      // 与 GET 一致：回显里补齐 resumeAutoChoice 虚拟默认（已在上方落盘，文件不含该默认值）
-      if (!('resumeAutoChoice' in prefs)) prefs.resumeAutoChoice = 'continue';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(prefs));
     } catch (err) {
@@ -321,7 +319,16 @@ function retryConfigGet(req, res, _parsedUrl, _isLocal, _deps) {
   }
 }
 
-function retryConfigPost(req, res, _parsedUrl, _isLocal, deps) {
+function retryConfigPost(req, res, _parsedUrl, isLocal, deps) {
+  // Local-only, mirroring ccswitchImportPost: retry config is written to a
+  // cross-process file every ccv instance hot-reloads, and race/stagger with
+  // high concurrency multiplies the HOST's paid upstream requests — a LAN
+  // client must not be able to amplify the host's API spend machine-wide.
+  if (!isLocal) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'retry config is local-only' }));
+    return;
+  }
   let body = '';
   req.on('data', chunk => { body += chunk; if (body.length > deps.MAX_POST_BODY) req.destroy(); });
   req.on('end', () => {
@@ -383,7 +390,7 @@ async function ccswitchProvidersGet(req, res, _parsedUrl, isLocal, _deps) {
 async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
   if (!isLocal) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'cc-switch import is local-only' }));
+    res.end(JSON.stringify({ ok: false, error: 'cc-switch import is local-only' }));
     return;
   }
   let body = '';
@@ -398,11 +405,39 @@ async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
         res.end(JSON.stringify({ ok: false, error: result.error, imported: 0, updated: 0 }));
         return;
       }
-      // 读现有 profile.json
+      // Read existing profile.json. A missing file is a legitimate first import,
+      // but a file that exists and fails to parse must ABORT: merging into an
+      // empty base and writing back would silently wipe every user-created
+      // proxy_ profile (existing IS the source of truth here, unlike
+      // proxyProfilesPost where the client sends the full desired list).
       let existing = { profiles: [] };
-      try {
-        if (existsSync(PROFILE_PATH)) existing = JSON.parse(readFileSync(PROFILE_PATH, 'utf-8'));
-      } catch { /* 首次导入无文件 */ }
+      if (existsSync(PROFILE_PATH)) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(readFileSync(PROFILE_PATH, 'utf-8'));
+        } catch (err) {
+          reportSwallowed('ccswitch-import.read-existing', err);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json is unreadable; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        // JSON that parses to a non-object (null, array, number) is just as
+        // destructive to merge into — treat it the same as a parse failure.
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'existing profile.json has an unexpected shape; import aborted to avoid overwriting your profiles',
+            imported: 0, updated: 0,
+          }));
+          return;
+        }
+        existing = parsed;
+      }
       // merge
       const merged = mergeImportedProfiles(existing.profiles || [], result.profiles);
       const toWrite = { ...existing, profiles: merged.profiles };
@@ -435,8 +470,10 @@ async function ccswitchImportPost(req, res, _parsedUrl, isLocal, deps) {
         dbPath: result.dbPath,
       }));
     } catch (err) {
+      // ok:false keeps the response contract uniform — the client decides
+      // success strictly on data.ok, never on the presence of counter fields.
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: String(err && err.message || err) }));
+      res.end(JSON.stringify({ ok: false, error: String(err && err.message || err) }));
     }
   });
 }

@@ -2,20 +2,22 @@
  * interceptor.js — globalThis.fetch hook 行为测试（覆盖 setupInterceptor 主体 485-1069）。
  *
  * 策略：
- *   - 顶层设 CCV_PROXY_MODE=1 跳过模块自执行的 setupInterceptor()（line 1075 条件转 false），
+ *   - 顶层设 CCV_PROXY_MODE=1 跳过模块自执行的 setupInterceptor()，
  *     再在测试里手动 import + 调 setupInterceptor()，从而完整驱动 fetch 拦截链。
  *   - 用一个返回固定 Response 的 fake fetch 占位 globalThis.fetch；setupInterceptor() 会把它
  *     包成 _originalFetch 并安装拦截 wrapper。我们通过 globalThis.fetch(...) 触发整条链路。
- *   - CCV_SYNC_WRITES=1 让 AsyncWriteQueue 走 appendFileSync，写盘后可立即读 LOG_FILE 断言。
- *   - 非 teammate 模式（argv 不含 --agent-name），LOG_FILE 由 cwd 派生自动生成，可读可断言；
- *     setupInterceptor 会动态 import server.js（无副作用：仅注册路由 / export，不 listen）。
+ *   - CCV_SYNC_WRITES=1 让 v2 写队列走 appendFileSync，写盘后可立即经 adapter 读回断言。
+ *   - 1.7.0：写盘只走 v2 session dir（LOG_FILE 恒空）。读回断言统一走
+ *     iterateV2RawEntries(getLiveLogSource())（v2→v1 adapter 合成视图）。session 由请求
+ *     body 的 metadata.user_id(session_id) 决定 —— before() 先发一条带 SID 的引导请求
+ *     建立 _currentSid，之后不带 metadata 的请求按 §8.3 回落路由到同一 session。
  *
  * 注意：所有 env / import 顺序敏感——env 必须在 import('../server/interceptor.js') 之前设好。
  * 该文件不修改任何源码，仅 pin 当前工作区行为。
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, writeFileSync, statSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -32,17 +34,20 @@ const __isoDir = mkdtempSync(join(tmpdir(), 'ccv-itcfetch-'));
 process.env.CCV_LOG_DIR = __isoDir;
 process.env.CLAUDE_CONFIG_DIR = __isoDir;
 
+// 本文件的固定 v2 session（引导请求携带；后续无 metadata 请求 §8.3 回落到它）
+const SID = 'dddd1111-2222-3333-4444-555566667777';
+const USER_ID = JSON.stringify({ device_id: 'd', account_uuid: 'a', session_id: SID });
+
 let mod;
+let iterateV2RawEntries;
 let nextResponse;   // () => Response：每个 test 注入下一次 _originalFetch 的返回
 let lastFetchArgs;  // 记录上游真实收到的 [url, opts]
 
-/** 读取 LOG_FILE 当前内容并按 \n---\n 解析为 entry 数组 */
+/** 经 v2→v1 adapter 读取当前 session 的合成 entry 数组（seq 序） */
 function readEntries() {
-  if (!mod.LOG_FILE || !existsSync(mod.LOG_FILE)) return [];
-  return readFileSync(mod.LOG_FILE, 'utf-8')
-    .split('\n---\n')
-    .filter(p => p.trim())
-    .map(p => JSON.parse(p));
+  const dir = mod.getLiveLogSource();
+  if (!dir) return [];
+  return [...iterateV2RawEntries(dir)].map(p => JSON.parse(p));
 }
 
 /** 拿到「已完成」（无 inProgress 标记）的最后一条 entry */
@@ -81,6 +86,7 @@ function mainAgentBody(messages, extra = {}) {
   return {
     system: [{ type: 'text', text: 'You are Claude Code, the official CLI.' }],
     tools: makeMainAgentTools(),
+    metadata: { user_id: USER_ID },
     messages,
     ...extra,
   };
@@ -93,8 +99,18 @@ before(async () => {
     return nextResponse ? nextResponse(url, opts) : new Response('{}', { status: 200 });
   };
   mod = await import('../server/interceptor.js');
+  ({ iterateV2RawEntries } = await import('../server/lib/v2/adapter.js'));
   mod.setupInterceptor();
-  assert.ok(mod.LOG_FILE, 'LOG_FILE 应被自动初始化（非 workspace / 非 teammate）');
+  assert.equal(mod.LOG_FILE, '', '1.7.0 起 LOG_FILE 恒为空串（v1 写路径已退役）');
+  // 引导请求：携带 SID 建立 _currentSid，让后续无 metadata 请求路由到同一 session。
+  // 用 x-api-key 头 → _defaultConfig 捕获 authType='API Key'（下方用例断言此值）。
+  await globalThis.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': 'kkk' },
+    body: JSON.stringify({ model: 'm', messages: [], metadata: { user_id: USER_ID } }),
+  });
+  await mod._v2Writer.flush();
+  assert.ok(mod.getLiveLogSource().endsWith(SID), '引导请求应建立本文件的固定 v2 session');
 });
 
 after(() => {
@@ -221,22 +237,28 @@ describe('interceptor fetch hook — 请求分类标记', () => {
     assert.equal(entry.isHeartbeat, true);
   });
 
-  it('非 JSON body 被截断为字符串（前 500 字符）', async () => {
+  it('非 JSON body 请求仍被记录为完成条目（v2 不持久化原始字符串 body）', async () => {
+    // v1 曾把非法 JSON body 截断成 500 字符字符串写盘；v2 journal 只记录结构化
+    // 字段（url/method/headers/model/conv 切片），原始字符串 body 不再落盘。
+    // 幸存的不变量：这类请求仍产生一条 completed 条目，且不携带 messages。
     nextResponse = () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    const before = readEntries().filter(e => !e.inProgress).length;
     const longBody = 'x'.repeat(800); // 非法 JSON
     await globalThis.fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': 'kk' },
       body: longBody,
     });
-    const entry = lastCompleted();
-    assert.equal(typeof entry.body, 'string');
-    assert.equal(entry.body.length, 500);
+    const completed = readEntries().filter(e => !e.inProgress);
+    assert.equal(completed.length, before + 1, '非 JSON body 请求仍应记录一条完成条目');
+    const entry = completed[completed.length - 1];
+    assert.equal(entry.url, 'https://api.anthropic.com/v1/messages');
+    assert.equal(entry.body.messages, undefined, '无可解析 messages → 条目不携带会话切片');
   });
 });
 
 describe('interceptor fetch hook — 非流式响应捕获', () => {
-  it('JSON 响应被解析进 response.body，含 status/statusText/headers', async () => {
+  it('JSON 响应被解析进 response.body，含 status/headers', async () => {
     nextResponse = () => new Response(JSON.stringify({ content: [{ type: 'text', text: 'hi' }] }), {
       status: 201, statusText: 'Created', headers: { 'content-type': 'application/json', 'x-foo': 'bar' },
     });
@@ -246,8 +268,9 @@ describe('interceptor fetch hook — 非流式响应捕获', () => {
       body: JSON.stringify({ model: 'm', messages: [] }),
     });
     const entry = lastCompleted();
+    // v2 journal done 行记录 http status；responses.jsonl 记录 headers/body。
+    // statusText 不再持久化（v2 有意收窄——status 数字已足够）。
     assert.equal(entry.response.status, 201);
-    assert.equal(entry.response.statusText, 'Created');
     assert.equal(entry.response.headers['x-foo'], 'bar');
     assert.deepEqual(entry.response.body, { content: [{ type: 'text', text: 'hi' }] });
     assert.ok(typeof entry.duration === 'number');

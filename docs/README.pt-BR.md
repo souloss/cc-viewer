@@ -58,13 +58,25 @@ Após iniciar no modo de programação, uma página web será aberta automaticam
 
 cc-viewer também é distribuído como aplicativo desktop nativo: [Página de download](https://github.com/weiesky/cc-viewer/releases)
 
+### Atualização para 1.7.0 (formato de log v2)
+
+A partir da 1.7.0, os logs são armazenados em um formato de diretório por sessão (wire-format v2) em vez de arquivos `.jsonl` individuais — ocupando cerca de 90% menos espaço em disco. Os arquivos `.jsonl` v1 existentes nunca são modificados nem excluídos; a caixa de diálogo de logs lista as sessões v2 por padrão, e uma pequena entrada “Ver logs legados (v1)” (exibida enquanto houver arquivos antigos) abre uma visualização v1 onde podem ser visualizados, migrados ou excluídos. Na inicialização, o cc-viewer oferece migração com um clique quando encontra logs legados (altamente recomendada ao continuar uma conversa antiga com `claude -c`, cuja primeira metade fica nos arquivos antigos). Você também pode migrar pelo terminal:
+
+```bash
+ccv convert <project>   # migrar um projeto
+ccv convert --all       # migrar todos os projetos
+ccv verify <v1-file>    # verificar um arquivo v1 em relação às suas sessões convertidas
+```
+
+Se uma sessão não passar na verificação golden, ela é retida em `sessions-quarantine/` para inspeção em vez de fazer toda a migração falhar — as demais sessões são migradas normalmente.
+
 ### Modo Logger
 
 Se você ainda prefere a ferramenta nativa claude ou a extensão do VS Code, use este modo.
 
 Neste modo, iniciar `claude`
 
-iniciará automaticamente um processo de registro que salva os logs de solicitações em \~/.claude/cc-viewer/*yourproject*/date.jsonl
+iniciará automaticamente um processo de registro que salva os logs de solicitações em diretórios por sessão dentro de \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Ativar o modo logger:
 
@@ -140,7 +152,7 @@ O modal **Editar prompt do sistema** (menu de hambúrguer → Editar prompt do s
 
 * A aba **Padrão** mantém o comportamento clássico: grava `CC_SYSTEM.md` (sobrescrever) ou `CC_APPEND_SYSTEM.md` (acrescentar) no espaço de trabalho atual, injetado como `--system-prompt-file` / `--append-system-prompt-file` na próxima inicialização do ccv.
 * **Abas de modelo**: clique em **+ Adicionar modelo**, digite um nome como `opus` ou `Gemini3` e escolha um escopo — **Global** (`~/.claude/cc-viewer/system_prompt/`, aplica-se a todos os espaços de trabalho) ou **Espaço de trabalho** (`<project>/system_prompt/`). Cada aba tem seu próprio interruptor Acrescentar/Sobrescrever e sua própria pré-visualização de Markdown.
-* As entradas são armazenadas como arquivos em maiúsculas: `OPUS_SYSTEM.md` (sobrescrever) ou `OPUS_APPEND_SYSTEM.md` (acrescentar). A correspondência é difusa — uma substring, sem distinção entre maiúsculas e minúsculas, do ID do modelo usado na última inicialização, então `opus` corresponde a `claude-opus-4-8[1m]` independentemente da versão. Uma correspondência de espaço de trabalho prevalece sobre uma global; dentro de um escopo, vence o nome mais longo; uma entrada correspondente substitui completamente os arquivos de Padrão para essa inicialização.
+* As entradas são armazenadas como arquivos em maiúsculas: `OPUS_SYSTEM.md` (sobrescrever) ou `OPUS_APPEND_SYSTEM.md` (acrescentar). A correspondência é difusa — uma substring, sem distinção entre maiúsculas e minúsculas, do ID do modelo resolvido a partir da configuração ATIVA (mapeamento de modelo do proxy profile de terceiros ativo > variáveis de ambiente `ANTHROPIC_MODEL`/`CLAUDE_MODEL` na inicialização > `model` do `settings.json`; sem sinal de configuração nenhuma entrada é injetada), então `opus` corresponde a `claude-opus-4-8[1m]` independentemente da versão. Uma correspondência de espaço de trabalho prevalece sobre uma global; dentro de um escopo, vence o nome mais longo; uma entrada correspondente substitui completamente os arquivos de Padrão para essa inicialização. Limitações conhecidas: trocar de proxy profile no meio da sessão só é reavaliado após reiniciar a sessão do claude; um `--model` passado por argumentos extras não é consultado.
 * Salvar uma aba vazia exclui a entrada. Trocas de modelo feitas no meio da sessão são aplicadas na próxima reinicialização. Defina `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` para desativar toda injeção automática. Você pode fazer commit de `<project>/system_prompt/` para compartilhar prompts com sua equipe, ou adicioná-lo ao `.gitignore` para mantê-los privados.
 
 ### Modo Logger (Visualizar sessões completas do Claude Code)

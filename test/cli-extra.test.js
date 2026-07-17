@@ -350,6 +350,8 @@ describeCli('cli: -logger（native 安装路径）', () => {
     const zshrc = readFileSync(join(home, '.zshrc'), 'utf-8');
     assert.ok(zshrc.includes(HOOK_MARK), '应写入 hook marker');
     assert.ok(zshrc.includes('# my config'), '用户原有内容保留');
+    assert.ok(zshrc.includes('hash -r 2>/dev/null; command -v ccv >/dev/null 2>&1 || { unset -f claude; command claude "$@"; return; }'),
+      'installed hook must carry the self-unsetting ccv-missing guard');
   });
 
   it('重复 -logger（hook 已存在且一致）→ 幂等，字节稳定', { skip: SKIP_ON_CI }, () => {

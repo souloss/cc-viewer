@@ -58,13 +58,25 @@ Etter at programmeringsmodusen er startet, åpnes en nettside automatisk.
 
 cc-viewer kommer også som native desktop-app: [Nedlastingsside](https://github.com/weiesky/cc-viewer/releases)
 
+### Oppgradering til 1.7.0 (loggformat v2)
+
+Fra 1.7.0 lagres logger i et format med én mappe per økt (wire-format v2) i stedet for enkeltstående `.jsonl`-filer — omtrent 90 % mindre diskplass. Eksisterende v1-`.jsonl`-filer blir aldri endret eller slettet; loggdialogen viser v2-økter som standard, og en liten oppføring “Vis eldre (v1) logger” (vises så lenge det finnes gamle filer) åpner en v1-visning der de kan vises, migreres eller slettes. Ved oppstart tilbyr cc-viewer migrering med ett klikk når eldre logger blir funnet (sterkt anbefalt når du fortsetter en gammel samtale med `claude -c`, der første halvdel ligger i de gamle filene). Du kan også migrere fra terminalen:
+
+```bash
+ccv convert <project>   # migrer ett prosjekt
+ccv convert --all       # migrer alle prosjekter
+ccv verify <v1-file>    # sjekk en v1-fil mot dens konverterte økter
+```
+
+Hvis en økt ikke består golden-verifiseringen, holdes den tilbake i `sessions-quarantine/` for inspeksjon i stedet for at hele migreringen mislykkes – de øvrige øktene migreres fortsatt.
+
 ### Logger-modus
 
 Hvis du fortsatt foretrekker det native claude-verktøyet eller VS Code-utvidelsen, bruker du denne modusen.
 
 I denne modusen starter `claude`
 
-automatisk en loggprosess som registrerer forespørselslogger til \~/.claude/cc-viewer/*yourproject*/date.jsonl
+automatisk en loggprosess som registrerer forespørselslogger til mapper per økt under \~/.claude/cc-viewer/*yourproject*/sessions/ (wire-format v2)
 
 Start logger-modus:
 
@@ -140,7 +152,7 @@ Modalen **Rediger systemprompt** (hamburgermeny → Rediger systemprompt) er del
 
 * Fanen **Standard** beholder den klassiske oppførselen: den skriver `CC_SYSTEM.md` (overskriv) eller `CC_APPEND_SYSTEM.md` (legg til) i det gjeldende arbeidsområdet, injisert som `--system-prompt-file` / `--append-system-prompt-file` ved neste ccv-oppstart.
 * **Modellfaner**: klikk på **+ Legg til modell**, skriv inn et navn som `opus` eller `Gemini3`, og velg et omfang — **Global** (`~/.claude/cc-viewer/system_prompt/`, gjelder for alle arbeidsområder) eller **Arbeidsområde** (`<project>/system_prompt/`). Hver fane har sin egen Legg til/Overskriv-bryter og Markdown-forhåndsvisning.
-* Oppføringene lagres som filer med store bokstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (legg til). Matchingen er fuzzy — en delstreng, uten skille mellom store og små bokstaver, av modell-ID-en som ble brukt ved forrige oppstart, så `opus` matcher `claude-opus-4-8[1m]` uavhengig av versjon. Et treff i arbeidsområdet slår et globalt; innenfor et omfang vinner det lengste navnet; en matchet oppføring erstatter Standard-filene fullstendig for den oppstarten.
+* Oppføringene lagres som filer med store bokstaver: `OPUS_SYSTEM.md` (overskriv) eller `OPUS_APPEND_SYSTEM.md` (legg til). Matchingen er fuzzy — en delstreng, uten skille mellom store og små bokstaver, av modell-ID-en som utledes fra den AKTIVE konfigurasjonen (modelltilordningen til den aktive tredjeparts proxy-profilen > miljøvariablene `ANTHROPIC_MODEL`/`CLAUDE_MODEL` ved oppstart > `model` i `settings.json`; uten konfigurasjonssignal injiseres ingen oppføring), så `opus` matcher `claude-opus-4-8[1m]` uavhengig av versjon. Et treff i arbeidsområdet slår et globalt; innenfor et omfang vinner det lengste navnet; en matchet oppføring erstatter Standard-filene fullstendig for den oppstarten. Kjente begrensninger: bytte av proxy-profil midt i en økt matches først på nytt etter omstart av claude-økten; et `--model`-flagg sendt via ekstra argumenter tas ikke i betraktning.
 * Lagres en fane tom, slettes oppføringen. Modellbytter gjort midt i en økt trer i kraft ved neste omstart. Sett `CCV_DISABLE_AUTO_SYSTEM_PROMPT=1` for å deaktivere all automatisk injeksjon. Du kan committe `<project>/system_prompt/` for å dele prompter med teamet ditt, eller legge den til i `.gitignore` for å holde dem private.
 
 ### Logger-modus (Se komplette Claude Code-økter)
