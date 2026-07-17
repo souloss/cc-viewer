@@ -187,6 +187,7 @@ class ChatMessage extends React.Component {
       p.requestIndex !== n.requestIndex || p.cacheTotalTokens !== n.cacheTotalTokens || p.label !== n.label || p.isTeammate !== n.isTeammate ||
       p.animateAvatar !== n.animateAvatar ||
       p.isHistoryLog !== n.isHistoryLog ||
+      p.isUltraplan !== n.isUltraplan ||
       p.userProfile !== n.userProfile || p.modelInfo !== n.modelInfo || p.imSenderMap !== n.imSenderMap || p.imAgent !== n.imAgent ||
       p.resultText !== n.resultText || p.toolName !== n.toolName ||
       p.onViewRequest !== n.onViewRequest || p.onOpenFile !== n.onOpenFile ||
@@ -1081,6 +1082,9 @@ class ChatMessage extends React.Component {
           <div className={styles.labelRow}>
             {timeStr && <Text className={styles.timeTextNoMargin}>{timeStr}</Text>}
             {this.renderViewRequestBtn()}
+            {this.props.isUltraplan && (
+              <span className={styles.ultraplanTag}>{t('ui.ultraplan')}</span>
+            )}
             {imBadge
               ? (
                 <span className={styles.imSourceNameGroup}>

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Space, Tag, Button, Dropdown, Popover, Modal, Collapse, Drawer, Switch, Tabs, Spin, Input, Select, Segmented, Tooltip, message } from 'antd';
 import { DISPLAY_SCALE_PRESETS } from '../../utils/displayScaleHelper';
 import { hasNativeZoom, isMac } from '../../env';
-import { MessageOutlined, FileTextOutlined, ImportOutlined, DashboardOutlined, ExportOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, LineChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
+import { MessageOutlined, FileTextOutlined, DashboardOutlined, DownloadOutlined, SettingOutlined, BarChartOutlined, LineChartOutlined, CodeOutlined, CopyOutlined, ApiOutlined, SwapOutlined, EditOutlined, ThunderboltOutlined, QuestionCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 import { QRCodeCanvas } from 'qrcode.react';
 import { formatTokenCount, computeTokenStats, computeCacheRebuildStats, computeToolUsageStats, computeSkillUsageStats, readCalibrationModel, computeContextPercent, sumUsageInputTokens, sumUsageContextTokens } from '../../utils/helpers';
 import { contextSeverityColor } from '../../utils/formatters';
@@ -23,6 +23,7 @@ import { SettingsContext } from '../../contexts/SettingsContext';
 import ConceptHelp from '../common/ConceptHelp';
 import ToolsHelp from '../common/ToolsHelp';
 import OpenFolderIcon from '../common/OpenFolderIcon';
+import DialogueIcon from '../common/DialogueIcon';
 import CachePopoverContent from './CachePopoverContent';
 import LiveTagPopover from './LiveTagPopover';
 import MemoryDetailModal from '../common/MemoryDetailModal';
@@ -151,17 +152,29 @@ class AppHeader extends React.Component {
 
   // Electron 点击回传派发(_handleHeaderAction case 'menuShortcut')。
   // onClick 全部是 bound class-field arrow / inline arrow，可脱离菜单上下文 standalone 调用。
+  // Retry config only applies when traffic goes through a proxy/third-party gateway.
+  // "Confirmed proxy" = a non-built-in profile is active, or the built-in Default
+  // points at a non-official endpoint (same api.anthropic.com test as ProxyModal's
+  // Max warning). Official subscription (or config not yet loaded) → entry hidden.
+  _isProxyMode() {
+    const { activeProxyId, defaultConfig } = this.props;
+    if (activeProxyId && activeProxyId !== 'max') return true;
+    const origin = defaultConfig?.origin || '';
+    return !!origin && !/api\.anthropic\.com/i.test(origin);
+  }
+
   _getMenuDescriptors() {
     const { viewMode, onImportLocalLogs, isLocalLog } = this.props;
     return [
-      { key: 'import-local', icon: <ImportOutlined />, label: t('ui.importLocalLogs'), onClick: onImportLocalLogs },
-      { key: 'export-prompts', icon: <ExportOutlined />, label: t('ui.exportPrompts'), onClick: this.handleShowPrompts },
+      { key: 'import-local', icon: <FileTextOutlined />, label: t('ui.importLocalLogs'), onClick: onImportLocalLogs },
+      { key: 'export-prompts', icon: <MessageOutlined />, label: t('ui.exportPrompts'), onClick: this.handleShowPrompts },
       { key: 'plugin-management', icon: <ApiOutlined />, label: t('ui.pluginManagement'), onClick: this.handleShowPlugins },
       { key: 'process-management', icon: <DashboardOutlined />, label: t('ui.processManagement'), onClick: this.handleShowProcesses },
       // 日志模式下 IM 无法正常配置/使用，隐藏 IM 配置入口
-      ...(isLocalLog ? [] : [{ key: 'messaging', icon: <MessageOutlined />, label: t('ui.messaging.menu'), onClick: () => this.setState({ messagingModalVisible: true, messagingInitialTool: null }) }]),
+      ...(isLocalLog ? [] : [{ key: 'messaging', icon: <DialogueIcon />, label: t('ui.messaging.menu'), onClick: () => this.setState({ messagingModalVisible: true, messagingInitialTool: null }) }]),
       { key: 'proxy-switch', icon: <SwapOutlined />, label: t('ui.proxySwitch'), onClick: () => this.setState({ proxyModalVisible: true }) },
-      { key: 'retry-config', icon: <ThunderboltOutlined />, label: t('ui.retryConfig.title'), onClick: () => this.setState({ retryConfigModalVisible: true }) },
+      // Hidden on official subscription: retry orchestration targets proxy gateways only
+      ...(this._isProxyMode() ? [{ key: 'retry-config', icon: <ThunderboltOutlined />, label: t('ui.retryConfig.title'), onClick: () => this.setState({ retryConfigModalVisible: true }) }] : []),
       { key: 'edit-system-prompt', icon: <EditOutlined />, label: t('ui.expert.systemText'), onClick: () => this.setState({ systemTextModalVisible: true }), dividerAfter: true },
       { key: 'project-stats', icon: <BarChartOutlined />, label: t('ui.projectStats'), onClick: this.handleShowProjectStats },
       ...(viewMode === 'raw' ? [{ key: 'global-settings', icon: <SettingOutlined />, label: t('ui.globalSettings'), onClick: () => this.setState({ globalSettingsVisible: true }) }] : []),

@@ -142,6 +142,22 @@
   margin-left: auto;
 }
 
+/* Small blue "UltraPlan" tag shown inline in the label row (after the view-request
+   button) for UltraPlan inputs. */
+.ultraplanTag {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 0 6px;
+  margin-left: 4px;
+  border-radius: 4px;
+  color: #fff;
+  background: var(--color-primary);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* IM-source icon + username grouped together, kept right-aligned as a unit. */
 .imSourceNameGroup {
   display: inline-flex;

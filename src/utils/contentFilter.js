@@ -285,6 +285,17 @@ export function isSyntheticPromptText(text) {
   return false;
 }
 
+// UltraPlan 输入识别：UltraPlanModal / CLI /ultraplan 都会把 ultraplanTemplates.js
+// 组装的 <system-reminder>[SCOPED INSTRUCTION]…</system-reminder> 模板前置到用户 prompt。
+// 该 marker 仅由 ultraplanTemplates.js 产出，故可作为「本轮是 UltraPlan 输入」的可靠信号。
+// stripSystemTags 会剥掉该块，所以必须在原始（未剥离）文本上判断；用负向前瞻确保 marker
+// 出现在同一个 <system-reminder>…</system-reminder> 块内部（不跨过闭合标签），避免用户正文里
+// 在某个无关 reminder 之后只是「提到」该短语时误判。
+export function isUltraplanText(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /<system-reminder>(?:(?!<\/system-reminder>)[\s\S])*?\[SCOPED INSTRUCTION\]/i.test(text);
+}
+
 export function isSystemText(text) {
   if (!text) return true;
   const trimmed = text.trim();
@@ -469,7 +480,12 @@ export function classifyUserContent(content) {
   // 出现在 textBlocks 中；保留 skillBlocks 键以维持返回 shape（ChatView/ImConversationModal 消费）。
   const skillBlocks = [];
 
-  return { commands, textBlocks, skillBlocks, teammateBlocks, taskNotificationBlocks };
+  // 本轮是否为 UltraPlan 输入（原始文本仍含 <system-reminder>[SCOPED INSTRUCTION] marker，
+  // 此时尚未被 stripSystemTags 剥离）。消费方（ChatView）据此在用户气泡上方渲染 [UltraPlan] 标签。
+  const ultraplan = Array.isArray(content)
+    && content.some(b => b && b.type === 'text' && isUltraplanText(b.text));
+
+  return { commands, textBlocks, skillBlocks, teammateBlocks, taskNotificationBlocks, ultraplan };
 }
 
 /**

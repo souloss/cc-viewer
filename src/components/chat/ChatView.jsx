@@ -15,7 +15,7 @@ import { formatPromptNavTime } from '../../utils/formatters';
 import { buildPromptNavItems } from '../../utils/promptNav';
 import { getTeammateAvatar } from '../../utils/teammateAvatars';
 import { applyAvatarAnimationTargets } from '../../utils/avatarAnimationPostPass';
-import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeammateNames, extractDisplayText } from '../../utils/contentFilter';
+import { isSystemText, classifyUserContent, isMainAgent, isTeammate, resolveTeammateNames, extractDisplayText, isUltraplanText } from '../../utils/contentFilter';
 import { classifyRequest, formatRequestTag, formatTeammateLabel } from '../../utils/requestType';
 import { playEvent as playVoiceEvent } from '../../utils/voicePackPlayer';
 import { buildChunksForAnswer, buildBracketPasteSubmitChunks, BRACKET_PASTE_SUBMIT_SETTLE_MS } from '../../utils/ptyChunkBuilder';
@@ -1341,7 +1341,7 @@ class ChatView extends React.Component {
           if (suggestionText && toolResults.length > 0) {
             // AskUserQuestion 的用户回复：跳过渲染（答案已在 assistant 侧问卷卡片上显示）
           } else {
-            const { commands, textBlocks, skillBlocks, teammateBlocks, taskNotificationBlocks } = classifyUserContent(content);
+            const { commands, textBlocks, skillBlocks, teammateBlocks, taskNotificationBlocks, ultraplan } = classifyUserContent(content);
             // 渲染 slash command 作为独立用户输入
             for (let ci = 0; ci < commands.length; ci++) {
               renderedMessages.push(
@@ -1360,7 +1360,7 @@ class ChatView extends React.Component {
             for (let ti = 0; ti < textBlocks.length; ti++) {
               const isPlan = /Implement the following plan:/i.test(textBlocks[ti].text || '');
               renderedMessages.push(
-                <ChatMessage key={`${keyPrefix}-user-${mi}-${ti}`} role={isPlan ? 'plan-prompt' : 'user'} text={textBlocks[ti].text} lang={this.props.lang} timestamp={ts} userProfile={userProfile} modelInfo={modelInfo} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+                <ChatMessage key={`${keyPrefix}-user-${mi}-${ti}`} role={isPlan ? 'plan-prompt' : 'user'} text={textBlocks[ti].text} isUltraplan={!isPlan && ultraplan} lang={this.props.lang} timestamp={ts} userProfile={userProfile} modelInfo={modelInfo} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
               );
             }
             // 渲染 teammate-message 块
@@ -1420,8 +1420,9 @@ class ChatView extends React.Component {
             const dispText = extractDisplayText(content);
             if (dispText) {
               const isPlan = /Implement the following plan:/i.test(dispText);
+              const ultra = !isPlan && isUltraplanText(content);
               renderedMessages.push(
-                <ChatMessage key={`${keyPrefix}-user-${mi}`} role={isPlan ? 'plan-prompt' : 'user'} text={dispText} lang={this.props.lang} timestamp={ts} userProfile={userProfile} modelInfo={modelInfo} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
+                <ChatMessage key={`${keyPrefix}-user-${mi}`} role={isPlan ? 'plan-prompt' : 'user'} text={dispText} isUltraplan={ultra} lang={this.props.lang} timestamp={ts} userProfile={userProfile} modelInfo={modelInfo} requestIndex={hasViewRequest ? reqIdx : undefined} onViewRequest={hasViewRequest ? onViewRequest : undefined} isHistoryLog={isHistoryLog} />
               );
             }
           }
