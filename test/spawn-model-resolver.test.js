@@ -82,12 +82,12 @@ describe('resolveSpawnModel: 三方 profile', () => {
     assert.equal(resolveSpawnModel('/ws', {}, opts), 'deepseek-v4-pro');
   });
 
-  it('base 属 opus 家族 → 映射到 opus 槽位；家族槽位留空 → 透传 base', () => {
+  it('base 属 opus 家族 → 映射到 opus 槽位；家族槽位留空 → ANTHROPIC_MODEL 兜底', () => {
     const { logDir, opts } = mkRoots();
     writeProfiles(logDir, PROFILES);
     assert.equal(resolveSpawnModel('/ws', { ANTHROPIC_MODEL: 'claude-opus-4-8' }, opts), 'deepseek-v4-opus-slot');
-    // sonnet 槽位未配置 → resolveProfileModel 返回 null → 透传 base
-    assert.equal(resolveSpawnModel('/ws', { ANTHROPIC_MODEL: 'claude-sonnet-5' }, opts), 'claude-sonnet-5');
+    // sonnet 槽位未配置 → ANTHROPIC_MODEL(deepseek-v4-pro) 兜底
+    assert.equal(resolveSpawnModel('/ws', { ANTHROPIC_MODEL: 'claude-sonnet-5' }, opts), 'deepseek-v4-pro');
   });
 
   it('base 无信号 + profile 激活 → 用 profile 主模型；主模型空则回退旧 activeModel', () => {

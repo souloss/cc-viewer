@@ -400,34 +400,45 @@ export function replaceTopLevelModel(jsonStr, oldModel, newModel) {
 // 家族用**大小写不敏感子串**匹配（/opus/i 等），只认这几个已知家族单词——
 // 因此 claude-opus-4-8、未来的 claude-opus-5 等任何版本都命中同一家族，版本升级无需重配。
 // 字段直接沿用 Claude Code 的环境变量名以保持一致：
-//   ANTHROPIC_MODEL              —— 主模型；body.model 含 "fable" / "mythos" 时映射到它
+//   ANTHROPIC_MODEL              —— 主模型（catch-all 兜底；body.model 含 "fable"/"mythos"
+//                                   及所有未识别家族均回落到它）
 //   ANTHROPIC_DEFAULT_OPUS_MODEL   —— body.model 含 "opus"
 //   ANTHROPIC_DEFAULT_SONNET_MODEL —— 含 "sonnet"
 //   ANTHROPIC_DEFAULT_HAIKU_MODEL  —— 含 "haiku"
-// 家族字段留空 = 该家族不改写（透传原始 model）。
-// 未识别家族（既不是 opus/sonnet/haiku 也不是 fable/mythos）不做兜底替换，原样透传。
+// 家族字段优先：opus/sonnet/haiku 各自命中专属字段；字段留空则回落到 ANTHROPIC_MODEL。
+// 未识别家族（既不是 opus/sonnet/haiku 也不是 fable/mythos）→ ANTHROPIC_MODEL 兜底。
 // 兼容旧数据：profile 未设任何新字段但有 activeModel（老结构）时，回退为旧的整体替换语义。
-// 返回目标模型字符串；无需改写（无目标 / 目标同旧值 / 入参非法 / 未识别家族）时返回 null。
+// 返回目标模型字符串；无需改写（无目标 / 目标同旧值 / 入参非法）时返回 null。
+// [1m] 后缀（Claude Code 1M context 标记）默认忽略：所有 profile 模型字段值在比较前先剥除。
 export function resolveProfileModel(oldModel, profile) {
   if (typeof oldModel !== 'string' || !oldModel || !profile || typeof profile !== 'object') return null;
-  const opus = typeof profile.ANTHROPIC_DEFAULT_OPUS_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_OPUS_MODEL.trim() : '';
-  const sonnet = typeof profile.ANTHROPIC_DEFAULT_SONNET_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_SONNET_MODEL.trim() : '';
-  const haiku = typeof profile.ANTHROPIC_DEFAULT_HAIKU_MODEL === 'string' ? profile.ANTHROPIC_DEFAULT_HAIKU_MODEL.trim() : '';
-  const primary = typeof profile.ANTHROPIC_MODEL === 'string' ? profile.ANTHROPIC_MODEL.trim() : '';
+
+  // Strip [1m] suffix (case-insensitive) from model names; Claude Code appends it
+  // for 1M-context variants and it should not affect model matching/replacement.
+  const strip1m = (s) => (typeof s === 'string' ? s.replace(/\[1m\]/gi, '').trim() : '');
+
+  const opus = strip1m(profile.ANTHROPIC_DEFAULT_OPUS_MODEL);
+  const sonnet = strip1m(profile.ANTHROPIC_DEFAULT_SONNET_MODEL);
+  const haiku = strip1m(profile.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+  const primary = strip1m(profile.ANTHROPIC_MODEL);
   const hasNew = !!(primary || opus || sonnet || haiku);
 
   let target = '';
   if (hasNew) {
-    if (/opus/i.test(oldModel)) target = opus;
-    else if (/sonnet/i.test(oldModel)) target = sonnet;
-    else if (/haiku/i.test(oldModel)) target = haiku;
-    else if (/fable/i.test(oldModel) || /mythos/i.test(oldModel)) target = primary; // 显式家族 → 主模型
-    // 未识别家族：target 保持 ''，下方返回 null（不替换、原样透传）
+    // Family-specific fields take precedence; fall back to ANTHROPIC_MODEL when
+    // the family field is empty/unset. ANTHROPIC_MODEL itself acts as the
+    // catch-all default for any unrecognized family (including third-party models
+    // like gpt-4o, deepseek-v4, K3/kimi, etc.).
+    if (/opus/i.test(oldModel)) target = opus || primary;
+    else if (/sonnet/i.test(oldModel)) target = sonnet || primary;
+    else if (/haiku/i.test(oldModel)) target = haiku || primary;
+    else if (/fable/i.test(oldModel) || /mythos/i.test(oldModel)) target = primary;
+    else target = primary; // unrecognized family → ANTHROPIC_MODEL catch-all
   } else if (typeof profile.activeModel === 'string') {
-    target = profile.activeModel.trim(); // 旧数据整体替换语义
+    target = strip1m(profile.activeModel); // 旧数据整体替换语义
   }
 
-  if (!target || target === oldModel) return null;
+  if (!target || target === strip1m(oldModel)) return null;
   return target;
 }
 

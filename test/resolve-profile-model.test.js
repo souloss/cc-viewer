@@ -2,7 +2,9 @@
  * resolveProfileModel + migrateProxyProfile 单测 —— proxy 热切换按家族映射模型 + 旧配置迁移。
  *
  * resolveProfileModel：按 body.model 家族（opus/sonnet/haiku）映射到 profile 对应字段，
- * fable/mythos/未识别 → ANTHROPIC_MODEL；无新字段但有 activeModel（旧数据）→ 整体替换回退。
+ * fable/mythos/未识别 → ANTHROPIC_MODEL 兜底；无新字段但有 activeModel（旧数据）→ 整体替换回退。
+ * 家族字段优先于 ANTHROPIC_MODEL；字段留空时回落到 ANTHROPIC_MODEL。
+ * [1m] 后缀默认忽略（剥除后比较）。
  * 目标为空 / 等于旧值 / 入参非法 → null（不改写）。
  * migrate*：老 { models, activeModel } → ANTHROPIC_MODEL，幂等。
  */
@@ -31,15 +33,59 @@ describe('resolveProfileModel', () => {
     assert.equal(resolveProfileModel('claude-fable-5', fam), 'PRIMARY');
     assert.equal(resolveProfileModel('mythos-1', fam), 'PRIMARY');
   });
-  it('未识别家族 → null（原样透传，不兜底替换）', () => {
-    assert.equal(resolveProfileModel('some-random-model', fam), null);
-    assert.equal(resolveProfileModel('gpt-4o', fam), null);
+  it('未识别家族 → ANTHROPIC_MODEL 兜底（热切换开启时）', () => {
+    assert.equal(resolveProfileModel('some-random-model', fam), 'PRIMARY');
+    assert.equal(resolveProfileModel('gpt-4o', fam), 'PRIMARY');
+    assert.equal(resolveProfileModel('K3', fam), 'PRIMARY'); // K3/kimi alias → PRIMARY
+    assert.equal(resolveProfileModel('deepseek-v4', fam), 'PRIMARY');
   });
-  it('家族字段留空 → 该家族不替换（null）', () => {
+  it('未识别家族 + 无 ANTHROPIC_MODEL → null（无兜底目标）', () => {
+    const noPrimary = { ANTHROPIC_DEFAULT_OPUS_MODEL: 'OPUS-T' };
+    assert.equal(resolveProfileModel('some-random-model', noPrimary), null);
+    assert.equal(resolveProfileModel('gpt-4o', noPrimary), null);
+  });
+  it('家族字段留空 → 回落到 ANTHROPIC_MODEL', () => {
     const partial = { ANTHROPIC_MODEL: 'PRIMARY', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'HAIKU-T' };
-    assert.equal(resolveProfileModel('claude-opus-4-8', partial), null); // opus 空 → 不回落到 PRIMARY
-    assert.equal(resolveProfileModel('claude-3-5-haiku', partial), 'HAIKU-T');
+    assert.equal(resolveProfileModel('claude-opus-4-8', partial), 'PRIMARY');   // opus 空 → PRIMARY 兜底
+    assert.equal(resolveProfileModel('claude-sonnet-4', partial), 'PRIMARY');   // sonnet 空 → PRIMARY 兜底
+    assert.equal(resolveProfileModel('claude-3-5-haiku', partial), 'HAIKU-T');  // haiku 有专属字段
     assert.equal(resolveProfileModel('claude-fable-5', partial), 'PRIMARY');
+  });
+  it('ANTHROPIC_MODEL 留空 + 家族字段留空 → 该家族不替换（null）', () => {
+    // Only HAIKU field set, no PRIMARY, opus/sonnet both empty → no fallback target
+    const haikuOnly = { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'HAIKU-T' };
+    assert.equal(resolveProfileModel('claude-opus-4-8', haikuOnly), null);
+    assert.equal(resolveProfileModel('claude-sonnet-4', haikuOnly), null);
+    assert.equal(resolveProfileModel('claude-3-5-haiku', haikuOnly), 'HAIKU-T');
+  });
+  it('[1m] suffix in profile fields is stripped before comparison', () => {
+    const with1m = {
+      ANTHROPIC_MODEL: 'claude-sonnet-5[1m]',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8[1m]',
+    };
+    assert.equal(resolveProfileModel('claude-fable-5', with1m), 'claude-sonnet-5');
+    // opus field strips to 'claude-opus-4-8' which equals oldModel → null (no-op)
+    assert.equal(resolveProfileModel('claude-opus-4-8', with1m), null);
+  });
+  it('[1m] suffix case-insensitive strip', () => {
+    assert.equal(
+      resolveProfileModel('claude-opus-4-8', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'CLAUDE-OPUS-4[1M]' }),
+      'CLAUDE-OPUS-4'
+    );
+  });
+  it('K3[1m] → strips to K3', () => {
+    assert.equal(
+      resolveProfileModel('gpt-4o', { ANTHROPIC_MODEL: 'K3[1m]' }),
+      'K3'
+    );
+  });
+  it('target equals oldModel after [1m] strip → null (no-op)', () => {
+    // Profile field carries [1m], oldModel doesn't → no-op
+    assert.equal(resolveProfileModel('my-model', { ANTHROPIC_MODEL: 'my-model[1m]' }), null);
+    // Both oldModel and profile field carry [1m] → symmetric strip → no-op
+    assert.equal(resolveProfileModel('claude-opus-4-8[1m]', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8[1m]' }), null);
+    // oldModel carries [1m], profile field doesn't → no-op (oldModel also stripped before compare)
+    assert.equal(resolveProfileModel('claude-opus-4-8[1m]', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8' }), null);
   });
   it('目标等于旧值 → null（无需改写）', () => {
     // fable 命中 primary，且旧值已是 PRIMARY
@@ -61,8 +107,8 @@ describe('resolveProfileModel', () => {
   it('新字段存在时忽略 legacy activeModel', () => {
     const mixed = { ANTHROPIC_MODEL: 'PRIMARY', activeModel: 'LEGACY-T' };
     assert.equal(resolveProfileModel('claude-fable-5', mixed), 'PRIMARY');
-    // opus 无字段 → 不替换（不回退到 legacy）
-    assert.equal(resolveProfileModel('claude-opus-4-8', mixed), null);
+    // opus 无字段 → PRIMARY 兜底（不回退到 legacy）
+    assert.equal(resolveProfileModel('claude-opus-4-8', mixed), 'PRIMARY');
   });
   it('空 profile / 空 model / 非法入参 → null', () => {
     assert.equal(resolveProfileModel('claude-opus-4-8', {}), null);

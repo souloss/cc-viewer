@@ -243,15 +243,18 @@ describe('proxy 请求改写（通过真实 fetch hook）', () => {
     }
   });
 
-  it('家族字段留空 → 该家族不替换（透传原始 model）', async () => {
+  it('家族字段留空 → 回落到 ANTHROPIC_MODEL', async () => {
     writeProfile({ active: 'p1', profiles: [
       { id: 'p1', name: 'PartialFam', baseURL: 'https://m.example.com', apiKey: 'sk-m',
         ANTHROPIC_MODEL: 'PRIMARY', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'HAIKU-T' },
     ] });
     mod._loadProxyProfile();
-    // opus 家族无字段 → 但有 ANTHROPIC_MODEL？不：家族命中 opus 走 opus 字段(空)→ 不替换
+    // opus 家族无字段 → ANTHROPIC_MODEL(PRIMARY) 兜底替换
     await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-opus-4-8', messages: [] });
-    assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'claude-opus-4-8', 'opus 字段空 → 不替换');
+    assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'PRIMARY', 'opus 字段空 → PRIMARY 兜底');
+    // sonnet 家族也无字段 → PRIMARY 兜底
+    await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-sonnet-4', messages: [] });
+    assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'PRIMARY', 'sonnet 字段空 → PRIMARY 兜底');
     // haiku 家族有字段 → 替换
     await postJson('https://api.anthropic.com/v1/messages', { model: 'claude-3-5-haiku', messages: [] });
     assert.equal(JSON.parse(lastFetchArgs[1].body).model, 'HAIKU-T');

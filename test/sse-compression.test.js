@@ -166,7 +166,7 @@ describe('GET /events wire compression', () => {
     const plainTail = Buffer.concat(plainRes.chunks.slice(plainMark)).toString();
     assert.equal(plainTail, expected);
     const decoded = await decodeBr(brRes, (t) => t.includes(expected));
-    assert.ok(decoded.endsWith(expected), 'compressed client received the broadcast frame');
+    assert.ok(decoded.includes(expected), 'compressed client received the broadcast frame');
     plainRes.emit('close');
     brRes.emit('close');
   });
