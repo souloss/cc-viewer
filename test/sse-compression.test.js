@@ -165,8 +165,21 @@ describe('GET /events wire compression', () => {
     const expected = `data: ${JSON.stringify(entry)}\n\n`;
     const plainTail = Buffer.concat(plainRes.chunks.slice(plainMark)).toString();
     assert.equal(plainTail, expected);
-    const decoded = await decodeBr(brRes, (t) => t.includes(expected));
-    assert.ok(decoded.includes(expected), 'compressed client received the broadcast frame');
+
+    // Deterministic decode: end the encoder to finalize the compressed stream,
+    // then decompress synchronously. The polling-based decodeBr() is fragile
+    // under CI CPU constraints (Node 24 zlib timing differs from local).
+    const enc = brRes._wireEnc;
+    assert.ok(enc, 'br encoder exists');
+    // Wait for the scheduled flush to push the broadcast frame into the encoder's
+    // internal pipeline (setImmediate in scheduleFlush). Without this, end() can
+    // drain a still-empty encoder buffer and the broadcast frame never appears.
+    await until(() => brRes.chunks.length > 0);
+    enc.end();
+    // Wait for the pipe to drain: end() sends FINISH through encoder -> pipe -> res.
+    await until(() => brRes.ended);
+    const decompressed = zlib.brotliDecompressSync(Buffer.concat(brRes.chunks)).toString();
+    assert.ok(decompressed.includes(expected), 'compressed client received the broadcast frame');
     plainRes.emit('close');
     brRes.emit('close');
   });
