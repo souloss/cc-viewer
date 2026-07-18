@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, Statistic, Table, Tag, Button, Switch, Spin, Empty, Tooltip, Space } from 'antd';
-import { ReloadOutlined, ArrowLeftOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import { ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { reportSwallowed } from '../../utils/errorReport';
@@ -23,7 +23,7 @@ function statusColor(status) {
   return 'red';
 }
 
-export default function ProxyStatsPage({ onBack }) {
+export default function ProxyStatsPage({ embedded }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -54,13 +54,6 @@ export default function ProxyStatsPage({ onBack }) {
     }
   }, [autoRefresh, fetchData]);
 
-  const goBack = () => {
-    // Prefer the onBack passed from the parent (App.jsx in-app routing: setState switches back to the dashboard, no full-page reload);
-    // fall back to clearing the URL params only when onBack is not provided (e.g. the standalone ?view=proxy-stats route entry).
-    if (typeof onBack === 'function') onBack();
-    else window.location.search = '';
-  };
-
   if (loading && !data) {
     return (
       <div className={styles.center}>
@@ -71,8 +64,8 @@ export default function ProxyStatsPage({ onBack }) {
 
   if (!data || !data.summary || data.summary.totalRequests === 0) {
     return (
-      <div className={styles.page}>
-        <Header onBack={goBack} onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />
+      <div className={embedded ? styles.embedded : styles.page}>
+        {!embedded && <ProxyStatsHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
         <div className={styles.center}>
           <Empty description={t('ui.proxyStats.noData')} />
         </div>
@@ -82,9 +75,14 @@ export default function ProxyStatsPage({ onBack }) {
 
   const s = data.summary;
 
+  // Filter recent records to errors only (status >= 400, had retries, or network failure with status 0)
+  const recentRecords = (data.recentRecords || []).filter(
+    r => (Number(r.final_status) || 0) >= 400 || (Number(r.retries) || 0) > 0 || Number(r.final_status) === 0
+  );
+
   return (
-    <div className={styles.page}>
-      <Header onBack={goBack} onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />
+    <div className={embedded ? styles.embedded : styles.page}>
+      {!embedded && <ProxyStatsHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
 
       {/* Overview cards */}
       <div className={styles.cardRow}>
@@ -244,10 +242,10 @@ export default function ProxyStatsPage({ onBack }) {
         </Card>
       )}
 
-      {/* Recent request details */}
-      <Card title={t('ui.proxyStats.recentRecords')} className={styles.section}>
+      {/* Recent error records */}
+      <Card title={t('ui.proxyStats.recentErrors')} className={styles.section}>
         <Table
-          dataSource={data.recentRecords || []}
+          dataSource={recentRecords}
           rowKey="ts"
           size="small"
           pagination={{ pageSize: 20, size: 'small' }}
@@ -270,16 +268,15 @@ export default function ProxyStatsPage({ onBack }) {
   );
 }
 
-function Header({ onBack, onRefresh, autoRefresh, setAutoRefresh }) {
+function ProxyStatsHeader({ onRefresh, autoRefresh, setAutoRefresh }) {
   return (
     <div className={styles.header}>
       <Space>
-        <Button icon={<ArrowLeftOutlined />} onClick={onBack || (() => { window.location.search = ''; })}>{t('ui.proxyStats.back')}</Button>
         <h2 className={styles.title}>{t('ui.proxyStats.title')}</h2>
       </Space>
       <Space>
         <span>{t('ui.proxyStats.autoRefresh')}</span>
-        <Switch checked={autoRefresh} onChange={setAutoRefresh} size="small" />
+        <Switch checked={autoRefresh} onChange={setAutoRefresh} size="small" aria-label={t('ui.proxyStats.autoRefresh')} />
         <Button icon={<ReloadOutlined />} onClick={onRefresh}>{t('ui.proxyStats.refresh')}</Button>
       </Space>
     </div>

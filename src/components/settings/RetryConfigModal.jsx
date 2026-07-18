@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Modal, Segmented, Select, InputNumber, Tooltip, Button, message } from 'antd';
+import React, { useState, useEffect, useRef } from 'react';
+import { Modal, Segmented, Select, InputNumber, Tooltip, Button, message, Spin } from 'antd';
 import { UndoOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { isMobile } from '../../env';
@@ -9,14 +9,6 @@ import styles from './RetryConfigModal.module.css';
 import appStyles from '../../App.module.css';
 import MobileDrawerCloseButton from '../mobile/MobileDrawerCloseButton';
 
-// Proxy retry config Modal — shared by PC + mobile, mirrors ProxyModal's semi-controlled style.
-// config/defaults come from AppBase state (injected via GET /api/retry-config); a local editable draft form is held here.
-// Changes bubble up via onConfigChange(config) to the parent's POST, then refresh on SSE push-back (same pattern as proxy_profile).
-//
-// Design tradeoff: 8 knobs laid out flat in a single Modal (unlike ProxyModal, which needs a secondary edit dialog — retry has few fields and no list).
-// "Reset to default" returns to DEFAULT_RETRY_CONFIG (mode=off, for backward-compatible semantics), not ccv-retry.sh's recommended serial.
-// streamIdleTimeoutMs has no consumer in the current version, so it is greyed out read-only with a tooltip note, to avoid confusion from editing something that won't take effect.
-
 const MODE_OPTIONS = [
   { label: 'off', value: 'off' },
   { label: 'serial', value: 'serial' },
@@ -24,10 +16,8 @@ const MODE_OPTIONS = [
   { label: 'stagger', value: 'stagger' },
 ];
 
-// Candidate status codes that trigger a retry (covers common gateway overload / rate-limit / timeout)
 const STATUS_CODE_OPTIONS = [429, 500, 502, 503, 504, 508, 529, 408];
 
-// Editable numeric field metadata: [key, unit, min, max]
 const NUMERIC_FIELDS = [
   { key: 'retryIntervalMs', unit: 'ms', min: 0, max: 600000 },
   { key: 'retryInterval429Ms', unit: 'ms', min: 0, max: 600000 },
@@ -36,67 +26,64 @@ const NUMERIC_FIELDS = [
   { key: 'connectTimeoutMs', unit: 'ms', min: 0, max: 600000 },
 ];
 
-export default function RetryConfigModal({
-  open,
-  onClose,
-  config,
-  defaults,
-  onConfigChange,
-}) {
-  // Local draft: initialized from config when open, reset on close. Avoids an in-flight external SSE refresh clobbering the user's input.
+// ─── RetryConfigForm (named export) ──────────────────────────────────────────
+// Reusable form component with its own state management. Used inline in
+// UnifiedProxyRetryPage (embedded mode) and inside RetryConfigModal (default export).
+//
+// Props:
+//   config     - current retry config object
+//   defaults   - default values for reset buttons
+//   onSave     - async (formData) => Promise — returns a promise; caller handles success/failure feedback
+//   onCancel   - optional close callback (provided by Modal/drawer wrappers; absent in embedded mode)
+//   embedded   - when true, hides Cancel button (no modal to close)
+export function RetryConfigForm({ config, defaults, onSave, onCancel, embedded }) {
   const [form, setForm] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const initializedRef = useRef(false);
 
   useEffect(() => {
-    if (open && config) {
-      setForm({ ...config });
-    } else if (!open) {
-      setForm(null);
+    if (config) {
+      if (!initializedRef.current) {
+        setForm({ ...config });
+        initializedRef.current = true;
+      } else if (!dirty) {
+        // External config change (SSE push) — sync only if user hasn't edited
+        setForm({ ...config });
+      }
     }
-  }, [open, config]);
+  }, [config, dirty]);
 
   const def = defaults || {};
 
   const patch = (key, value) => {
+    setDirty(true);
     setForm(prev => (prev ? { ...prev, [key]: value } : prev));
   };
 
-  // Reset a single field to its default
   const resetField = (key) => {
+    setDirty(true);
     setForm(prev => (prev ? { ...prev, [key]: def[key] } : prev));
   };
 
-  // Reset all fields to defaults
   const resetAll = () => {
+    setDirty(true);
     setForm({ ...def });
   };
 
   const handleSave = async () => {
     if (!form) return;
-    // mode whitelist validation (mirrors server-side validateRetryField)
     if (!['off', 'serial', 'race', 'stagger'].includes(form.mode)) {
       message.warning(t('ui.retryConfig.invalidMode'));
       return;
     }
-    // Wait until the POST actually succeeds before showing "saved" and closing; on failure AppBase.handleRetryConfigChange
-    // rolls back state + message.error, so we keep the Modal open for the user to retry/edit (no false success emitted).
     try {
-      await onConfigChange(form);
+      await onSave(form);
       message.success(t('ui.retryConfig.saved'));
-      onClose();
-    } catch {
-      // Failure feedback is handled centrally by AppBase; here we just prevent the Modal from closing
-    }
+      setDirty(false); // allow future SSE syncs
+    } catch { /* AppBase shows error toast; keep form open for retry */ }
   };
 
-  // Whether a field's current value deviates from its default (the "reset to default" button shows only when dirty)
   const isDirty = (key) => JSON.stringify(form?.[key]) !== JSON.stringify(def[key]);
-
-  const titleNode = (
-    <span>
-      {t('ui.retryConfig.title')}{' '}
-      <ConceptHelp doc="RetryConfig" zIndex={1100} />
-    </span>
-  );
 
   const renderResetBtn = (key) => (
     isDirty(key) ? (
@@ -106,9 +93,16 @@ export default function RetryConfigModal({
     ) : null
   );
 
-  const bodyNode = form ? (
+  if (!form) {
+    return (
+      <div className={styles.form} style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '40px 0' }}>
+        <Spin size="small" />
+      </div>
+    );
+  }
+
+  return (
     <div className={styles.form}>
-      {/* mode selection */}
       <div className={styles.row}>
         <span className={styles.label}>
           {t('ui.retryConfig.mode')}
@@ -125,7 +119,6 @@ export default function RetryConfigModal({
 
       <div className={styles.divider} />
 
-      {/* Status codes that trigger a retry */}
       <div className={styles.row}>
         <span className={styles.label}>
           {t('ui.retryConfig.statusCodes')}
@@ -144,7 +137,6 @@ export default function RetryConfigModal({
 
       <div className={styles.divider} />
 
-      {/* Numeric fields */}
       {NUMERIC_FIELDS.map(f => (
         <div className={styles.row} key={f.key}>
           <span className={styles.label}>
@@ -164,7 +156,6 @@ export default function RetryConfigModal({
         </div>
       ))}
 
-      {/* streamIdleTimeoutMs: reserved field, greyed out read-only */}
       <div className={styles.row}>
         <span className={styles.label}>
           {t('ui.retryConfig.streamIdleTimeoutMs')}
@@ -183,14 +174,50 @@ export default function RetryConfigModal({
           {t('ui.retryConfig.resetAll')}
         </Button>
         <div className={styles.footerRight}>
-          <Button size="small" onClick={onClose}>{t('ui.retryConfig.cancel')}</Button>
+          {!embedded && onCancel && (
+            <Button size="small" onClick={onCancel}>{t('ui.retryConfig.cancel')}</Button>
+          )}
           <Button size="small" type="primary" onClick={handleSave}>{t('ui.retryConfig.save')}</Button>
         </div>
       </div>
 
       <div className={styles.note}>{t('ui.retryConfig.note')}</div>
     </div>
-  ) : null;
+  );
+}
+
+// ─── RetryConfigModal (default export) ────────────────────────────────────────
+// Thin Modal/drawer wrapper around RetryConfigForm. Kept for backward compat:
+//   - PC: standalone Modal opened from hamburger menu
+//   - Mobile: drawer overlay (cannot be replaced by unified page layout)
+export default function RetryConfigModal({
+  open,
+  onClose,
+  config,
+  defaults,
+  onConfigChange,
+}) {
+  const titleNode = (
+    <span>
+      {t('ui.retryConfig.title')}{' '}
+      <ConceptHelp doc="RetryConfig" zIndex={1100} />
+    </span>
+  );
+
+  // Wrap onConfigChange: on success, close the modal/drawer after save
+  const handleFormSave = async (formData) => {
+    await onConfigChange(formData);
+    onClose();
+  };
+
+  const bodyNode = (
+    <RetryConfigForm
+      config={config}
+      defaults={defaults}
+      onSave={handleFormSave}
+      onCancel={onClose}
+    />
+  );
 
   if (isMobile) {
     return (
