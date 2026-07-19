@@ -1,0 +1,40 @@
+/* BarChart — pure SVG bar chart. CSS vars only, no !important (CLAUDE.md). */
+.wrap {
+  width: 100%;
+  position: relative;
+}
+.svg {
+  width: 100%;
+  display: block;
+  overflow: visible;
+}
+.bar {
+  transition: opacity 0.15s ease;
+}
+.bar:hover {
+  opacity: 0.75;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar { transition: none; }
+}
+.axisLine {
+  stroke: var(--border-primary, #d9d9d9);
+  stroke-width: 1;
+}
+.gridLine {
+  stroke: var(--border-secondary, #f0f0f0);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.vLabel {
+  fill: var(--text-secondary, #8c8c8c);
+  font-size: 11px;
+}
+.hLabel {
+  fill: var(--text-secondary, #8c8c8c);
+  font-size: 11px;
+}
+.vValue {
+  fill: var(--text-primary, #262626);
+  font-size: 10px;
+}
