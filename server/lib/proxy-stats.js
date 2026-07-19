@@ -9,6 +9,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { AsyncWriteQueue } from './async-write-queue.js';
+import { reportSwallowed } from './error-report.js';
 
 // ── Detail record schema ──────────────────────────────────────────────
 // Appends one JSON line after each proxied LLM API request completes. Fields align with llm-retry-proxy's retry records.
@@ -120,7 +121,11 @@ export function appendRecord(filePath, record, onDone) {
     try {
       mkdirSync(dir, { recursive: true });
       _dirsEnsured.add(dir);
-    } catch { /* No permission — the queued append will surface the failure as a silent no-op */ }
+    } catch (err) {
+      // No permission / read-only fs — the queued append will surface the failure
+      // as a silent no-op. Record it so the cause isn't fully invisible.
+      reportSwallowed('proxyStats.mkdir', err);
+    }
   }
   _statsWriteQueue.appendTo(filePath, JSON.stringify(record) + '\n', onDone);
 }
@@ -147,9 +152,9 @@ export function emitProxyStatsUpdate(fileName) {
   try {
     _statsUpdateListener(fileName);
   } catch (err) {
-    if (process.env.CCV_DEBUG) {
-      console.error('[CC-Viewer Proxy] proxy stats notify failed:', err?.message);
-    }
+    // A throwing listener would silently break stats propagation (the SSE push,
+    // recompute trigger, etc.). Record it instead of swallowing silently.
+    reportSwallowed('proxyStats.emit', err);
   }
 }
 
@@ -194,6 +199,33 @@ export function computeStreak(records) {
     if (type === 'failure' && curCount > worstFailure) worstFailure = curCount;
   }
   return { current: { type: curType || 'success', count: curCount }, worstFailure };
+}
+
+// Retry-burden bucket definitions: turns the raw retry-count distribution into
+// actionable buckets (0 / 1-5 / 6-20 / 21-50 / >50). Aligned with llm-retry-proxy's
+// renderBurdenChart buckets. `key` is the stable i18n id (ui.proxyStats.retryBurdenBuckets.<key>).
+const RETRY_BURDEN_BUCKETS = [
+  { key: '0',      range: [0, 0] },
+  { key: '1_5',    range: [1, 5] },
+  { key: '6_20',   range: [6, 20] },
+  { key: '21_50',  range: [21, 50] },
+  { key: 'over50', range: [51, Infinity] },
+];
+
+/**
+ * Bucket the per-request retry counts into the 5-bucket burden distribution.
+ * @param {object[]} sorted Time-sorted records (only `retries` field is read)
+ * @returns {Array<{key:string, range:number[], count:number}>} 5 buckets, always present
+ */
+function computeRetryBurden(sorted) {
+  const counts = RETRY_BURDEN_BUCKETS.map(b => ({ ...b, count: 0 }));
+  for (const r of sorted) {
+    const retries = Number(r.retries) || 0;
+    for (const b of counts) {
+      if (retries >= b.range[0] && retries <= b.range[1]) { b.count++; break; }
+    }
+  }
+  return counts;
 }
 
 /**
@@ -255,15 +287,15 @@ export function aggregateRecords(records, opts = {}) {
     // by model
     const model = r.model || '(unknown)';
     if (!byModelMap.has(model)) byModelMap.set(model, newBucket());
-    accBucket(byModelMap.get(model), retries, ok, dur);
+    accBucket(byModelMap.get(model), retries, ok, dur, r.retry_codes);
     // by path
     const path = r.path || '/';
     if (!byPathMap.has(path)) byPathMap.set(path, newBucket());
-    accBucket(byPathMap.get(path), retries, ok, dur);
+    accBucket(byPathMap.get(path), retries, ok, dur, r.retry_codes);
     // by profile
     const profileKey = r.profile_id || 'default';
     if (!byProfileMap.has(profileKey)) byProfileMap.set(profileKey, { ...newBucket(), profile_name: r.profile_name || 'Default' });
-    accBucket(byProfileMap.get(profileKey), retries, ok, dur);
+    accBucket(byProfileMap.get(profileKey), retries, ok, dur, r.retry_codes);
     // slowest / fastest (fastest only counts successes with dur>0)
     const candidate = { ts: r.ts, path, model, attempts: r.attempts, retries, duration_ms: dur, final_status: r.final_status, retry_codes: r.retry_codes || [] };
     if (!slowest || dur > slowest.duration_ms) slowest = candidate;
@@ -280,6 +312,7 @@ export function aggregateRecords(records, opts = {}) {
   const upstreamAvail = total ? round2(firstOk / total * 100) : 0;
   const downstreamAvail = total ? round2(succeeded / total * 100) : 0;
   const streak = computeStreak(sorted);
+  const retryBurden = computeRetryBurden(sorted);
 
   return {
     summary: {
@@ -305,6 +338,7 @@ export function aggregateRecords(records, opts = {}) {
     retryDistribution: [...retryDist.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([retries, count]) => ({ retries, count })),
+    retryBurden,
     retryCodes: [...retryCodeCounts.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([code, count]) => ({ code, count })),
@@ -315,10 +349,10 @@ export function aggregateRecords(records, opts = {}) {
 }
 
 function newBucket() {
-  return { requests: 0, retries: 0, succeeded: 0, firstOk: 0, failed: 0, durations: [] };
+  return { requests: 0, retries: 0, succeeded: 0, firstOk: 0, failed: 0, durations: [], retryCodeCounts: new Map() };
 }
 
-function accBucket(b, retries, ok, dur) {
+function accBucket(b, retries, ok, dur, retryCodes) {
   b.requests++;
   b.retries += retries;
   if (ok) {
@@ -328,12 +362,30 @@ function accBucket(b, retries, ok, dur) {
     b.failed++;
   }
   b.durations.push(dur);
+  for (const c of (retryCodes || [])) {
+    if (Number.isFinite(c)) b.retryCodeCounts.set(c, (b.retryCodeCounts.get(c) || 0) + 1);
+  }
+}
+
+// Finalize a bucket's per-bucket retry-code map into top-5 array + dominant fail code.
+function finalizeRetryCodes(b) {
+  const arr = [...(b.retryCodeCounts?.entries() || [])]
+    .sort((a, c) => c[1] - a[1])
+    .slice(0, 5)
+    .map(([code, count]) => ({ code, count }));
+  const top = arr[0] || null;
+  return {
+    retryCodeCounts: arr,
+    dominantFailStatus: top ? top.code : null,
+    dominantFailCount: top ? top.count : 0,
+  };
 }
 
 function mapToSortedArray(map, keyName) {
   const arr = [];
   for (const [k, b] of map.entries()) {
     b.durations.sort((a, c) => a - c);
+    const fin = finalizeRetryCodes(b);
     const entry = {
       [keyName]: k,
       requests: b.requests,
@@ -341,6 +393,9 @@ function mapToSortedArray(map, keyName) {
       succeeded: b.succeeded,
       firstOk: b.firstOk,
       failed: b.failed,
+      retryCodeCounts: fin.retryCodeCounts,
+      dominantFailStatus: fin.dominantFailStatus,
+      dominantFailCount: fin.dominantFailCount,
       availabilityPct: b.requests ? round2(b.succeeded / b.requests * 100) : 0,
       upstreamAvailabilityPct: b.requests ? round2(b.firstOk / b.requests * 100) : 0,
       p95Ms: round3(percentile(b.durations, 0.95)),
@@ -356,6 +411,7 @@ function mapToSortedArrayWithExtra(map, keyName, extraName) {
   const arr = [];
   for (const [k, b] of map.entries()) {
     b.durations.sort((a, c) => a - c);
+    const fin = finalizeRetryCodes(b);
     const entry = {
       [keyName]: k,
       [extraName]: b[extraName] || k,
@@ -364,6 +420,9 @@ function mapToSortedArrayWithExtra(map, keyName, extraName) {
       succeeded: b.succeeded,
       firstOk: b.firstOk,
       failed: b.failed,
+      retryCodeCounts: fin.retryCodeCounts,
+      dominantFailStatus: fin.dominantFailStatus,
+      dominantFailCount: fin.dominantFailCount,
       availabilityPct: b.requests ? round2(b.succeeded / b.requests * 100) : 0,
       upstreamAvailabilityPct: b.requests ? round2(b.firstOk / b.requests * 100) : 0,
       p95Ms: round3(percentile(b.durations, 0.95)),
@@ -386,6 +445,7 @@ function emptyStats() {
     byPath: [],
     byProfile: [],
     retryDistribution: [],
+    retryBurden: [],
     retryCodes: [],
     slowest: null,
     fastest: null,
