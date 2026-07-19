@@ -12,7 +12,9 @@ const DEFAULT_COLORS = [
 
 // Pure-SVG bar chart. Supports vertical/horizontal and single/grouped bars.
 // No external chart lib — keeps cc-viewer dependency-free (CLAUDE.md).
-export default function BarChart({
+// `memo`'d: the chart is a pure function of its props, so it skips re-render when
+// the parent (ProxyStatsDashboard) re-renders on a poll tick with unchanged data.
+function BarChart({
   data = [],
   height = 160,
   horizontal = false,
@@ -169,3 +171,5 @@ export default function BarChart({
     </div>
   );
 }
+
+export default React.memo(BarChart);

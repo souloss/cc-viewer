@@ -2087,10 +2087,12 @@ class AppBase extends React.Component {
       .catch(() => { });
   };
 
-  // 代理重试配置保存：POST /api/retry-config（服务端写 retry-config.json + watchFile 热刷新 + SSE 回推）。
-  // 乐观更新本地 retryConfig（SSE retry_config 事件会再确认一次）；失败回滚并提示。
-  // 返回 POST 的 Promise：成功 resolve（SSE retry_config 会刷新 state）；
-  // 失败则回滚 state + message.error 后 reject，供调用方（RetryConfigModal）据以决定是否关闭/提示成功。
+  // Proxy retry config save: POST /api/retry-config (server writes retry-config.json
+  // + watchFile hot-reload + pushes back via SSE). Optimistically update the local
+  // retryConfig (the SSE retry_config event re-confirms it); roll back on failure.
+  // Returns the POST Promise: resolves on success (SSE retry_config refreshes state);
+  // on failure rolls back state + shows message.error, then rejects so the caller
+  // (ProxyStatsModal / RetryConfigForm) can decide whether to keep the form open.
   handleRetryConfigChange = (config) => {
     const prev = this.state.retryConfig;
     this.setState({ retryConfig: config });

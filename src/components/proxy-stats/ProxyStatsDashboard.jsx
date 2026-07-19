@@ -1,29 +1,20 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Card, Statistic, Table, Tag, Button, Switch, Spin, Empty, Tooltip, Space } from 'antd';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Card, Statistic, Table, Tag, Button, Switch, Spin, Empty, Space } from 'antd';
 import { ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { t } from '../../i18n';
 import { apiUrl } from '../../utils/apiUrl';
 import { reportSwallowed } from '../../utils/errorReport';
-import styles from './ProxyStatsPage.module.css';
+import BarChart from '../charts/BarChart';
+import { fmtMs, statusColor, availColor, dominantFailCell, burdenBucketLabel } from './RetryStatsHelpers';
+import styles from './ProxyStatsDashboard.module.css';
 
 const AUTO_REFRESH_MS = 15000;
 
-// Format a millisecond duration into a human-readable string
-function fmtMs(ms) {
-  if (!ms || ms <= 0) return '-';
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  return `${(ms / 1000).toFixed(2)} s`;
-}
+// Stable formatter identity so the memoized BarChart can short-circuit when its
+// other props are unchanged (an inline arrow would force a re-render every poll).
+const fmtPercent = (n) => `${n}%`;
 
-// Status code → Tag color
-function statusColor(status) {
-  if (status === 0) return 'default';
-  if (status < 400) return 'green';
-  if (status < 500) return 'orange';
-  return 'red';
-}
-
-export default function ProxyStatsPage({ embedded }) {
+export default function ProxyStatsDashboard({ embedded }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -35,17 +26,13 @@ export default function ProxyStatsPage({ embedded }) {
       .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
       .then(d => { setData(d.proxyStats); setLoading(false); })
       .catch((err) => {
-        // Review P1 fix: keep the last rendered data — a transient poll
-        // failure (network blip / 5xx) must not collapse the whole panel to
-        // the empty state mid-session.
+        // Keep the last rendered data — a transient poll failure must not collapse the panel.
         reportSwallowed('proxyStats.fetch', err);
         setLoading(false);
       });
   }, []);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   useEffect(() => {
     if (autoRefresh) {
@@ -54,19 +41,44 @@ export default function ProxyStatsPage({ embedded }) {
     }
   }, [autoRefresh, fetchData]);
 
+  // Derived views of `data`. Memoized so the memoized BarChart (and antd Tables)
+  // get stable prop identities across the 15s poll when data is unchanged.
+  // Declared before the early returns below so hook order is stable.
+  const byModelBars = useMemo(
+    () => (data?.byModel || []).slice(0, 10).map(m => ({
+      label: m.model,
+      values: [m.upstreamAvailabilityPct, m.availabilityPct],
+      // series colors fall back to BarChart DEFAULT_COLORS (primary/success)
+    })),
+    [data],
+  );
+  const retryDistBars = useMemo(
+    () => (data?.retryDistribution || []).slice(0, 15).map(d => ({ label: String(d.retries), value: d.count })),
+    [data],
+  );
+  const retryBurdenBars = useMemo(
+    () => (data?.retryBurden || []).map(b => ({ label: burdenBucketLabel(b.key), value: b.count })),
+    [data],
+  );
+  // Show only "interesting" requests: a failure (4xx/5xx), any retry, or a
+  // network-level failure (final_status === 0: no response / DNS / conn refused).
+  const recentRecords = useMemo(
+    () => (data?.recentRecords || []).filter((r) => {
+      const status = Number(r.final_status);
+      return status === 0 || status >= 400 || (Number(r.retries) || 0) > 0;
+    }),
+    [data],
+  );
+
   if (loading && !data) {
-    return (
-      <div className={styles.center}>
-        <Spin size="large" />
-      </div>
-    );
+    return <div className={`${styles.embedded} ${styles.centerState}`}><Spin size="large" /></div>;
   }
 
   if (!data || !data.summary || data.summary.totalRequests === 0) {
     return (
       <div className={embedded ? styles.embedded : styles.page}>
-        {!embedded && <ProxyStatsHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
-        <div className={styles.center}>
+        {!embedded && <DashboardHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
+        <div className={styles.centerState}>
           <Empty description={t('ui.proxyStats.noData')} />
         </div>
       </div>
@@ -74,39 +86,35 @@ export default function ProxyStatsPage({ embedded }) {
   }
 
   const s = data.summary;
-
-  // Filter recent records to errors only (status >= 400, had retries, or network failure with status 0)
-  const recentRecords = (data.recentRecords || []).filter(
-    r => (Number(r.final_status) || 0) >= 400 || (Number(r.retries) || 0) > 0 || Number(r.final_status) === 0
-  );
+  const rescued = Math.max(0, s.totalSucceeded - s.totalFirstOk);
 
   return (
     <div className={embedded ? styles.embedded : styles.page}>
-      {!embedded && <ProxyStatsHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
+      {!embedded && <DashboardHeader onRefresh={fetchData} autoRefresh={autoRefresh} setAutoRefresh={setAutoRefresh} />}
 
-      {/* Overview cards */}
+      {/* §Range Overview */}
       <div className={styles.cardRow}>
+        <Card className={styles.statCard}><Statistic title={t('ui.proxyStats.totalRequests')} value={s.totalRequests} /></Card>
         <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.totalRequests')} value={s.totalRequests} />
+          <Statistic title={t('ui.proxyStats.totalRetries')} value={s.totalRetries}
+            suffix={s.totalRequests ? `(${(s.totalRetries / s.totalRequests).toFixed(1)}/req)` : ''} />
         </Card>
-        <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.totalRetries')} value={s.totalRetries} />
+        <Card className={styles.statCard} style={{ '--stat-accent': availColor(s.upstreamAvailabilityPct) }}>
+          <Statistic title={t('ui.proxyStats.upstreamAvailability')} value={s.upstreamAvailabilityPct} suffix="%"
+            valueStyle={{ color: availColor(s.upstreamAvailabilityPct) }} />
         </Card>
-        <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.upstreamAvailability')} value={s.upstreamAvailabilityPct} suffix="%" />
+        <Card className={styles.statCard} style={{ '--stat-accent': availColor(s.downstreamAvailabilityPct) }}>
+          <Statistic title={t('ui.proxyStats.downstreamAvailability')} value={s.downstreamAvailabilityPct} suffix="%"
+            valueStyle={{ color: availColor(s.downstreamAvailabilityPct) }} />
+          {rescued > 0 && (
+            <span className={styles.rescuedBadge}>{t('ui.proxyStats.rescuedByRetry', { count: rescued })}</span>
+          )}
         </Card>
-        <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.downstreamAvailability')} value={s.downstreamAvailabilityPct} suffix="%" />
-        </Card>
-        <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.failedRequests')} value={s.totalFailed} valueStyle={{ color: '#cf1322' }} />
-        </Card>
-        <Card className={styles.statCard}>
-          <Statistic title={t('ui.proxyStats.p95Duration')} value={fmtMs(s.p95Ms)} />
-        </Card>
+        <Card className={styles.statCard} style={{ '--stat-accent': 'var(--color-error, #ef4444)' }}><Statistic title={t('ui.proxyStats.failedRequests')} value={s.totalFailed} valueStyle={{ color: 'var(--color-error, #ef4444)' }} /></Card>
+        <Card className={styles.statCard}><Statistic title={t('ui.proxyStats.p95Duration')} value={fmtMs(s.p95Ms)} /></Card>
       </div>
 
-      {/* Availability analysis */}
+      {/* §Availability */}
       <Card title={t('ui.proxyStats.availabilityAnalysis')} className={styles.section}>
         <div className={styles.streakRow}>
           <Space>
@@ -121,36 +129,52 @@ export default function ProxyStatsPage({ embedded }) {
             <Tag color="red">{s.worstFailureStreak}</Tag>
           </Space>
         </div>
+        {/* Dual availability grouped bars: upstream vs downstream per model */}
+        <div className={styles.chartWrap}>
+          <div className={styles.chartTitle}>{t('ui.proxyStats.upstreamVsDownstream')}</div>
+          <BarChart
+            height={180}
+            grouped
+            legend={[t('ui.proxyStats.upstreamAvailability'), t('ui.proxyStats.downstreamAvailability')]}
+            ariaLabel={t('ui.proxyStats.upstreamVsDownstream')}
+            data={byModelBars}
+            valueFormatter={fmtPercent}
+            maxBars={10}
+          />
+        </div>
         <Table
           dataSource={data.byModel || []}
-          rowKey="model"
-          size="small"
-          pagination={false}
-          className={styles.table}
+          rowKey="model" size="small" pagination={false} className={styles.section}
           columns={[
             { title: t('ui.proxyStats.byModel'), dataIndex: 'model', key: 'model' },
             { title: t('ui.proxyStats.totalRequests'), dataIndex: 'requests', key: 'requests' },
             { title: t('ui.proxyStats.retries'), dataIndex: 'retries', key: 'retries' },
             { title: t('ui.proxyStats.upstreamAvailability'), dataIndex: 'upstreamAvailabilityPct', key: 'upAvail', render: v => `${v}%` },
             { title: t('ui.proxyStats.downstreamAvailability'), dataIndex: 'availabilityPct', key: 'dsAvail', render: v => `${v}%` },
+            { title: t('ui.proxyStats.dominantFail'), key: 'domFail', render: (_, r) => dominantFailCell(r) || '-' },
             { title: t('ui.proxyStats.p95Duration'), dataIndex: 'p95Ms', key: 'p95', render: fmtMs },
           ]}
         />
       </Card>
 
-      {/* Retry analysis */}
+      {/* §Retry Analysis */}
       <Card title={t('ui.proxyStats.retryDistribution')} className={styles.section}>
-        <Table
-          dataSource={data.retryDistribution || []}
-          rowKey="retries"
-          size="small"
-          pagination={false}
-          className={styles.table}
-          columns={[
-            { title: t('ui.proxyStats.retries'), dataIndex: 'retries', key: 'retries' },
-            { title: t('ui.proxyStats.totalRequests'), dataIndex: 'count', key: 'count' },
-          ]}
-        />
+        <div className={styles.chartWrap}>
+          <BarChart
+            height={160}
+            ariaLabel={t('ui.proxyStats.retryDistribution')}
+            data={retryDistBars}
+            maxBars={15}
+          />
+        </div>
+        <div className={styles.chartWrap}>
+          <div className={styles.chartTitle}>{t('ui.proxyStats.retryBurden')}</div>
+          <BarChart
+            height={160}
+            ariaLabel={t('ui.proxyStats.retryBurden')}
+            data={retryBurdenBars}
+          />
+        </div>
         <div className={styles.codeTags}>
           <span>{t('ui.proxyStats.retryCodes')}:</span>
           <Space wrap>
@@ -161,7 +185,7 @@ export default function ProxyStatsPage({ embedded }) {
         </div>
       </Card>
 
-      {/* Latency analysis */}
+      {/* §Duration */}
       <Card title={t('ui.proxyStats.durationAnalysis')} className={styles.section}>
         <div className={styles.cardRow}>
           <Card className={styles.statCard}><Statistic title={t('ui.proxyStats.p50Duration')} value={fmtMs(s.p50Ms)} /></Card>
@@ -171,86 +195,42 @@ export default function ProxyStatsPage({ embedded }) {
           <Card className={styles.statCard}><Statistic title={t('ui.proxyStats.avgDuration')} value={fmtMs(s.avgMs)} /></Card>
         </div>
         <div className={styles.topRow}>
-          <Table
-            title={() => t('ui.proxyStats.slowest')}
-            dataSource={data.slowest ? [data.slowest] : []}
-            rowKey="ts"
-            size="small"
-            pagination={false}
-            className={styles.table}
-            columns={[
-              { title: t('ui.proxyStats.colPath'), dataIndex: 'path', key: 'path', ellipsis: true },
-              { title: t('ui.proxyStats.colModel'), dataIndex: 'model', key: 'model', ellipsis: true },
-              { title: t('ui.proxyStats.attempts'), dataIndex: 'attempts', key: 'attempts' },
-              { title: t('ui.proxyStats.durationAnalysis'), dataIndex: 'duration_ms', key: 'dur', render: fmtMs },
-            ]}
-          />
-          <Table
-            title={() => t('ui.proxyStats.fastest')}
-            dataSource={data.fastest ? [data.fastest] : []}
-            rowKey="ts"
-            size="small"
-            pagination={false}
-            className={styles.table}
-            columns={[
-              { title: t('ui.proxyStats.colPath'), dataIndex: 'path', key: 'path', ellipsis: true },
-              { title: t('ui.proxyStats.colModel'), dataIndex: 'model', key: 'model', ellipsis: true },
-              { title: t('ui.proxyStats.attempts'), dataIndex: 'attempts', key: 'attempts' },
-              { title: t('ui.proxyStats.durationAnalysis'), dataIndex: 'duration_ms', key: 'dur', render: fmtMs },
-            ]}
-          />
+          <DurationRecordTable title={t('ui.proxyStats.slowest')} record={data.slowest} />
+          <DurationRecordTable title={t('ui.proxyStats.fastest')} record={data.fastest} />
         </div>
       </Card>
 
-      {/* By path */}
+      {/* §By Dimension */}
       {data.byPath && data.byPath.length > 0 && (
         <Card title={t('ui.proxyStats.byPath')} className={styles.section}>
-          <Table
-            dataSource={data.byPath}
-            rowKey="path"
-            size="small"
-            pagination={false}
-            className={styles.table}
+          <Table dataSource={data.byPath} rowKey="path" size="small" pagination={false}
             columns={[
               { title: t('ui.proxyStats.colPath'), dataIndex: 'path', key: 'path', ellipsis: true },
               { title: t('ui.proxyStats.totalRequests'), dataIndex: 'requests', key: 'requests' },
               { title: t('ui.proxyStats.retries'), dataIndex: 'retries', key: 'retries' },
               { title: t('ui.proxyStats.downstreamAvailability'), dataIndex: 'availabilityPct', key: 'avail', render: v => `${v}%` },
-            ]}
-          />
+              { title: t('ui.proxyStats.dominantFail'), key: 'domFail', render: (_, r) => dominantFailCell(r) || '-' },
+            ]} />
         </Card>
       )}
-
-      {/* By proxy profile */}
       {data.byProfile && data.byProfile.length > 0 && (
         <Card title={t('ui.proxyStats.byProfile')} className={styles.section}>
-          <Table
-            dataSource={data.byProfile}
-            rowKey="profile_id"
-            size="small"
-            pagination={false}
-            className={styles.table}
+          <Table dataSource={data.byProfile} rowKey="profile_id" size="small" pagination={false}
             columns={[
               { title: t('ui.proxyStats.byProfile'), dataIndex: 'profile_name', key: 'profile_name' },
               { title: t('ui.proxyStats.totalRequests'), dataIndex: 'requests', key: 'requests' },
               { title: t('ui.proxyStats.retries'), dataIndex: 'retries', key: 'retries' },
               { title: t('ui.proxyStats.upstreamAvailability'), dataIndex: 'upstreamAvailabilityPct', key: 'upAvail', render: v => `${v}%` },
               { title: t('ui.proxyStats.downstreamAvailability'), dataIndex: 'availabilityPct', key: 'dsAvail', render: v => `${v}%` },
+              { title: t('ui.proxyStats.dominantFail'), key: 'domFail', render: (_, r) => dominantFailCell(r) || '-' },
               { title: t('ui.proxyStats.p95Duration'), dataIndex: 'p95Ms', key: 'p95', render: fmtMs },
-            ]}
-          />
+            ]} />
         </Card>
       )}
 
-      {/* Recent error records */}
+      {/* §Recent Errors */}
       <Card title={t('ui.proxyStats.recentErrors')} className={styles.section}>
-        <Table
-          dataSource={recentRecords}
-          rowKey="ts"
-          size="small"
-          pagination={{ pageSize: 20, size: 'small' }}
-          className={styles.table}
-          scroll={{ x: 'max-content' }}
+        <Table dataSource={recentRecords} rowKey="ts" size="small" pagination={{ pageSize: 20, size: 'small' }} scroll={{ x: 'max-content' }}
           columns={[
             { title: t('ui.proxyStats.colTime'), dataIndex: 'ts', key: 'ts', width: 180, ellipsis: true, render: v => v ? new Date(v).toLocaleString() : '-' },
             { title: t('ui.proxyStats.colMethod'), dataIndex: 'method', key: 'method', width: 70 },
@@ -259,21 +239,36 @@ export default function ProxyStatsPage({ embedded }) {
             { title: t('ui.proxyStats.colStatus'), dataIndex: 'final_status', key: 'status', width: 70, render: v => <Tag color={statusColor(v)}>{v || '-'}</Tag> },
             { title: t('ui.proxyStats.attempts'), dataIndex: 'attempts', key: 'attempts', width: 80 },
             { title: t('ui.proxyStats.retries'), dataIndex: 'retries', key: 'retries', width: 80 },
-            { title: t('ui.proxyStats.durationAnalysis'), dataIndex: 'duration_ms', key: 'dur', width: 100, render: fmtMs },
+            { title: t('ui.proxyStats.colDuration'), dataIndex: 'duration_ms', key: 'dur', width: 100, render: fmtMs },
             { title: t('ui.proxyStats.retryCodes'), dataIndex: 'retry_codes', key: 'rc', width: 120, render: v => v && v.length ? v.map(c => <Tag key={c} color={statusColor(c)}>{c}</Tag>) : '-' },
-          ]}
-        />
+          ]} />
       </Card>
     </div>
   );
 }
 
-function ProxyStatsHeader({ onRefresh, autoRefresh, setAutoRefresh }) {
+// Slowest/fastest single-record table — the two share identical columns, only the
+// title and source record differ. Extracted so the column shape lives in one place.
+function DurationRecordTable({ title, record }) {
+  return (
+    <Table
+      title={() => title}
+      dataSource={record ? [record] : []}
+      rowKey="ts" size="small" pagination={false}
+      columns={[
+        { title: t('ui.proxyStats.colPath'), dataIndex: 'path', key: 'path', ellipsis: true },
+        { title: t('ui.proxyStats.colModel'), dataIndex: 'model', key: 'model', ellipsis: true },
+        { title: t('ui.proxyStats.attempts'), dataIndex: 'attempts', key: 'attempts' },
+        { title: t('ui.proxyStats.colDuration'), dataIndex: 'duration_ms', key: 'dur', render: fmtMs },
+      ]}
+    />
+  );
+}
+
+function DashboardHeader({ onRefresh, autoRefresh, setAutoRefresh }) {
   return (
     <div className={styles.header}>
-      <Space>
-        <h2 className={styles.title}>{t('ui.proxyStats.title')}</h2>
-      </Space>
+      <h2 className={styles.title}>{t('ui.proxyStats.title')}</h2>
       <Space>
         <span>{t('ui.proxyStats.autoRefresh')}</span>
         <Switch checked={autoRefresh} onChange={setAutoRefresh} size="small" aria-label={t('ui.proxyStats.autoRefresh')} />

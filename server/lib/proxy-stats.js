@@ -201,10 +201,15 @@ export function computeStreak(records) {
   return { current: { type: curType || 'success', count: curCount }, worstFailure };
 }
 
-// Retry-burden bucket definitions: turns the raw retry-count distribution into
-// actionable buckets (0 / 1-5 / 6-20 / 21-50 / >50). Aligned with llm-retry-proxy's
-// renderBurdenChart buckets. `key` is the stable i18n id (ui.proxyStats.retryBurdenBuckets.<key>).
-const RETRY_BURDEN_BUCKETS = [
+/**
+ * Retry-burden bucket definitions: turns the raw retry-count distribution into
+ * actionable buckets (0 / 1-5 / 6-20 / 21-50 / >50). Aligned with llm-retry-proxy's
+ * renderBurdenChart buckets. `key` is the stable i18n id (ui.proxyStats.retryBurdenBuckets.<key>).
+ *
+ * Exposed for tests that want to assert the frozen bucket contract without re-typing
+ * the boundaries.
+ */
+export const RETRY_BURDEN_BUCKETS = [
   { key: '0',      range: [0, 0] },
   { key: '1_5',    range: [1, 5] },
   { key: '6_20',   range: [6, 20] },
@@ -212,20 +217,12 @@ const RETRY_BURDEN_BUCKETS = [
   { key: 'over50', range: [51, Infinity] },
 ];
 
-/**
- * Bucket the per-request retry counts into the 5-bucket burden distribution.
- * @param {object[]} sorted Time-sorted records (only `retries` field is read)
- * @returns {Array<{key:string, range:number[], count:number}>} 5 buckets, always present
- */
-function computeRetryBurden(sorted) {
-  const counts = RETRY_BURDEN_BUCKETS.map(b => ({ ...b, count: 0 }));
-  for (const r of sorted) {
-    const retries = Number(r.retries) || 0;
-    for (const b of counts) {
-      if (retries >= b.range[0] && retries <= b.range[1]) { b.count++; break; }
-    }
+// Bump the bucket whose range covers `retries`. Buckets are ordered low→high
+// and non-overlapping, so the first match wins; returns void (mutates `counts`).
+function bumpBurden(counts, retries) {
+  for (const b of counts) {
+    if (retries >= b.range[0] && retries <= b.range[1]) { b.count++; return; }
   }
-  return counts;
 }
 
 /**
@@ -265,6 +262,8 @@ export function aggregateRecords(records, opts = {}) {
   const byModelMap = new Map();
   const byPathMap = new Map();
   const byProfileMap = new Map();
+  // Retry-burden buckets bumped inline during the main loop (avoids a second O(n) pass).
+  const retryBurdenCounts = RETRY_BURDEN_BUCKETS.map(b => ({ ...b, count: 0 }));
   let slowest = null;
   let fastest = null;
 
@@ -281,6 +280,7 @@ export function aggregateRecords(records, opts = {}) {
     }
     durations.push(dur);
     retryDist.set(retries, (retryDist.get(retries) || 0) + 1);
+    bumpBurden(retryBurdenCounts, retries);
     for (const c of (r.retry_codes || [])) {
       retryCodeCounts.set(c, (retryCodeCounts.get(c) || 0) + 1);
     }
@@ -312,7 +312,6 @@ export function aggregateRecords(records, opts = {}) {
   const upstreamAvail = total ? round2(firstOk / total * 100) : 0;
   const downstreamAvail = total ? round2(succeeded / total * 100) : 0;
   const streak = computeStreak(sorted);
-  const retryBurden = computeRetryBurden(sorted);
 
   return {
     summary: {
@@ -334,11 +333,11 @@ export function aggregateRecords(records, opts = {}) {
     },
     byModel: mapToSortedArray(byModelMap, 'model'),
     byPath: mapToSortedArray(byPathMap, 'path').slice(0, 10), // Top 10 path
-    byProfile: mapToSortedArrayWithExtra(byProfileMap, 'profile_id', 'profile_name'),
+    byProfile: mapToSortedArray(byProfileMap, 'profile_id', 'profile_name'),
     retryDistribution: [...retryDist.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([retries, count]) => ({ retries, count })),
-    retryBurden,
+    retryBurden: retryBurdenCounts,
     retryCodes: [...retryCodeCounts.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([code, count]) => ({ code, count })),
@@ -381,7 +380,10 @@ function finalizeRetryCodes(b) {
   };
 }
 
-function mapToSortedArray(map, keyName) {
+// Flatten a dimension's bucket map into a sorted entry array.
+// `extraName` (optional, used by byProfile) emits an extra `[extraName]: bucket[extraName] || k`
+// field — the only structural difference between the byModel/byPath and byProfile outputs.
+function mapToSortedArray(map, keyName, extraName) {
   const arr = [];
   for (const [k, b] of map.entries()) {
     b.durations.sort((a, c) => a - c);
@@ -400,33 +402,7 @@ function mapToSortedArray(map, keyName) {
       upstreamAvailabilityPct: b.requests ? round2(b.firstOk / b.requests * 100) : 0,
       p95Ms: round3(percentile(b.durations, 0.95)),
     };
-    arr.push(entry);
-  }
-  arr.sort((a, b) => b.requests - a.requests);
-  return arr;
-}
-
-// byProfile-specific: the bucket carries an extra profile_name field, included in the output
-function mapToSortedArrayWithExtra(map, keyName, extraName) {
-  const arr = [];
-  for (const [k, b] of map.entries()) {
-    b.durations.sort((a, c) => a - c);
-    const fin = finalizeRetryCodes(b);
-    const entry = {
-      [keyName]: k,
-      [extraName]: b[extraName] || k,
-      requests: b.requests,
-      retries: b.retries,
-      succeeded: b.succeeded,
-      firstOk: b.firstOk,
-      failed: b.failed,
-      retryCodeCounts: fin.retryCodeCounts,
-      dominantFailStatus: fin.dominantFailStatus,
-      dominantFailCount: fin.dominantFailCount,
-      availabilityPct: b.requests ? round2(b.succeeded / b.requests * 100) : 0,
-      upstreamAvailabilityPct: b.requests ? round2(b.firstOk / b.requests * 100) : 0,
-      p95Ms: round3(percentile(b.durations, 0.95)),
-    };
+    if (extraName) entry[extraName] = b[extraName] || k;
     arr.push(entry);
   }
   arr.sort((a, b) => b.requests - a.requests);
