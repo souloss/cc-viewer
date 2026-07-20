@@ -4,6 +4,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -435,8 +436,9 @@ describe('readCcSwitchProviders (error surfacing)', { skip: !hasSqlite }, () => 
 // discard the corrupt journal to open the DB, which is a write — refused under readOnly:true.
 // The fix escalates to a read-write open (query-only locked) on that specific error, lets SQLite
 // recover, then reads. Reproduced deterministically by planting a non-journal garbage file next
-// to an otherwise-valid DB. (A *valid* hot journal does NOT trigger this — node:sqlite skips it —
-// only a malformed one does, so the test plants garbage bytes.)
+// to an otherwise-valid DB. (A *valid* hot journal held by a running cc-switch is a SEPARATE
+// failure mode — SQLITE_BUSY "database is locked" — covered by the suite below this one; here we
+// plant garbage bytes so the recovery path for a malformed journal is exercised in isolation.)
 describe('readCcSwitchProviders (malformed journal recovery)', { skip: !hasSqlite }, () => {
   let tmpDir;
   before(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-ccswitch-journal-')); });
@@ -473,5 +475,109 @@ describe('readCcSwitchProviders (malformed journal recovery)', { skip: !hasSqlit
     const { profiles, error } = await readCcSwitchProviders(dbPath);
     assert.equal(error, null);
     assert.ok(profiles.length === 1 && profiles[0].name === 'xfyun');
+  });
+});
+
+// Regression: a *valid* hot journal held by a running cc-switch (a separate process in
+// BEGIN IMMEDIATE, the real "cc-switch is open" state) makes the read-only connection's
+// first query throw SQLITE_BUSY ("database is locked") — NOT SQLITE_READONLY, so the
+// malformed-journal escalation path does not catch it and it surfaces as the opaque
+// `query failed: database is locked`. The fix must detect BUSY on the main read path
+// (both the read-only open and the providers query) and surface a localized-friendly
+// "db is locked; retry shortly" instead of the raw `query failed:` wrapper.
+// Reproduced deterministically with a child process holding an IMMEDIATE write lock —
+// a same-process writer does NOT contend (SQLite's per-process cache), so a real
+// cross-process holder is required to mirror cc-switch itself.
+describe('readCcSwitchProviders (cc-switch running, valid hot journal)', { skip: !hasSqlite }, () => {
+  let tmpDir;
+  before(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-ccswitch-busy-')); });
+  after(() => { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+  // Spawn a child node process that opens the DB and holds BEGIN EXCLUSIVE (without
+  // committing) until told to release. cc-switch runs as a separate process holding an
+  // EXCLUSIVE write lock during a provider switch; BEGIN IMMEDIATE from a separate process
+  // does NOT block read-only readers (SQLite serves them the pre-transaction snapshot), so
+  // only EXCLUSIVE reproduces the real "cc-switch is open" contention that throws BUSY.
+  function holdLock(dbPath) {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(${JSON.stringify(dbPath)});
+      db.exec('PRAGMA journal_mode=DELETE');
+      db.exec('BEGIN EXCLUSIVE');
+      db.prepare("INSERT INTO providers(app_type,name,settings_config,is_current,sort_index) VALUES('claude','hold','{}',0,1)").run();
+      process.stdout.write('LOCKED\\n');
+      // hold until stdin closes (parent kills us)
+      process.stdin.on('end', () => { try { db.exec('ROLLBACK'); } catch {} try { db.close(); } catch {} });
+      // keep alive
+      setInterval(() => {}, 60000);
+    `], { stdio: ['pipe', 'pipe', 'inherit'] });
+    return new Promise((resolve, reject) => {
+      child.stdout.once('data', (d) => { if (d.toString().includes('LOCKED')) resolve(child); });
+      child.once('error', reject);
+      setTimeout(() => reject(new Error('lock-holder child did not signal LOCKED in time')), 5000);
+    });
+  }
+
+  it('cc-switch 运行中持写锁时，只读查询撞 BUSY → 报友好提示而非 query failed: ...locked', async () => {
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const dbPath = join(tmpDir, 'cc-switch-held.db');
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode=DELETE');
+    db.exec('CREATE TABLE providers(id INTEGER PRIMARY KEY, app_type TEXT, name TEXT, settings_config TEXT, is_current INTEGER, sort_index INTEGER)');
+    db.exec(`INSERT INTO providers(app_type,name,settings_config,is_current,sort_index) VALUES('claude','xfyun','{"env":{"ANTHROPIC_BASE_URL":"https://x","ANTHROPIC_AUTH_TOKEN":"tok"}}',1,0)`);
+    db.close();
+
+    const child = await holdLock(dbPath); // a SEPARATE process now holds BEGIN IMMEDIATE
+    try {
+      const { profiles, error } = await readCcSwitchProviders(dbPath);
+      // Must surface a friendly, localized-keyed "locked" message — NOT the raw
+      // `query failed: database is locked` wrapper that the catch-all at the bottom emits.
+      assert.ok(error, 'expected a lock error to be surfaced when cc-switch is running');
+      assert.match(error, /locked|busy/i, `expected a lock-related message, got: ${error}`);
+      assert.ok(!/query failed:/.test(error), `must NOT surface the raw "query failed:" wrapper (got: ${error})`);
+      assert.deepEqual(profiles, []);
+    } finally {
+      child.stdin.end();
+      try { child.kill('SIGTERM'); } catch {}
+      // give the child a moment to ROLLBACK + close so the tmpdir cleanup doesn't race
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  });
+
+  it('cc-switch 短暂写锁（< backoff）→ 自动重试后照常读出 providers，无错误', async () => {
+    // cc-switch's write transactions are usually short (tens of ms). The fix's single retry
+    // after a 200ms backoff must recover and return the providers — not surface a lock error —
+    // when the holder releases before the retry.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const dbPath = join(tmpDir, 'cc-switch-transient.db');
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode=DELETE');
+    db.exec('CREATE TABLE providers(id INTEGER PRIMARY KEY, app_type TEXT, name TEXT, settings_config TEXT, is_current INTEGER, sort_index INTEGER)');
+    db.exec(`INSERT INTO providers(app_type,name,settings_config,is_current,sort_index) VALUES('claude','xfyun','{"env":{"ANTHROPIC_BASE_URL":"https://x","ANTHROPIC_AUTH_TOKEN":"tok"}}',1,0)`);
+    db.close();
+
+    // Holder grabs EXCLUSIVE, holds ~80ms (< the 200ms backoff), then releases. The import's
+    // first read throws BUSY; by the retry (200ms later) the lock is gone → read succeeds.
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(${JSON.stringify(dbPath)});
+      db.exec('PRAGMA journal_mode=DELETE');
+      db.exec('BEGIN EXCLUSIVE');
+      db.prepare("INSERT INTO providers(app_type,name,settings_config,is_current,sort_index) VALUES('claude','hold','{}',0,1)").run();
+      process.stdout.write('LOCKED\\n');
+      setTimeout(() => { try { db.exec('ROLLBACK'); } catch {} db.close(); }, 80);
+    `], { stdio: ['pipe', 'pipe', 'inherit'] });
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', (d) => { if (d.toString().includes('LOCKED')) resolve(); });
+      child.once('error', reject);
+      setTimeout(() => reject(new Error('lock-holder did not signal LOCKED')), 5000);
+    });
+
+    const { profiles, error } = await readCcSwitchProviders(dbPath);
+    assert.equal(error, null, `expected recovery after retry, got error: ${error}`);
+    assert.ok(Array.isArray(profiles) && profiles.length === 1, `expected 1 profile, got: ${JSON.stringify(profiles)}`);
+    assert.equal(profiles[0].name, 'xfyun');
+    try { child.stdin.end(); } catch {}
+    await new Promise((r) => { child.once('exit', () => r()); setTimeout(() => { try { child.kill('SIGKILL'); } catch {}; r(); }, 2000); });
   });
 });
