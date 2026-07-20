@@ -496,9 +496,16 @@ export async function executeRequest({ url, fetchOptions, retryConfig, ctx }) {
   // headers well past 10s — so with retry disabled we must not introduce a new
   // failure mode. The timeout applies only when a retry mode is active.
   const effectiveConnectTimeoutMs = cfg.mode === 'off' ? 0 : cfg.connectTimeoutMs;
-  // streamIdleTimeoutMs applies to streaming responses in ALL modes (including off):
-  // even with retry disabled, a hung streaming body must not pin sockets forever.
-  const effectiveStreamIdleMs = cfg.streamIdleTimeoutMs > 0 ? cfg.streamIdleTimeoutMs : 0;
+  // streamIdleTimeoutMs is gated to retry modes only (NOT off), mirroring the
+  // connectTimeoutMs off-exclusion above. The watchdog wraps response.body in a
+  // TransformStream, but the interceptor (server/interceptor.js) already
+  // reconstructs response.body via getReader() + a new ReadableStream for
+  // logging/live-streaming; under concurrent load the watchdog's pipeThrough
+  // races that reconstruction and surfaces as a spurious `fetch failed` →
+  // status 0 → 502. off mode is the legacy pass-through path (no retry), so the
+  // watchdog's value (bound idle on a hung stream) is marginal here and the
+  // interceptor already observes the stream — serial/race/stagger keep the guard.
+  const effectiveStreamIdleMs = cfg.mode === 'off' ? 0 : (cfg.streamIdleTimeoutMs > 0 ? cfg.streamIdleTimeoutMs : 0);
   const commonCtx = { dispatcher, connectTimeoutMs: effectiveConnectTimeoutMs, streamIdleTimeoutMs: effectiveStreamIdleMs };
 
   if (cfg.mode === 'off' || cfg.mode === 'serial') {
