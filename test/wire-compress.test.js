@@ -24,6 +24,11 @@ function mockRes() {
 
 const reqWith = (acceptEncoding) => ({ headers: acceptEncoding === undefined ? {} : { 'accept-encoding': acceptEncoding } });
 const tick = () => new Promise((resolve) => setImmediate(() => setImmediate(resolve)));
+// Wall-clock wait (tick-count caps flake under parallel-suite CPU load).
+async function until(cond, ms = 10000) {
+  const t0 = Date.now();
+  while (!cond() && Date.now() - t0 < ms) await tick();
+}
 
 /** Streaming decode of a (possibly trailer-less) brotli buffer. */
 async function decodePartial(buf) {
@@ -107,11 +112,15 @@ describe('wire-compress streaming', () => {
     sseWrite(res, 'event: load_chunk\ndata: [');
     sseWrite(res, '{"a":1}');
     sseWrite(res, ']\n\n');
-    // flush lands a few turns after the scheduled setImmediate — poll, bounded
+    // flush lands a few turns after the scheduled setImmediate — poll, wall-clock bounded.
+    // The cold-load flush timing is the flake trigger, so guard the first compressed byte
+    // with until() (wall-clock) rather than a fixed iteration cap; then retry the single-shot
+    // decode a bounded number of ticks until it yields the full frame.
+    await until(() => res.compressed().length > 0);
     let decoded = '';
-    for (let i = 0; i < 200 && !decoded; i++) {
-      await tick();
-      if (res.compressed().length > 0) decoded = await decodePartial(res.compressed());
+    for (let attempt = 0; attempt < 50 && !decoded; attempt++) {
+      decoded = await decodePartial(res.compressed());
+      if (!decoded) await tick();
     }
     assert.equal(decoded, 'event: load_chunk\ndata: [{"a":1}]\n\n');
   });

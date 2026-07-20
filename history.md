@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- fix(test): **wall-clock-bounded brotli decode polls + best-effort rmSync retry** — eliminates the nondeterministic brotli/SSE-compression and portsBusy CI flakes that kept `main`'s CI chronically red (a different subtest failed each run). `decodeBr` (`test/sse-compression.test.js`) and the cold-load flush poll (`test/wire-compress.test.js`) used fixed-iteration `for` loops with `await tick()` and no wall-clock deadline; under CI's parallel-suite CPU load a single `setImmediate` often didn't drain the async `brotliDecompress` `'data'` event before the cap was exhausted, yielding an empty decoded string. Both now poll on wall-clock time via the existing `until(cond, ms)` pattern. Separately, `rmSync(tmpDir, {recursive:true, force:true})` in `after` hooks threw `ENOTEMPTY` racing server.js's async log-handle teardown (`force:true` suppresses `ENOENT` but not `ENOTEMPTY`/`EBUSY`); a new `test/_helpers/rm-sync.mjs` (`rmRoulette`) retries on `ENOTEMPTY`/`EBUSY` and swallows on final failure (a leftover tmpdir is harmless). Applied to the two true-race instances (`server-ports-busy`, `branch-server`); the 16 fixed-`setTimeout`-delay band-aids are left untouched (not currently red).
+
 ## 1.7.5 (2026-07-18)
 
 - ui(proxy): **fuse retry config and stats into a unified split-page** — `RetryConfigForm` extracted from RetryConfigModal as inline component; `UnifiedProxyRetryPage` with left config / right stats panels (independent scroll); recent records table filtered to errors only. Shared `isProxyMode()` utility eliminates duplicated proxy-detection logic. Proxy stats toolbar/sidebar buttons removed; unified page now reachable via hamburger menu. P1–P2 code-review fixes applied.

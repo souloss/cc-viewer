@@ -63,19 +63,22 @@ async function until(cond, ms = 10000) {
   while (!cond() && Date.now() - t0 < ms) await tick();
 }
 
-/** Streaming-decode a (possibly unterminated) brotli SSE body; poll until `until` matches. */
-async function decodeBr(res, until) {
+/** Streaming-decode a (possibly unterminated) brotli SSE body; poll until `cond` matches (wall-clock bounded). */
+async function decodeBr(res, cond) {
   const d = zlib.createBrotliDecompress();
   const out = [];
   d.on('data', (c) => out.push(c));
   let fed = 0;
-  for (let i = 0; i < 500; i++) {
+  // Feed all available chunks, then poll on wall-clock time. A tick-count cap flakes
+  // under parallel-suite CPU load: a single setImmediate may not drain the async
+  // 'data' event before the cap is exhausted, yielding an empty decoded string.
+  let text = '';
+  await until(() => {
     while (fed < res.chunks.length) d.write(res.chunks[fed++]);
-    await tick();
-    const text = Buffer.concat(out).toString();
-    if (!until || until(text)) return text;
-  }
-  return Buffer.concat(out).toString();
+    text = Buffer.concat(out).toString();
+    return !cond || cond(text);
+  });
+  return text;
 }
 
 let events, requests, localLog, sendToClients, interceptor;

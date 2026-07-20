@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { rmRoulette } from './_helpers/rm-sync.mjs';
 
 // ── 必须在任何拉起 findcc.js 的 import 之前设置 ──
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-branch-srv-'));
@@ -882,7 +883,7 @@ export default {
 describeCli('server.js turn-end 状态机 / SDK export 分支', { concurrency: false }, () => {
   let mod;
   before(async () => { mod = await import('../server/server.js'); });
-  after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+  after(async () => { await rmRoulette(tmpDir); }); // best-effort: server.js log handles close async → ENOTEMPTY race
 
   it('__testing namespace 在 NODE_ENV=test 下为真实实现（非 frozen no-op）', () => {
     assert.ok(mod.__testing);

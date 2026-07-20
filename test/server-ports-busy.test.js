@@ -12,9 +12,10 @@ import { describe, it, before, after } from 'node:test';
 import { describeCli } from './_helpers/cli-tier.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { rmRoulette } from './_helpers/rm-sync.mjs';
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'ccv-ports-busy-'));
 mkdirSync(join(tmpDir, 'logs'), { recursive: true });
@@ -49,7 +50,7 @@ describeCli('server.js startViewer exhausts the port range (portsBusy)', { concu
 
   after(async () => {
     await new Promise((resolve) => { try { squatter.close(() => resolve()); } catch { resolve(); } });
-    rmSync(tmpDir, { recursive: true, force: true });
+    await rmRoulette(tmpDir); // best-effort: server.js log handles close async → ENOTEMPTY race
   });
 
   // ── 835-839：唯一端口被占 → probe connect 成功 → tryListen(port+1) → >MAX → resolve(null) ──
