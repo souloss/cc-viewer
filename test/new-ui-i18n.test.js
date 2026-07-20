@@ -34,6 +34,17 @@ const KEYS = [
   'ui.proxyStats.tabStats',  // 代理重试配置与统计面板「统计」tab
   'ui.retryConfig.groupStrategy',  // 代理重试配置「策略配置」分组标题
   'ui.retryConfig.groupExecution', // 代理重试配置「执行参数」分组标题
+  // retry-burden 5-bucket distribution labels (retryStatsHelpers.js burdenBucketLabel):
+  'ui.proxyStats.retryBurdenBuckets.0',
+  'ui.proxyStats.retryBurdenBuckets.1_5',
+  'ui.proxyStats.retryBurdenBuckets.6_20',
+  'ui.proxyStats.retryBurdenBuckets.21_50',
+  'ui.proxyStats.retryBurdenBuckets.over50',
+  // retry-mode Segmented labels (RetryConfigModal.jsx mode options):
+  'ui.retryConfig.modeLabel.off',
+  'ui.retryConfig.modeLabel.serial',
+  'ui.retryConfig.modeLabel.race',
+  'ui.retryConfig.modeLabel.stagger',
 ];
 
 describe('new UI key i18n coverage', () => {

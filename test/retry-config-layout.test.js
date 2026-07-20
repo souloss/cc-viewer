@@ -55,6 +55,47 @@ describe('RetryConfigForm layout', () => {
   });
 });
 
+describe('RetryConfigForm row geometry', () => {
+  // The label+input cluster geometry is the whole point of this form's look:
+  // a fixed-width right-aligned label column, a capped input cell, the whole
+  // cluster horizontally centered inside the group box, and a mobile restack
+  // to a single column at narrow viewports. Pinning these as assertions stops
+  // a refactor from silently widening the label, dropping the centering, or
+  // breaking the mobile single-column restack.
+
+  it('stretches the two group boxes to equal height (align-items: stretch on .configGrid)', () => {
+    assert.match(CSS, /\.configGrid\s*\{[\s\S]*?align-items:\s*stretch/s);
+  });
+
+  it('horizontally centers the label+input cluster inside each row (justify-content: center on .row)', () => {
+    assert.match(CSS, /\.row\s*\{[\s\S]*?justify-content:\s*center/s);
+  });
+
+  it('pins the label column to a fixed 150px width (right-aligned down the rows)', () => {
+    assert.match(CSS, /\.label\s*\{[\s\S]*?width:\s*150px/s);
+  });
+
+  it('caps the input cell at 320px so the cluster stays compact in a wide panel', () => {
+    assert.match(CSS, /\.inputCell\s*\{[\s\S]*?width:\s*320px/s);
+  });
+
+  it('restacks the row to a single column under 640px (label above input, both full width)', () => {
+    // The mobile media query must switch .row to column direction, stretch the
+    // cells, left-align them, AND release the fixed label width to auto so the
+    // label no longer holds a 150px column on a narrow screen.
+    const mobileIdx = CSS.indexOf('@media (max-width: 640px)');
+    assert.ok(mobileIdx >= 0, 'expected a @media (max-width: 640px) mobile restack block');
+    const mobileBlock = CSS.slice(mobileIdx);
+    assert.match(mobileBlock, /\.row\s*\{[\s\S]*?flex-direction:\s*column/s);
+    assert.match(mobileBlock, /\.row\s*\{[\s\S]*?align-items:\s*stretch/s);
+    assert.match(mobileBlock, /\.row\s*\{[\s\S]*?justify-content:\s*flex-start/s);
+    assert.match(mobileBlock, /\.label\s*\{[\s\S]*?width:\s*auto/s);
+    assert.match(mobileBlock, /\.label\s*\{[\s\S]*?justify-content:\s*flex-start/s);
+    assert.match(mobileBlock, /\.label\s*\{[\s\S]*?text-align:\s*left/s);
+    assert.match(mobileBlock, /\.inputCell\s*\{[\s\S]*?width:\s*auto/s);
+  });
+});
+
 describe('handleRetryConfigChange save contract', () => {
   it('checks r.ok before decoding JSON so a rejected POST (4xx/5xx + JSON body) rolls back', () => {
     // The server returns 400/403 + a JSON body on rejection. Without an r.ok
