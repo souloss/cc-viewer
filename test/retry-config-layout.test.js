@@ -10,6 +10,7 @@ const CSS = readFileSync(join(ROOT, 'src/components/settings/RetryConfigModal.mo
 const PANEL_JSX = readFileSync(join(ROOT, 'src/components/proxy-stats/ProxyStatsModal.jsx'), 'utf8');
 const SHELL_CSS = readFileSync(join(ROOT, 'src/components/proxy-stats/ProxyStatsModal.module.css'), 'utf8');
 const HEADER_JSX = readFileSync(join(ROOT, 'src/components/dashboard/AppHeader.jsx'), 'utf8');
+const APPBASE_JSX = readFileSync(join(ROOT, 'src/AppBase.jsx'), 'utf8');
 
 describe('RetryConfigForm layout', () => {
   it('groups strategy controls separately from execution parameters', () => {
@@ -51,5 +52,29 @@ describe('RetryConfigForm layout', () => {
     assert.match(HEADER_JSX, /label:\s*t\('ui\.proxyStats\.title'\)/);
     assert.match(HEADER_JSX, /onClick:\s*\(\)\s*=>\s*this\.props\.onToggleProxyStats\?\.\(\)/);
     assert.doesNotMatch(HEADER_JSX, /RetryConfigModal|retryConfigModalVisible/);
+  });
+});
+
+describe('handleRetryConfigChange save contract', () => {
+  it('checks r.ok before decoding JSON so a rejected POST (4xx/5xx + JSON body) rolls back', () => {
+    // The server returns 400/403 + a JSON body on rejection. Without an r.ok
+    // guard, r.json() would resolve, the .catch (which rolls back the optimistic
+    // update) would never fire, and the form would report a false "saved".
+    // Pin the guard: an r.ok check MUST precede the .json() call.
+    const okIdx = APPBASE_JSX.search(/if\s*\(\s*!r\.ok\s*\)/);
+    const jsonIdx = APPBASE_JSX.search(/return\s+r\.json\s*\(\s*\)/);
+    assert.ok(okIdx >= 0, 'handleRetryConfigChange must guard with `if (!r.ok)` before decoding');
+    assert.ok(jsonIdx >= 0, 'handleRetryConfigChange must still decode JSON (after the ok guard)');
+    assert.ok(okIdx < jsonIdx, 'the r.ok check must come before r.json()');
+  });
+
+  it('keeps comments English-only (CLAUDE.md) inside handleRetryConfigChange', () => {
+    const start = APPBASE_JSX.indexOf('handleRetryConfigChange =');
+    const end = APPBASE_JSX.indexOf('\n  };', start);
+    assert.ok(start >= 0 && end > start, 'handleRetryConfigChange block not found');
+    const block = APPBASE_JSX.slice(start, end);
+    // No CJK characters in inline comments within the method body.
+    assert.doesNotMatch(block, /[一-鿿㐀-䶿]/,
+      'handleRetryConfigChange must not contain Chinese inline comments');
   });
 });

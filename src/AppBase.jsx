@@ -2101,12 +2101,19 @@ class AppBase extends React.Component {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config }),
     })
-      .then(r => r.json())
-      .then(() => { /* SSE retry_config 会刷新；无需额外处理 */ })
+      .then((r) => {
+        // Check HTTP status BEFORE .json(): a 4xx/5xx with a JSON body (the
+        // server returns 400/403 + JSON on rejection) would otherwise let
+        // r.json() resolve, skip the .catch, and leave the optimistic update
+        // un-rolled-back while the form reports a false "saved".
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(() => { /* SSE retry_config refreshes state; nothing to do here */ })
       .catch((err) => {
-        this.setState({ retryConfig: prev }); // 回滚
+        this.setState({ retryConfig: prev }); // roll back the optimistic update
         message.error(t('ui.retryConfig.saveFail'));
-        throw err; // 让调用方感知失败（不显示假成功、不关闭 Modal）
+        throw err; // let the caller sense the failure (no false success, keep Modal open)
       });
   };
 

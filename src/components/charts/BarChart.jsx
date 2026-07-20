@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import styles from './BarChart.module.css';
+import { foldBars, groupedBarTitle, singleBarTitle } from './barChartHelpers.js';
 
 // Default colors cycle for grouped bars. Maps to the app's REAL semantic
 // tokens (global.css :root) so bars theme correctly in light AND dark mode;
@@ -43,15 +44,10 @@ function BarChart({
   const arr = Array.isArray(data) ? data : [];
 
   // Fold long-tail data into a single "other" (…) bar when maxBars is set.
-  let rows = arr;
-  if (maxBars && arr.length > maxBars) {
-    const head = arr.slice(0, maxBars);
-    const tail = arr.slice(maxBars);
-    const otherCount = tail.reduce((s, d) => s + (grouped
-      ? (d.values || []).reduce((a, b) => a + b, 0)
-      : (d.value || 0)), 0);
-    rows = [...head, { label: '…', value: otherCount, values: [otherCount] }];
-  }
+  // Delegated to foldBars so the fold logic (grouped must sum per-series, not
+  // across series — summing upstream% + downstream% is meaningless and drops a
+  // bar from a group sized off rows[0].values.length) is unit-tested.
+  const rows = foldBars(arr, { maxBars, grouped });
 
   if (!rows || rows.length === 0 || width === 0) {
     return <div ref={wrapRef} className={styles.wrap} style={{ height }} />;
@@ -119,7 +115,9 @@ function BarChart({
                     <g key={bi}>
                       <rect className={styles.bar} x={x} y={y} width={Math.max(1, barW - 1)} height={h}
                         fill={color} rx={1}>
-                        <title>{`${d.label}: ${valueFormatter(v)}`}</title>
+                        <title>{grouped
+                          ? groupedBarTitle(d.label, v, bi, legend, valueFormatter)
+                          : singleBarTitle(d.label, v, valueFormatter)}</title>
                       </rect>
                       {/* Direct value label on single-series bars wide enough to
                           hold it — saves a hover for the common reading path. */}
@@ -161,7 +159,7 @@ function BarChart({
               <text className={styles.hLabel} x={labelW - 4} y={y + rowH / 2 + 3} textAnchor="end">{String(d.label)}</text>
               <rect className={styles.bar} x={labelW} y={y} width={Math.max(1, w)} height={Math.max(2, rowH - 4)}
                 fill={d.color || DEFAULT_COLORS[0]} rx={1}>
-                <title>{`${d.label}: ${valueFormatter(v)}`}</title>
+                <title>{singleBarTitle(d.label, v, valueFormatter)}</title>
               </rect>
               <text className={styles.vValue} x={labelW + w + 4} y={y + rowH / 2 + 3}>{valueFormatter(v)}</text>
             </g>
