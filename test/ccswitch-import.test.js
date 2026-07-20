@@ -428,3 +428,50 @@ describe('readCcSwitchProviders (error surfacing)', { skip: !hasSqlite }, () => 
     assert.ok(error.includes(dbPath), `error should name the resolved db path, got: ${error}`);
   });
 });
+
+// Regression: a malformed leftover rollback journal (cc-switch crashed mid-write, leaving a
+// truncated/corrupt cc-switch.db-journal) makes a read-only SQLite connection fail to open the
+// first query with SQLITE_READONLY ("attempt to write a readonly database"). SQLite needs to
+// discard the corrupt journal to open the DB, which is a write — refused under readOnly:true.
+// The fix escalates to a read-write open (query-only locked) on that specific error, lets SQLite
+// recover, then reads. Reproduced deterministically by planting a non-journal garbage file next
+// to an otherwise-valid DB. (A *valid* hot journal does NOT trigger this — node:sqlite skips it —
+// only a malformed one does, so the test plants garbage bytes.)
+describe('readCcSwitchProviders (malformed journal recovery)', { skip: !hasSqlite }, () => {
+  let tmpDir;
+  before(() => { tmpDir = mkdtempSync(join(tmpdir(), 'ccv-ccswitch-journal-')); });
+  after(() => { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+  it('残留的损坏 journal 不再以 readonly 报错，而是照常读出 providers', async () => {
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const dbPath = join(tmpDir, 'cc-switch.db');
+    // Build a valid cc-switch-shaped DB with one claude provider committed.
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode=DELETE');
+    db.exec('CREATE TABLE providers(id INTEGER PRIMARY KEY, app_type TEXT, name TEXT, settings_config TEXT, is_current INTEGER, sort_index INTEGER)');
+    db.exec(`INSERT INTO providers(app_type,name,settings_config,is_current,sort_index) VALUES('claude','xfyun','{"env":{"ANTHROPIC_BASE_URL":"https://x","ANTHROPIC_AUTH_TOKEN":"tok"}}',1,0)`);
+    db.close();
+    // Plant the locked trigger: a stale -journal file whose bytes are NOT a valid rollback
+    // journal. This is what cc-switch leaves behind when it is killed mid-write (truncated /
+    // torn page, or a partially flushed journal that fails SQLite's header magic check).
+    writeFileSync(dbPath + '-journal', 'NOT A VALID ROLLBACK JOURNAL - GARBAGE BYTES');
+
+    const { profiles, error } = await readCcSwitchProviders(dbPath);
+    assert.equal(error, null, `expected recovery, got error: ${error}`);
+    assert.ok(Array.isArray(profiles) && profiles.length === 1, `expected 1 profile, got: ${JSON.stringify(profiles)}`);
+    assert.equal(profiles[0].name, 'xfyun');
+    assert.ok(profiles[0].apiKey, 'credential should map through');
+    // The malformed journal must be cleaned up as part of recovery (SQLite discards it on the
+    // read-write open), so a subsequent read-only open works without any escalation.
+    assert.ok(!existsSync(dbPath + '-journal'), 'malformed journal should be discarded after recovery');
+  });
+
+  it('recovery 之后用纯只读二次读取也能成功（journal 已清）', async () => {
+    // After the previous test recovered and removed the malformed journal, a plain read-only
+    // open must succeed on its own — proving the fix left the DB in a clean state.
+    const dbPath = join(tmpDir, 'cc-switch.db');
+    const { profiles, error } = await readCcSwitchProviders(dbPath);
+    assert.equal(error, null);
+    assert.ok(profiles.length === 1 && profiles[0].name === 'xfyun');
+  });
+});
